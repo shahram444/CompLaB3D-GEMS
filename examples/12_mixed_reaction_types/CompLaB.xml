@@ -1,0 +1,193 @@
+<?xml version="1.0" ?>
+<!-- =========================================================================
+     CompLB3D EXAMPLE 12  |  COMBINED REACTION TYPES: FBA PLUS HAND WRITTEN KINETICS
+     =========================================================================
+
+     One organism running BOTH a metabolic solver and a hand written rate
+     law, with the two rates added. That is what the combined reaction
+     types are for:
+
+         glpk_and_kinetics        surrogate_and_kinetics
+         cobrapy_and_kinetics
+
+     Flux balance analysis supplies the growth; defineKinetics.hh supplies
+     what the metabolic model does not describe. Here that is MAINTENANCE:
+     a constant per biomass drain on the donor that yields no growth. Real
+     cells pay it and a plain FBA objective does not include it, so the
+     model over predicts growth at low substrate without it.
+
+     THE SIGN DISCIPLINE MATTERS. defineKinetics.hh in this folder writes
+     subsR but deliberately leaves bioR at zero, because growth belongs to
+     the FBA path and writing it in both places would double count. That
+     is the classic mistake with combined types.
+
+     Note also the two separate Vmax tags. <maximum_uptake_flux> is read
+     by the kinetics path in mol per mol cells per second;
+     <fba_maximum_uptake_flux> is read by the metabolic path in
+     mmol/gDW/h. One number cannot satisfy both meanings, so a combined
+     microbe needs both tags.
+     ========================================================================= -->
+<parameters>
+
+    <path>
+        <src_path>src</src_path>
+        <input_path>input</input_path>
+        <output_path>output</output_path>
+    </path>
+
+    <simulation_mode>
+        <biotic_mode>true</biotic_mode>
+        <enable_kinetics>true</enable_kinetics>
+        <enable_abiotic_kinetics>false</enable_abiotic_kinetics>
+        <enable_fba_glpk>true</enable_fba_glpk>
+        <enable_fba_cobrapy>false</enable_fba_cobrapy>
+        <enable_surrogate>false</enable_surrogate>
+        <fba_concentration_basis>free</fba_concentration_basis>
+        <glpk_lpsolver>1</glpk_lpsolver>
+        <enable_validation_diagnostics>true</enable_validation_diagnostics>
+    </simulation_mode>
+
+    <LB_numerics>
+        <domain>
+            <nx>24</nx>
+            <ny>24</ny>
+            <nz>6</nz>
+            <dx>10</dx>
+            <unit>um</unit>
+            <characteristic_length>24</characteristic_length>
+            <filename>geometry.dat</filename>
+            <material_numbers>
+                <pore>2</pore>
+                <solid>0</solid>
+                <bounce_back>1</bounce_back>
+                <microbe0>3</microbe0>
+            </material_numbers>
+        </domain>
+
+        <delta_P>1e-6</delta_P>
+        <Peclet>0</Peclet>
+        <tau>0.8</tau>
+        <track_performance>false</track_performance>
+
+        <iteration>
+            <ns_max_iT1>20000</ns_max_iT1>
+            <ns_max_iT2>2000</ns_max_iT2>
+            <ns_converge_iT1>1e-6</ns_converge_iT1>
+            <ns_converge_iT2>1e-4</ns_converge_iT2>
+            <ns_update_interval>10</ns_update_interval>
+            <ade_update_interval>1</ade_update_interval>
+            <ade_max_iT>500</ade_max_iT>
+            <ade_converge_iT>1e-8</ade_converge_iT>
+        </iteration>
+    </LB_numerics>
+
+    <chemistry>
+        <number_of_substrates>3</number_of_substrates>
+        <fix_concentration>no no no</fix_concentration>
+        <fix_lower_bounds>no no no</fix_lower_bounds>
+
+        <substrate0>
+            <name_of_substrates>S</name_of_substrates>
+            <initial_concentration>1.0</initial_concentration>
+            <substrate_diffusion_coefficients>
+                <in_pore>5e-10</in_pore>
+                <in_biofilm>5e-10</in_biofilm>
+            </substrate_diffusion_coefficients>
+            <left_boundary_type>Dirichlet</left_boundary_type>
+            <left_boundary_condition>1.0</left_boundary_condition>
+            <right_boundary_type>Neumann</right_boundary_type>
+            <right_boundary_condition>0.</right_boundary_condition>
+        </substrate0>
+
+        <substrate1>
+            <name_of_substrates>O</name_of_substrates>
+            <initial_concentration>1.0</initial_concentration>
+            <substrate_diffusion_coefficients>
+                <in_pore>5e-10</in_pore>
+                <in_biofilm>5e-10</in_biofilm>
+            </substrate_diffusion_coefficients>
+            <left_boundary_type>Dirichlet</left_boundary_type>
+            <left_boundary_condition>1.0</left_boundary_condition>
+            <right_boundary_type>Neumann</right_boundary_type>
+            <right_boundary_condition>0.</right_boundary_condition>
+        </substrate1>
+
+        <substrate2>
+            <name_of_substrates>P</name_of_substrates>
+            <initial_concentration>0.</initial_concentration>
+            <substrate_diffusion_coefficients>
+                <in_pore>5e-10</in_pore>
+                <in_biofilm>5e-10</in_biofilm>
+            </substrate_diffusion_coefficients>
+            <left_boundary_type>Neumann</left_boundary_type>
+            <left_boundary_condition>0.</left_boundary_condition>
+            <right_boundary_type>Neumann</right_boundary_type>
+            <right_boundary_condition>0.</right_boundary_condition>
+        </substrate2>
+
+    </chemistry>
+
+    <microbiology>
+        <number_of_microbes>1</number_of_microbes>
+        <maximum_biomass_density>50</maximum_biomass_density>
+        <thrd_biofilm_fraction>0.01</thrd_biofilm_fraction>
+        <CA_method>fraction</CA_method>
+
+        <microbe0>
+            <name_of_microbes>Toybug</name_of_microbes>
+            <solver_type>FD</solver_type>
+            <reaction_type>glpk_and_kinetics</reaction_type>
+            <initial_densities>1.0</initial_densities>
+            <decay_coefficient>0.01</decay_coefficient>
+            <viscosity_ratio_in_biofilm>0</viscosity_ratio_in_biofilm>
+            <biomass_diffusion_coefficients>
+                <in_pore>3e-13</in_pore>
+                <in_biofilm>3e-13</in_biofilm>
+            </biomass_diffusion_coefficients>
+            <half_saturation_constants>0.05 0.05 0</half_saturation_constants>
+            <maximum_uptake_flux>0. 0. 0.</maximum_uptake_flux>
+            <model_filename>toy_model</model_filename>
+            <exchange_reaction_indices>0 1 2</exchange_reaction_indices>
+
+            <!-- the metabolic path's own Vmax, mmol/gDW/h.  Separate from
+                 <maximum_uptake_flux> above, which the kinetics path reads in
+                 different units. -->
+            <fba_maximum_uptake_flux>10. 4. 0.</fba_maximum_uptake_flux>
+
+            <substrate_lower_bounds>-10. -4. 0.</substrate_lower_bounds>
+            <substrate_upper_bounds>100. 100. 100.</substrate_upper_bounds>
+            <objective_direction>maximize</objective_direction>
+            <biomass_molar_mass>24.6</biomass_molar_mass>
+            <left_boundary_type>Neumann</left_boundary_type>
+            <left_boundary_condition>0.</left_boundary_condition>
+            <right_boundary_type>Neumann</right_boundary_type>
+            <right_boundary_condition>0.</right_boundary_condition>
+        </microbe0>
+
+    </microbiology>
+
+    <equilibrium>
+        <enabled>false</enabled>
+    </equilibrium>
+
+    <precipitation>
+        <enabled>false</enabled>
+    </precipitation>
+
+    <dissolution>
+        <enabled>false</enabled>
+    </dissolution>
+
+    <IO>
+        <read_NS_file>false</read_NS_file>
+        <read_ADE_file>false</read_ADE_file>
+        <ns_filename>nsLattice</ns_filename>
+        <mask_filename>maskLattice</mask_filename>
+        <subs_filename>subsLattice</subs_filename>
+        <bio_filename>bioLattice</bio_filename>
+        <save_VTK_interval>100</save_VTK_interval>
+        <save_CHK_interval>0</save_CHK_interval>
+        <debug_updRxn>0</debug_updRxn>
+    </IO>
+
+</parameters>

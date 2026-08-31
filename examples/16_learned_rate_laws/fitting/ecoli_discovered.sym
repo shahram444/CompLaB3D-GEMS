@@ -1,0 +1,20 @@
+# discovered by fit_symbolic.py on 2026-08-29 from ecoli_sweep.csv
+# 17 nodes; typical error 0.02%, worst 0.03%, over 300 samples (relative loss)
+# THE SUBSTRATE LINES ARE NOT WRITTEN FOR YOU. Add them by hand from the
+# reaction stoichiometry, as multiples of this rate, so they stay in exact
+# ratio -- a separate fit per species would not.
+units  per_hour
+vars   glucose O2 Ecoli
+
+rate   growth = ((O2 / ((0.0002 + O2) / 0.151699)) * (glucose / (((0.00557898 / 11.1633) + glucose) / 5.27156)))
+
+# The four lines below are NOT from the search. They are the reaction
+#     glucose + 6 O2 = 6 CO2 + 6 H2O
+# written out, with a yield of 0.4 mol biomass per mol glucose. Deriving them from
+# growth rather than fitting each one keeps the 6:1 ratio exact.
+rate   glucose = -1.0 * growth * Ecoli / 0.4
+rate   O2      = -6.0 * growth * Ecoli / 0.4
+rate   CO2     =  6.0 * growth * Ecoli / 0.4
+
+range  glucose    1.00027e-05 0.00199868
+range  O2         1.11655e-05 0.000998336

@@ -1,0 +1,186 @@
+<?xml version="1.0" ?>
+<!-- =========================================================================
+     CompLB3D EXAMPLE 15  |  PRECIPITATION AND DISSOLUTION TOGETHER
+     =========================================================================
+
+     Both directions active on the same mineral, so a voxel can seal and
+     later reopen.
+
+         precipitation   Fe2+ + HS-  ->  FeS(s)
+         dissolution     FeS(s) + H+ ->  Fe2+ + HS-
+
+     The two blocks are independent, which is why they can both be on.
+     The <phase0> block here has is_precipitate true and initial_fill 0:
+     there is no mineral anywhere at the start, it grows by reaction, and
+     the voxels it seals are stamped so they can later reopen.
+
+     WHY reopen_fraction EARNS ITS KEEP HERE AND NOWHERE ELSE. With both
+     directions active a voxel can sit near the sealing threshold. A
+     single threshold would make it flip open and shut every update
+     interval, and every flip re-solves the flow. 0.9 puts a gap between
+     sealing at full density and reopening below 0.9 times full, so it
+     settles instead of chattering. Watch the porosity: it should move in
+     steps and then hold.
+
+     THE TWO RATE LAWS ARE NOT INVERSES. Precipitation is second order in
+     the dissolved ions; dissolution is first order in acid and in
+     remaining mineral. They are separate laws that happen to move the
+     same mineral, which is how the code is meant to be used: the
+     equilibrium solver does not compute solubility products, so there is
+     no saturation state to drive a single reversible rate.
+     ========================================================================= -->
+<parameters>
+
+    <path>
+        <src_path>src</src_path>
+        <input_path>input</input_path>
+        <output_path>output</output_path>
+    </path>
+
+    <simulation_mode>
+        <biotic_mode>false</biotic_mode>
+        <enable_kinetics>false</enable_kinetics>
+        <enable_abiotic_kinetics>true</enable_abiotic_kinetics>
+        <enable_fba_glpk>false</enable_fba_glpk>
+        <enable_fba_cobrapy>false</enable_fba_cobrapy>
+        <enable_surrogate>false</enable_surrogate>
+        <enable_validation_diagnostics>true</enable_validation_diagnostics>
+    </simulation_mode>
+
+    <LB_numerics>
+        <domain>
+            <nx>24</nx>
+            <ny>24</ny>
+            <nz>6</nz>
+            <dx>10</dx>
+            <unit>um</unit>
+            <characteristic_length>24</characteristic_length>
+            <filename>geometry.dat</filename>
+            <material_numbers>
+                <pore>2</pore>
+                <solid>0</solid>
+                <bounce_back>1</bounce_back>
+            </material_numbers>
+        </domain>
+
+        <delta_P>1e-6</delta_P>
+        <Peclet>1</Peclet>
+        <tau>0.8</tau>
+        <track_performance>false</track_performance>
+
+        <iteration>
+            <ns_max_iT1>20000</ns_max_iT1>
+            <ns_max_iT2>2000</ns_max_iT2>
+            <ns_converge_iT1>1e-6</ns_converge_iT1>
+            <ns_converge_iT2>1e-4</ns_converge_iT2>
+            <ns_update_interval>10</ns_update_interval>
+            <ade_update_interval>1</ade_update_interval>
+            <ade_max_iT>3000</ade_max_iT>
+            <ade_converge_iT>1e-8</ade_converge_iT>
+        </iteration>
+    </LB_numerics>
+
+    <chemistry>
+        <number_of_substrates>4</number_of_substrates>
+
+        <substrate0>
+            <name_of_substrates>Fe2</name_of_substrates>
+            <initial_concentration>0.</initial_concentration>
+            <substrate_diffusion_coefficients>
+                <in_pore>5e-10</in_pore>
+                <in_biofilm>5e-10</in_biofilm>
+            </substrate_diffusion_coefficients>
+            <left_boundary_type>Dirichlet</left_boundary_type>
+            <left_boundary_condition>5.</left_boundary_condition>
+            <right_boundary_type>Neumann</right_boundary_type>
+            <right_boundary_condition>0.</right_boundary_condition>
+        </substrate0>
+
+        <substrate1>
+            <name_of_substrates>HS</name_of_substrates>
+            <initial_concentration>0.</initial_concentration>
+            <substrate_diffusion_coefficients>
+                <in_pore>5e-10</in_pore>
+                <in_biofilm>5e-10</in_biofilm>
+            </substrate_diffusion_coefficients>
+            <left_boundary_type>Neumann</left_boundary_type>
+            <left_boundary_condition>0.</left_boundary_condition>
+            <right_boundary_type>Dirichlet</right_boundary_type>
+            <right_boundary_condition>5.</right_boundary_condition>
+        </substrate1>
+
+        <substrate2>                                    <!-- acid, which drives the reverse reaction -->
+            <name_of_substrates>H</name_of_substrates>
+            <initial_concentration>0.</initial_concentration>
+            <substrate_diffusion_coefficients>
+                <in_pore>5e-10</in_pore>
+                <in_biofilm>5e-10</in_biofilm>
+            </substrate_diffusion_coefficients>
+            <left_boundary_type>Dirichlet</left_boundary_type>
+            <left_boundary_condition>1e-2</left_boundary_condition>
+            <right_boundary_type>Neumann</right_boundary_type>
+            <right_boundary_condition>0.</right_boundary_condition>
+        </substrate2>
+
+        <substrate3>                                    <!-- the mineral -->
+            <name_of_substrates>FeS</name_of_substrates>
+            <initial_concentration>0.</initial_concentration>
+            <substrate_diffusion_coefficients>
+                <in_pore>0.</in_pore>
+                <in_biofilm>0.</in_biofilm>
+            </substrate_diffusion_coefficients>
+            <immobile>true</immobile>
+            <left_boundary_type>Neumann</left_boundary_type>
+            <left_boundary_condition>0.</left_boundary_condition>
+            <right_boundary_type>Neumann</right_boundary_type>
+            <right_boundary_condition>0.</right_boundary_condition>
+        </substrate3>
+
+    </chemistry>
+
+    <microbiology>
+        <number_of_microbes>0</number_of_microbes>
+    </microbiology>
+
+    <equilibrium>
+        <enabled>false</enabled>
+    </equilibrium>
+
+    <precipitation>
+        <enabled>true</enabled>
+        <solid_substrate>3</solid_substrate>
+        <max_precipRho>48.9</max_precipRho>
+        <surface_only>1</surface_only>
+        <perm_ratio>0</perm_ratio>
+        <update_interval>100</update_interval>
+    </precipitation>
+
+    <dissolution>
+        <enabled>true</enabled>
+        <reopen_fraction>0.9</reopen_fraction>
+        <surface_only>1</surface_only>
+        <update_interval>100</update_interval>
+
+        <phase0>
+            <name>FeS_precipitate</name>
+            <material_number>0</material_number>
+            <substrate>3</substrate>
+            <full_density>48.9</full_density>
+            <initial_fill>0</initial_fill>          <!-- nothing there at the start -->
+            <is_precipitate>true</is_precipitate>   <!-- voxels sealed by precipitation -->
+        </phase0>
+    </dissolution>
+
+    <IO>
+        <read_NS_file>false</read_NS_file>
+        <read_ADE_file>false</read_ADE_file>
+        <ns_filename>nsLattice</ns_filename>
+        <mask_filename>maskLattice</mask_filename>
+        <subs_filename>subsLattice</subs_filename>
+        <bio_filename>bioLattice</bio_filename>
+        <save_VTK_interval>200</save_VTK_interval>
+        <save_CHK_interval>0</save_CHK_interval>
+        <debug_updRxn>0</debug_updRxn>
+    </IO>
+
+</parameters>

@@ -1,0 +1,207 @@
+<?xml version="1.0" ?>
+<!-- =========================================================================
+     CompLB3D EXAMPLE 09  |  FLUX BALANCE ANALYSIS THROUGH GLPK
+     =========================================================================
+
+     One organism whose growth comes from a linear program solved in
+     every voxel, at every step, instead of from a hand written rate
+     law.
+
+     THE MODEL IS SMALL ENOUGH TO SOLVE BY HAND. input/toy_model.xml
+     has three metabolites and four reactions:
+
+         0 EX_S   S_c ->             negative flux imports the donor
+         1 EX_O   O_c ->             negative flux imports the acceptor
+         2 EX_P   P_c ->             positive flux exports the product
+         3 BIO    S_c + 0.5 O_c -> P_c        the objective
+
+     Steady state forces v0 = -v3 and v1 = -0.5 v3, so
+
+         growth = min( Vs, 2 * Vo )
+
+     where each V is the Michaelis Menten bound CompLaB builds from
+     the local concentration:  V = Vmax * C / (Kc + C).
+
+     With Vmax 10 and 4, Kc 0.05 and 0.05, and both concentrations
+     well above their half saturation constants, Vs approaches 10 and
+     2 * Vo approaches 8, so the acceptor limits and growth settles
+     near 8 mmol/gDW/h. THAT NUMBER COMES FROM THE STOICHIOMETRY, NOT
+     FROM THIS CODE, which is what makes it a test.
+
+     Examples 09 and 10 are the same case on the two different
+     solvers. They receive an identical linear program, so they must
+     return the same answer. If they disagree, one of the two
+     couplings is wrong.
+     ========================================================================= -->
+<parameters>
+
+    <path>
+        <src_path>src</src_path>
+        <input_path>input</input_path>
+        <output_path>output</output_path>
+    </path>
+
+    <simulation_mode>
+        <biotic_mode>true</biotic_mode>
+        <enable_kinetics>false</enable_kinetics>
+        <enable_abiotic_kinetics>false</enable_abiotic_kinetics>
+        <enable_fba_glpk>true</enable_fba_glpk>
+        <enable_fba_cobrapy>false</enable_fba_cobrapy>
+        <enable_surrogate>false</enable_surrogate>
+        <fba_concentration_basis>free</fba_concentration_basis>
+        <glpk_lpsolver>1</glpk_lpsolver>
+        <enable_validation_diagnostics>true</enable_validation_diagnostics>
+    </simulation_mode>
+
+    <LB_numerics>
+        <domain>
+            <nx>24</nx>
+            <ny>24</ny>
+            <nz>6</nz>
+            <dx>10</dx>
+            <unit>um</unit>
+            <characteristic_length>24</characteristic_length>
+            <filename>geometry.dat</filename>
+            <material_numbers>
+                <pore>2</pore>
+                <solid>0</solid>
+                <bounce_back>1</bounce_back>
+                <microbe0>3</microbe0>
+            </material_numbers>
+        </domain>
+
+        <delta_P>1e-6</delta_P>
+        <Peclet>0</Peclet>
+        <tau>0.8</tau>
+        <track_performance>false</track_performance>
+
+        <iteration>
+            <ns_max_iT1>20000</ns_max_iT1>
+            <ns_max_iT2>2000</ns_max_iT2>
+            <ns_converge_iT1>1e-6</ns_converge_iT1>
+            <ns_converge_iT2>1e-4</ns_converge_iT2>
+            <ns_update_interval>10</ns_update_interval>
+            <ade_update_interval>1</ade_update_interval>
+            <ade_max_iT>500</ade_max_iT>
+            <ade_converge_iT>1e-8</ade_converge_iT>
+        </iteration>
+    </LB_numerics>
+
+    <chemistry>
+        <number_of_substrates>3</number_of_substrates>
+        <fix_concentration>no no no</fix_concentration>
+        <fix_lower_bounds>no no no</fix_lower_bounds>
+
+        <substrate0>                                    <!-- donor, held up from the left -->
+            <name_of_substrates>S</name_of_substrates>
+            <initial_concentration>1.0</initial_concentration>
+            <substrate_diffusion_coefficients>
+                <in_pore>5e-10</in_pore>
+                <in_biofilm>5e-10</in_biofilm>
+            </substrate_diffusion_coefficients>
+            <left_boundary_type>Dirichlet</left_boundary_type>
+            <left_boundary_condition>1.0</left_boundary_condition>
+            <right_boundary_type>Neumann</right_boundary_type>
+            <right_boundary_condition>0.</right_boundary_condition>
+        </substrate0>
+
+        <substrate1>                                    <!-- acceptor, held up from the left -->
+            <name_of_substrates>O</name_of_substrates>
+            <initial_concentration>1.0</initial_concentration>
+            <substrate_diffusion_coefficients>
+                <in_pore>5e-10</in_pore>
+                <in_biofilm>5e-10</in_biofilm>
+            </substrate_diffusion_coefficients>
+            <left_boundary_type>Dirichlet</left_boundary_type>
+            <left_boundary_condition>1.0</left_boundary_condition>
+            <right_boundary_type>Neumann</right_boundary_type>
+            <right_boundary_condition>0.</right_boundary_condition>
+        </substrate1>
+
+        <substrate2>                                    <!-- product, excreted -->
+            <name_of_substrates>P</name_of_substrates>
+            <initial_concentration>0.</initial_concentration>
+            <substrate_diffusion_coefficients>
+                <in_pore>5e-10</in_pore>
+                <in_biofilm>5e-10</in_biofilm>
+            </substrate_diffusion_coefficients>
+            <left_boundary_type>Neumann</left_boundary_type>
+            <left_boundary_condition>0.</left_boundary_condition>
+            <right_boundary_type>Neumann</right_boundary_type>
+            <right_boundary_condition>0.</right_boundary_condition>
+        </substrate2>
+
+    </chemistry>
+
+    <microbiology>
+        <number_of_microbes>1</number_of_microbes>
+        <maximum_biomass_density>50</maximum_biomass_density>
+        <thrd_biofilm_fraction>0.01</thrd_biofilm_fraction>
+        <CA_method>fraction</CA_method>
+
+        <microbe0>
+            <name_of_microbes>Toybug</name_of_microbes>
+            <solver_type>FD</solver_type>
+            <reaction_type>glpk</reaction_type>
+            <initial_densities>1.0</initial_densities>
+            <decay_coefficient>0.01</decay_coefficient>
+            <viscosity_ratio_in_biofilm>0</viscosity_ratio_in_biofilm>
+            <biomass_diffusion_coefficients>
+                <in_pore>3e-13</in_pore>
+                <in_biofilm>3e-13</in_biofilm>
+            </biomass_diffusion_coefficients>
+            <half_saturation_constants>0.05 0.05 0</half_saturation_constants>
+            <model_filename>toy_model</model_filename>
+
+            <!-- which reaction exchanges each substrate, in substrate order.
+                 Use -1 for a substrate this organism does not exchange. -->
+            <exchange_reaction_indices>0 1 2</exchange_reaction_indices>
+
+            <!-- Michaelis Menten Vmax, mmol/gDW/h, one per substrate.
+                 Vs approaches 10 and 2 * Vo approaches 8, so the acceptor
+                 limits and growth settles near 8. -->
+            <fba_maximum_uptake_flux>10. 4. 0.</fba_maximum_uptake_flux>
+
+            <!-- hard floor and ceiling on the exchange fluxes.  Exchange
+                 reactions are written "metabolite ->", so eating is negative. -->
+            <substrate_lower_bounds>-10. -4. 0.</substrate_lower_bounds>
+            <substrate_upper_bounds>100. 100. 100.</substrate_upper_bounds>
+
+            <objective_direction>maximize</objective_direction>
+
+            <!-- grams dry weight per mole of cells: converts CompLB3D's molar
+                 biomass into the gDW a metabolic model expects. -->
+            <biomass_molar_mass>24.6</biomass_molar_mass>
+            <left_boundary_type>Neumann</left_boundary_type>
+            <left_boundary_condition>0.</left_boundary_condition>
+            <right_boundary_type>Neumann</right_boundary_type>
+            <right_boundary_condition>0.</right_boundary_condition>
+        </microbe0>
+
+    </microbiology>
+
+    <equilibrium>
+        <enabled>false</enabled>
+    </equilibrium>
+
+    <precipitation>
+        <enabled>false</enabled>
+    </precipitation>
+
+    <dissolution>
+        <enabled>false</enabled>
+    </dissolution>
+
+    <IO>
+        <read_NS_file>false</read_NS_file>
+        <read_ADE_file>false</read_ADE_file>
+        <ns_filename>nsLattice</ns_filename>
+        <mask_filename>maskLattice</mask_filename>
+        <subs_filename>subsLattice</subs_filename>
+        <bio_filename>bioLattice</bio_filename>
+        <save_VTK_interval>100</save_VTK_interval>
+        <save_CHK_interval>0</save_CHK_interval>
+        <debug_updRxn>0</debug_updRxn>
+    </IO>
+
+</parameters>

@@ -1,0 +1,168 @@
+<?xml version="1.0" ?>
+<!-- =========================================================================
+     CompLB3D EXAMPLE 11  |  SURROGATE MODEL: A TRAINED NETWORK INSTEAD OF FBA
+     =========================================================================
+
+     The same idea as examples 09 and 10, with the linear program replaced
+     by a small neural network fitted to it offline. A few hundred
+     multiplications instead of a solve, so 100 to 1000 times faster.
+
+     This case uses the network SHIPPED in surrogateModel.hh: Geobacter
+     metallireducens on acetate and Fe(III), 2 inputs, four hidden layers
+     of ten tansig neurons, one linear output.
+
+     THE VMAX VALUES BELOW ARE NOT ARBITRARY. A network is only valid
+     inside the range it was trained on, and outside it a network does not
+     fail, it lies. The shipped one was trained on
+
+         acetate   0.00089 to 9.998   mmol/gDW/h
+         Fe(III)   0.000035 to 0.4997 mmol/gDW/h
+
+     so Vmax is set to 8 and 0.4, safely inside. Those bounds were
+     recovered by inverting the mapminmax scaling; run
+     surrogate_training/inspectSurrogate.py on any network to get them.
+
+     Raise <fba_maximum_uptake_flux> above 0.5 on the second substrate and
+     the simulation leaves the training box. It will still produce
+     numbers. They will not mean anything.
+     ========================================================================= -->
+<parameters>
+
+    <path>
+        <src_path>src</src_path>
+        <input_path>input</input_path>
+        <output_path>output</output_path>
+    </path>
+
+    <simulation_mode>
+        <biotic_mode>true</biotic_mode>
+        <enable_kinetics>false</enable_kinetics>
+        <enable_abiotic_kinetics>false</enable_abiotic_kinetics>
+        <enable_fba_glpk>false</enable_fba_glpk>
+        <enable_fba_cobrapy>false</enable_fba_cobrapy>
+        <enable_surrogate>true</enable_surrogate>
+        <enable_validation_diagnostics>true</enable_validation_diagnostics>
+    </simulation_mode>
+
+    <LB_numerics>
+        <domain>
+            <nx>24</nx>
+            <ny>24</ny>
+            <nz>6</nz>
+            <dx>10</dx>
+            <unit>um</unit>
+            <characteristic_length>24</characteristic_length>
+            <filename>geometry.dat</filename>
+            <material_numbers>
+                <pore>2</pore>
+                <solid>0</solid>
+                <bounce_back>1</bounce_back>
+                <microbe0>3</microbe0>
+            </material_numbers>
+        </domain>
+
+        <delta_P>1e-6</delta_P>
+        <Peclet>0</Peclet>
+        <tau>0.8</tau>
+        <track_performance>false</track_performance>
+
+        <iteration>
+            <ns_max_iT1>20000</ns_max_iT1>
+            <ns_max_iT2>2000</ns_max_iT2>
+            <ns_converge_iT1>1e-6</ns_converge_iT1>
+            <ns_converge_iT2>1e-4</ns_converge_iT2>
+            <ns_update_interval>10</ns_update_interval>
+            <ade_update_interval>1</ade_update_interval>
+            <ade_max_iT>500</ade_max_iT>
+            <ade_converge_iT>1e-8</ade_converge_iT>
+        </iteration>
+    </LB_numerics>
+
+    <chemistry>
+        <number_of_substrates>2</number_of_substrates>
+
+        <substrate0>
+            <name_of_substrates>acetate</name_of_substrates>
+            <initial_concentration>1.0</initial_concentration>
+            <substrate_diffusion_coefficients>
+                <in_pore>5e-10</in_pore>
+                <in_biofilm>5e-10</in_biofilm>
+            </substrate_diffusion_coefficients>
+            <left_boundary_type>Dirichlet</left_boundary_type>
+            <left_boundary_condition>1.0</left_boundary_condition>
+            <right_boundary_type>Neumann</right_boundary_type>
+            <right_boundary_condition>0.</right_boundary_condition>
+        </substrate0>
+
+        <substrate1>
+            <name_of_substrates>Fe3</name_of_substrates>
+            <initial_concentration>0.5</initial_concentration>
+            <substrate_diffusion_coefficients>
+                <in_pore>5e-10</in_pore>
+                <in_biofilm>5e-10</in_biofilm>
+            </substrate_diffusion_coefficients>
+            <left_boundary_type>Dirichlet</left_boundary_type>
+            <left_boundary_condition>0.5</left_boundary_condition>
+            <right_boundary_type>Neumann</right_boundary_type>
+            <right_boundary_condition>0.</right_boundary_condition>
+        </substrate1>
+
+    </chemistry>
+
+    <microbiology>
+        <number_of_microbes>1</number_of_microbes>
+        <maximum_biomass_density>50</maximum_biomass_density>
+        <thrd_biofilm_fraction>0.01</thrd_biofilm_fraction>
+        <CA_method>fraction</CA_method>
+
+        <microbe0>
+            <name_of_microbes>Geobacter</name_of_microbes>
+            <solver_type>FD</solver_type>
+            <reaction_type>surrogate</reaction_type>
+            <initial_densities>1.0</initial_densities>
+            <decay_coefficient>0.01</decay_coefficient>
+            <viscosity_ratio_in_biofilm>0</viscosity_ratio_in_biofilm>
+            <biomass_diffusion_coefficients>
+                <in_pore>3e-13</in_pore>
+                <in_biofilm>3e-13</in_biofilm>
+            </biomass_diffusion_coefficients>
+            <half_saturation_constants>0.05 0.01</half_saturation_constants>
+
+            <!-- Vmax, mmol/gDW/h.  Both are INSIDE the shipped network's
+                 training range; see the banner above before changing them. -->
+            <fba_maximum_uptake_flux>8. 0.4</fba_maximum_uptake_flux>
+
+            <biomass_molar_mass>24.6</biomass_molar_mass>
+            <left_boundary_type>Neumann</left_boundary_type>
+            <left_boundary_condition>0.</left_boundary_condition>
+            <right_boundary_type>Neumann</right_boundary_type>
+            <right_boundary_condition>0.</right_boundary_condition>
+        </microbe0>
+
+    </microbiology>
+
+    <equilibrium>
+        <enabled>false</enabled>
+    </equilibrium>
+
+    <precipitation>
+        <enabled>false</enabled>
+    </precipitation>
+
+    <dissolution>
+        <enabled>false</enabled>
+    </dissolution>
+
+    <IO>
+        <read_NS_file>false</read_NS_file>
+        <read_ADE_file>false</read_ADE_file>
+        <ns_filename>nsLattice</ns_filename>
+        <mask_filename>maskLattice</mask_filename>
+        <subs_filename>subsLattice</subs_filename>
+        <bio_filename>bioLattice</bio_filename>
+        <save_VTK_interval>100</save_VTK_interval>
+        <save_CHK_interval>0</save_CHK_interval>
+        <debug_updRxn>0</debug_updRxn>
+    </IO>
+
+</parameters>

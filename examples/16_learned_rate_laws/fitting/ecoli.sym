@@ -1,0 +1,11 @@
+# fitted by PySR from the e_coli_core sweep, 2026-09-03
+# hold-out R2 = 0.9987 on 400 independently re-solved points
+version 1
+vars   glucose o2 Ecoli
+
+rate   growth  = 0.0412 * glucose * o2 / (0.083 + o2)
+rate   acetate = 0.31 * growth
+rate   glucose = -1.0 * growth / 0.0412
+
+range  glucose 0.1 10.0
+range  o2      0.1 20.0

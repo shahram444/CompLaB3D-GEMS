@@ -1,0 +1,21 @@
+# Abiotic iron sulfide formation, second order in both reactants:
+#
+#     Fe(2+) + HS(-)  =  FeS + H(+)
+#
+# This file is pointed at by <abiotic_file>, NOT <expressions_file>. The difference is which
+# sweep runs it: an <expressions_file> law belongs to an organism and only fires in voxels that
+# hold that organism's biomass, while this one fires in every fluid voxel. For a reaction that
+# happens in open water whether or not anything is alive nearby, this is the one you want.
+#
+# Two rules follow from having no organism, and both are enforced at load rather than ignored:
+#   - every variable must be a substrate; a biomass name here is a stop
+#   - there is no "growth" rate; a growth line here is a stop
+
+units  per_second
+vars   Fe HS
+
+rate   Fe = -1.6e2 * Fe * HS
+rate   HS = -1.6e2 * Fe * HS
+
+range  Fe 1e-9 1e-3
+range  HS 1e-9 1e-3

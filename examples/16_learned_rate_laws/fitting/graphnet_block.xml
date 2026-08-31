@@ -1,0 +1,59 @@
+<!-- ================================================================================================
+     The <graphnet> block for CompLaB.xml.  Paste it inside <parameters>, beside <surrogate> and
+     <symbolic>.  It does nothing at all unless some organism asks for it with
+     <reaction_type>graphnet</reaction_type>, so it is safe to leave in a file you are not using it
+     in -- and if an organism DOES ask for it while <enabled> is false, the run stops and says so
+     rather than quietly reacting with nothing.
+     ============================================================================================ -->
+
+<graphnet>
+    <enabled>true</enabled>
+    <network_file>input/aom.gnn</network_file>
+</graphnet>
+
+
+<!-- The organism.  <reaction_type> also accepts the number 10, and "gnn" or "graph_network" as
+     spellings.  Use graphnet_and_kinetics (11) to run the network AND defineKinetics.hh, with the
+     two sets of increments added -- useful when the network covers the microbial reaction and a
+     hand-written law covers an abiotic one alongside it. -->
+
+<microbiology>
+    <microbe0>
+        <name>ANME_SRB</name>
+        <reaction_type>graphnet</reaction_type>
+    </microbe0>
+</microbiology>
+
+
+<!-- The substrate names have to match the network's species line exactly.  A network fitted to
+     CH4 SO4 HS HCO3 cannot be applied to a simulation that calls them something else, and the run
+     stops at start-up with the offending name rather than binding to the wrong lattice. -->
+
+<chemistry>
+    <substrate0><name>CH4</name></substrate0>
+    <substrate1><name>SO4</name></substrate1>
+    <substrate2><name>HS</name></substrate2>
+    <substrate3><name>HCO3</name></substrate3>
+</chemistry>
+
+
+<!-- Worth knowing: <fba_concentration_basis> applies here too.  With "total" the network is fed
+     each component's total concentration rebuilt from the equilibrium tableau, and consumption is
+     drawn back down across the complexes.  If you fitted the network against total concentrations,
+     this is the setting that matches; if you fitted against free ion, leave it at "free". -->
+
+
+<!-- ================================================================================================
+     ABIOTIC: the same two methods, swept over every fluid cell instead of every occupied one.
+     <expressions_file> and <network_file> belong to an organism and only fire where its biomass is.
+     <abiotic_file> belongs to nobody and fires everywhere, which is what abiotic chemistry needs.
+     Either, both, or neither may be set; they are independent.
+     ============================================================================================ -->
+
+<symbolic>
+    <abiotic_file>input/abiotic.sym</abiotic_file>
+</symbolic>
+
+<graphnet>
+    <abiotic_file>input/abiotic.gnn</abiotic_file>
+</graphnet>

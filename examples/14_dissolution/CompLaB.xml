@@ -1,0 +1,163 @@
+<?xml version="1.0" ?>
+<!-- =========================================================================
+     CompLB3D EXAMPLE 14  |  DISSOLUTION AND PORE REOPENING
+     =========================================================================
+
+     The mirror image of example 13: acid eats the grains away and their
+     voxels open back up to flow.
+
+         CaCO3(s) + H+  ->  Ca2+ + HCO3-
+
+     WHAT CAN DISSOLVE is only what is declared in a <phaseN> block, and
+     that is deliberate. If the rule were simply that a solid voxel with
+     no mineral left becomes pore, then an inert quartz grain, which never
+     held any mineral, is already below any threshold and the whole grain
+     pack would dissolve on the first step. Declaring phases makes quartz
+     safe by construction.
+
+     initial_fill is the whole point of this case: the four grains START
+     solid, at full density, and are eaten away. Dissolution is not
+     limited to material that precipitated first.
+
+     The rate law is defineDissolutionRate() in defineAbioticKinetics.hh,
+     a separate hook from the precipitation one. It is handed the water
+     TOUCHING the mineral, averaged over the open neighbours, because a
+     solid voxel has no water of its own that moves. A voxel with no open
+     neighbour is unreachable and does not dissolve at all.
+     ========================================================================= -->
+<parameters>
+
+    <path>
+        <src_path>src</src_path>
+        <input_path>input</input_path>
+        <output_path>output</output_path>
+    </path>
+
+    <simulation_mode>
+        <biotic_mode>false</biotic_mode>
+        <enable_kinetics>false</enable_kinetics>
+        <enable_abiotic_kinetics>true</enable_abiotic_kinetics>
+        <enable_fba_glpk>false</enable_fba_glpk>
+        <enable_fba_cobrapy>false</enable_fba_cobrapy>
+        <enable_surrogate>false</enable_surrogate>
+        <enable_validation_diagnostics>true</enable_validation_diagnostics>
+    </simulation_mode>
+
+    <LB_numerics>
+        <domain>
+            <nx>24</nx>
+            <ny>24</ny>
+            <nz>6</nz>
+            <dx>10</dx>
+            <unit>um</unit>
+            <characteristic_length>24</characteristic_length>
+            <filename>geometry.dat</filename>
+            <material_numbers>
+                <pore>2</pore>
+                <solid>0</solid>
+                <bounce_back>1</bounce_back>
+            </material_numbers>
+        </domain>
+
+        <delta_P>1e-6</delta_P>
+        <Peclet>1</Peclet>
+        <tau>0.8</tau>
+        <track_performance>false</track_performance>
+
+        <iteration>
+            <ns_max_iT1>20000</ns_max_iT1>
+            <ns_max_iT2>2000</ns_max_iT2>
+            <ns_converge_iT1>1e-6</ns_converge_iT1>
+            <ns_converge_iT2>1e-4</ns_converge_iT2>
+            <ns_update_interval>10</ns_update_interval>
+            <ade_update_interval>1</ade_update_interval>
+            <ade_max_iT>2000</ade_max_iT>
+            <ade_converge_iT>1e-8</ade_converge_iT>
+        </iteration>
+    </LB_numerics>
+
+    <chemistry>
+        <number_of_substrates>3</number_of_substrates>
+
+        <substrate0>                                    <!-- acid, entering from the left -->
+            <name_of_substrates>H</name_of_substrates>
+            <initial_concentration>1e-4</initial_concentration>
+            <substrate_diffusion_coefficients>
+                <in_pore>5e-10</in_pore>
+                <in_biofilm>5e-10</in_biofilm>
+            </substrate_diffusion_coefficients>
+            <left_boundary_type>Dirichlet</left_boundary_type>
+            <left_boundary_condition>1e-2</left_boundary_condition>
+            <right_boundary_type>Neumann</right_boundary_type>
+            <right_boundary_condition>0.</right_boundary_condition>
+        </substrate0>
+
+        <substrate1>                                    <!-- released by dissolution -->
+            <name_of_substrates>Ca</name_of_substrates>
+            <initial_concentration>0.</initial_concentration>
+            <substrate_diffusion_coefficients>
+                <in_pore>5e-10</in_pore>
+                <in_biofilm>5e-10</in_biofilm>
+            </substrate_diffusion_coefficients>
+            <left_boundary_type>Neumann</left_boundary_type>
+            <left_boundary_condition>0.</left_boundary_condition>
+            <right_boundary_type>Neumann</right_boundary_type>
+            <right_boundary_condition>0.</right_boundary_condition>
+        </substrate1>
+
+        <substrate2>                                    <!-- the mineral inventory of each grain -->
+            <name_of_substrates>calcite</name_of_substrates>
+            <initial_concentration>0.</initial_concentration>
+            <substrate_diffusion_coefficients>
+                <in_pore>0.</in_pore>
+                <in_biofilm>0.</in_biofilm>
+            </substrate_diffusion_coefficients>
+            <immobile>true</immobile>
+            <left_boundary_type>Neumann</left_boundary_type>
+            <left_boundary_condition>0.</left_boundary_condition>
+            <right_boundary_type>Neumann</right_boundary_type>
+            <right_boundary_condition>0.</right_boundary_condition>
+        </substrate2>
+
+    </chemistry>
+
+    <microbiology>
+        <number_of_microbes>0</number_of_microbes>
+    </microbiology>
+
+    <equilibrium>
+        <enabled>false</enabled>
+    </equilibrium>
+
+    <precipitation>
+        <enabled>false</enabled>
+    </precipitation>
+
+    <dissolution>
+        <enabled>true</enabled>
+        <reopen_fraction>0.9</reopen_fraction>   <!-- reopen below 0.9 x full -->
+        <surface_only>1</surface_only>           <!-- only wetted voxels dissolve -->
+        <update_interval>100</update_interval>
+
+        <phase0>
+            <name>calcite_grain</name>
+            <material_number>0</material_number>  <!-- the solid grains in geometry.dat -->
+            <substrate>2</substrate>              <!-- which substrate holds its inventory -->
+            <full_density>27.1</full_density>     <!-- mol/L: 1000 / 36.9 cm3 per mol -->
+            <initial_fill>27.1</initial_fill>     <!-- starts completely solid -->
+        </phase0>
+    </dissolution>
+
+    <IO>
+        <read_NS_file>false</read_NS_file>
+        <read_ADE_file>false</read_ADE_file>
+        <ns_filename>nsLattice</ns_filename>
+        <mask_filename>maskLattice</mask_filename>
+        <subs_filename>subsLattice</subs_filename>
+        <bio_filename>bioLattice</bio_filename>
+        <save_VTK_interval>200</save_VTK_interval>
+        <save_CHK_interval>0</save_CHK_interval>
+        <debug_updRxn>0</debug_updRxn>
+    </IO>
+
+</parameters>

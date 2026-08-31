@@ -1,0 +1,25 @@
+# A rate law CompLB3D reads at run time, instead of one compiled into
+# defineKinetics.hh.  Iron reduction by Geobacter:
+#
+#     acetate + 4.8 Fe(III)  =  4.8 Fe(II) + 1.845 HCO3-
+#
+# The growth line is the sort of expression tools/fit_symbolic.py returns from a
+# sweep of a metabolic model.  The two substrate lines are NOT fitted: they are
+# that reaction, written out, as multiples of growth.  Deriving them keeps the
+# 1 : 4.8 ratio exact, which four independent fits would not.
+
+provenance example 16, iron reduction by Geobacter, written by hand
+
+units  per_hour
+vars   acetate Fe3 Geobacter
+
+rate   growth  = 0.0527 * acetate/(0.05 + acetate) * Fe3/(0.01 + Fe3)
+rate   acetate = -1.0 * growth * Geobacter / 0.42
+rate   Fe3     = -4.8 * growth * Geobacter / 0.42
+
+# The box the law is valid over.  Enforced, not advisory: every evaluation is
+# clamped to it and the clamping is counted, and the run reports at the end how
+# often it happened.  A fitted rate law does not fail outside its range, it
+# returns a confident number, so that count is the thing to read.
+range  acetate 0.01  2.0
+range  Fe3     0.005 1.0

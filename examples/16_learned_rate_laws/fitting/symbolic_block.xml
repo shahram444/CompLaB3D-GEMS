@@ -1,0 +1,23 @@
+<!-- ============================================================================
+     [SYM] Rate laws read from a file at run time.
+     Add these to CompLaB.xml.  The block is ignored unless some microbe asks
+     for <reaction_type>symbolic, so pasting it in changes nothing on its own.
+     ============================================================================ -->
+
+<symbolic>
+    <!-- The whole block is ignored when this is false.  Default: false -->
+    <enabled>true</enabled>
+
+    <!-- Plain text, read at start-up.  Every expression and its valid range is
+         printed into the log, so a result carries the rate law that made it. -->
+    <expressions_file>input/rates.sym</expressions_file>
+</symbolic>
+
+<microbiology>
+    <microbe0>
+        <!-- symbolic                 the .sym file supplies everything
+             symbolic_and_kinetics    the .sym file AND defineKinetics.hh, rates added
+             The numeric spellings 8 and 9 also work. -->
+        <reaction_type>symbolic</reaction_type>
+    </microbe0>
+</microbiology>
