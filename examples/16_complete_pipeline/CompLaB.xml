@@ -1,0 +1,274 @@
+<?xml version="1.0" ?>
+<!-- =========================================================================
+     CompLB3D EXAMPLE 16  |  THE COMPLETE PIPELINE
+     =========================================================================
+
+     Everything the older cases needed a Python script for, done from
+     this one file: the metabolic model is fetched from the bundle, the
+     exchange reactions are named rather than numbered, the surrogate
+     network is TRAINED during start-up from that model, and the run
+     writes its own scalar record.
+
+     Nothing here is prepared in advance. Copy the folder, build, run.
+     ========================================================================= -->
+<parameters>
+
+    <path>
+        <src_path>src</src_path>
+        <input_path>input</input_path>
+        <output_path>output</output_path>
+    </path>
+
+    <simulation_mode>
+        <biotic_mode>true</biotic_mode>
+        <enable_kinetics>false</enable_kinetics>
+        <enable_abiotic_kinetics>false</enable_abiotic_kinetics>
+        <enable_fba_glpk>false</enable_fba_glpk>
+        <enable_fba_cobrapy>false</enable_fba_cobrapy>
+        <enable_surrogate>true</enable_surrogate>
+        <enable_validation_diagnostics>false</enable_validation_diagnostics>
+    </simulation_mode>
+
+    <!-- ================================================================
+         [NEW] WHERE THE METABOLIC MODEL COMES FROM
+
+         e_coli_core ships gzipped in models/. It is unpacked into
+         <model_cache> at start-up and checked against models/manifest.txt,
+         so a model that has been revised upstream shows up in the log.
+
+         <allow_download>false</allow_download> is the default and is why
+         this case runs on a compute node with no route to the internet.
+         ================================================================ -->
+    <model_source>bigg:e_coli_core</model_source>
+    <model_bundle>models</model_bundle>
+    <model_cache>input</model_cache>
+    <allow_download>false</allow_download>
+
+    <!-- ================================================================
+         [NEW] THE SURROGATE, FITTED HERE
+
+         No weights file exists the first time, so one is trained: the
+         linear program is swept over the ranges below, a network is
+         fitted, and the fit is checked by re-solving the LP at 64 points
+         it never saw. The result is written to <weights_file>, and every
+         later run of this folder loads it in milliseconds instead.
+
+         Delete output/ecoli.srg to force a retrain.
+
+         Each <inputN> is: substrate name, low, high, and "log" for a
+         logarithmic sweep. The names must be <name_of_substrates>.
+         ================================================================ -->
+    <surrogate>
+        <enabled>true</enabled>
+        <weights_file>output/ecoli.srg</weights_file>
+        <train_if_missing>true</train_if_missing>
+        <train>
+            <samples>300</samples>
+            <restarts>2</restarts>
+            <epochs>400</epochs>
+            <verify_points>64</verify_points>
+            <layers>8</layers>
+            <seed>20260814</seed>
+            <input0>glucose 0.1 10.0</input0>
+            <input1>o2      0.1 20.0</input1>
+        </train>
+    </surrogate>
+
+    <!-- ================================================================
+         [NEW] THE RUN'S OWN RECORD
+
+         output/summary.csv gets one row per interval: porosity, and the
+         total, mean, minimum and maximum of every substrate over the OPEN
+         voxels of the physical domain.
+
+         <conserve> names a sum the chemistry cannot create or destroy.
+         Do NOT name a substrate that enters at an inlet: glucose here is
+         supplied from outside and its total is not conserved. Acetate is
+         only ever produced inside the domain, so it is the honest thing to
+         watch; it is listed for the record rather than as a check that can
+         pass, and its Neumann ends make it closed.
+         ================================================================ -->
+    <diagnostics>
+        <enabled>true</enabled>
+        <summary_csv>summary.csv</summary_csv>
+        <interval>100</interval>
+        <tolerance>1e-6</tolerance>
+    </diagnostics>
+
+    <LB_numerics>
+        <domain>
+            <nx>24</nx>
+            <ny>24</ny>
+            <nz>6</nz>
+            <dx>10</dx>
+            <unit>um</unit>
+            <characteristic_length>24</characteristic_length>
+            <filename>geometry.dat</filename>
+            <material_numbers>
+                <pore>2</pore>
+                <solid>0</solid>
+                <bounce_back>1</bounce_back>
+                <microbe0>3</microbe0>
+            </material_numbers>
+        </domain>
+
+        <delta_P>1e-6</delta_P>
+        <Peclet>0</Peclet>
+        <tau>0.8</tau>
+        <track_performance>false</track_performance>
+
+        <iteration>
+            <ns_max_iT1>20000</ns_max_iT1>
+            <ns_max_iT2>2000</ns_max_iT2>
+            <ns_converge_iT1>1e-6</ns_converge_iT1>
+            <ns_converge_iT2>1e-4</ns_converge_iT2>
+            <ns_update_interval>10</ns_update_interval>
+            <ade_update_interval>1</ade_update_interval>
+            <ade_max_iT>400</ade_max_iT>
+            <ade_converge_iT>1e-8</ade_converge_iT>
+        </iteration>
+    </LB_numerics>
+
+    <chemistry>
+        <number_of_substrates>3</number_of_substrates>
+        <fix_concentration>no no no</fix_concentration>
+        <fix_lower_bounds>no no no</fix_lower_bounds>
+
+        <substrate0>
+            <name_of_substrates>glucose</name_of_substrates>
+            <initial_concentration>1.0</initial_concentration>
+            <substrate_diffusion_coefficients>
+                <in_pore>5e-10</in_pore>
+                <in_biofilm>5e-10</in_biofilm>
+            </substrate_diffusion_coefficients>
+            <left_boundary_type>Dirichlet</left_boundary_type>
+            <left_boundary_condition>1.</left_boundary_condition>
+            <right_boundary_type>Dirichlet</right_boundary_type>
+            <right_boundary_condition>0.</right_boundary_condition>
+        </substrate0>
+
+        <substrate1>
+            <name_of_substrates>o2</name_of_substrates>
+            <initial_concentration>1.0</initial_concentration>
+            <substrate_diffusion_coefficients>
+                <in_pore>5e-10</in_pore>
+                <in_biofilm>5e-10</in_biofilm>
+            </substrate_diffusion_coefficients>
+            <left_boundary_type>Dirichlet</left_boundary_type>
+            <left_boundary_condition>1.</left_boundary_condition>
+            <right_boundary_type>Dirichlet</right_boundary_type>
+            <right_boundary_condition>0.</right_boundary_condition>
+        </substrate1>
+
+        <substrate2>
+            <name_of_substrates>acetate</name_of_substrates>
+            <initial_concentration>0.</initial_concentration>
+            <substrate_diffusion_coefficients>
+                <in_pore>5e-10</in_pore>
+                <in_biofilm>5e-10</in_biofilm>
+            </substrate_diffusion_coefficients>
+            <left_boundary_type>Neumann</left_boundary_type>
+            <left_boundary_condition>0.</left_boundary_condition>
+            <right_boundary_type>Neumann</right_boundary_type>
+            <right_boundary_condition>0.</right_boundary_condition>
+        </substrate2>
+
+    </chemistry>
+
+    <microbiology>
+        <number_of_microbes>1</number_of_microbes>
+
+        <!-- BOTH OF THESE ARE REQUIRED FOR ANY BIOFILM MICROBE, and leaving them
+             out is not harmless. <thrd_biofilm_fraction> defaults to 0, which
+             makes the cellular-automaton test biomass-at-or-above-threshold true in
+             EVERY pore voxel, including the empty ones, and an empty voxel has
+             no species to label, so the mask update hits its "should never
+             happen" branch and prints an error. Once per empty voxel per sweep:
+             the first run of this case wrote a 28 MB log of
+             "Error: Updating mask failed." and the results were still fine.
+             <maximum_biomass_density> defaults to 1e9 kg/m3, which is not a
+             density any biofilm reaches, so the cap never engages. -->
+        <maximum_biomass_density>50</maximum_biomass_density>
+        <thrd_biofilm_fraction>0.01</thrd_biofilm_fraction>
+        <CA_method>fraction</CA_method>
+
+        <microbe0>
+            <name_of_microbes>Ecoli</name_of_microbes>
+            <solver_type>FD</solver_type>
+
+            <!-- The surrogate stands in for the flux balance solve. The
+                 network it uses is the one trained above, NOT the weights
+                 compiled into surrogateModel.hh. That is what
+                 <weights_file> changes. See example 11 for the compiled-in
+                 route. -->
+            <reaction_type>surrogate</reaction_type>
+
+            <initial_densities>1.0</initial_densities>
+            <decay_coefficient>0.01</decay_coefficient>
+            <viscosity_ratio_in_biofilm>0</viscosity_ratio_in_biofilm>
+            <biomass_diffusion_coefficients>
+                <in_pore>3e-13</in_pore>
+                <in_biofilm>3e-13</in_biofilm>
+            </biomass_diffusion_coefficients>
+            <half_saturation_constants>0.05 0.05 0</half_saturation_constants>
+
+            <!-- ========================================================
+                 [NEW] NAMED, NOT NUMBERED
+
+                 One reaction name per substrate, in <name_of_substrates>
+                 order. Resolved against the model's own reaction list at
+                 start-up, so a wrong name stops the run and prints the
+                 near matches. An INDEX that is wrong is undetectable and always
+                 has been: it produces a well-posed linear program with the
+                 wrong biology.
+
+                 Try it: change EX_o2_e to EX_oxygen_e and rerun.
+
+                 There is no <model_filename> here. <model_source> above
+                 supplied it.
+                 ======================================================== -->
+            <exchange_reaction_names>EX_glc__D_e EX_o2_e EX_ac_e</exchange_reaction_names>
+
+            <!-- The upper end of each training range above is this Vmax,
+                 because Michaelis-Menten means no voxel can ever request
+                 more than Vmax. Raise one without retraining and the run
+                 leaves the training box; it will say so, and say how
+                 often. -->
+            <fba_maximum_uptake_flux>10. 20. 0.</fba_maximum_uptake_flux>
+            <substrate_lower_bounds>-10. -20. 0.</substrate_lower_bounds>
+            <substrate_upper_bounds>1000. 1000. 1000.</substrate_upper_bounds>
+            <objective_direction>maximize</objective_direction>
+            <biomass_molar_mass>24.6</biomass_molar_mass>
+            <left_boundary_type>Neumann</left_boundary_type>
+            <left_boundary_condition>0.</left_boundary_condition>
+            <right_boundary_type>Neumann</right_boundary_type>
+            <right_boundary_condition>0.</right_boundary_condition>
+        </microbe0>
+    </microbiology>
+
+
+    <equilibrium>
+        <enabled>false</enabled>
+    </equilibrium>
+
+    <precipitation>
+        <enabled>false</enabled>
+    </precipitation>
+
+    <dissolution>
+        <enabled>false</enabled>
+    </dissolution>
+
+    <IO>
+        <read_NS_file>false</read_NS_file>
+        <read_ADE_file>false</read_ADE_file>
+        <ns_filename>nsLattice</ns_filename>
+        <mask_filename>maskLattice</mask_filename>
+        <subs_filename>subsLattice</subs_filename>
+        <bio_filename>bioLattice</bio_filename>
+        <save_VTK_interval>200</save_VTK_interval>
+        <save_CHK_interval>0</save_CHK_interval>
+        <debug_updRxn>0</debug_updRxn>
+    </IO>
+
+</parameters>

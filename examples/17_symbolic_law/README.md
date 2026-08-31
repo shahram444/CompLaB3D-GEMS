@@ -83,44 +83,49 @@ Every name in `vars` must match a `<name_of_substrates>` or the microbe's
 A mismatch stops the run at start-up naming the offending variable, rather than
 binding to the wrong lattice.
 
-## What to run
+## Everything this case needs is in this folder
+
+No cross-referencing, nothing to fetch. The metabolic model, the training
+code, the rate-law file and the pore space are all here, beside the
+configuration that uses them.
 
 ```bash
-./scripts/setup_case.sh 17_symbolic_law run/sym
-cd run/sym
-cmake -B build -S . && cmake --build build -j
-./build/complab CompLaB.xml
+./scripts/setup_case.sh 17_symbolic_law run/mycase
+cd run/mycase
+./pipeline.sh
 ```
 
-| | |
+### The pipeline
+
+| | File | What it does |
+|---|---|---|
+| **pre** | `preprocess.py` | Builds the pore space: a staggered slot, 24 × 24 × 6, with the biomass patches seeded. Reports porosity and refuses to continue if it does not percolate. Standard library only. |
+| **offline** | `offline.sh` | Runs the symbolic search on the sample table that ships with this case, and writes `input/growth_discovered.sym` **without installing it** — compare it with the shipped law first. |
+| **run** | `CompLaB.xml` | What the solver reads. Every tag is documented once, in [`../../config/CompLaB.reference.xml`](../../config/CompLaB.reference.xml). |
+| **post** | `postprocess.py` | Reads `output/summary.csv` and the log, reports every field's change, flags negatives, and runs this case's balance check. Standard library only. |
+| | `pipeline.sh` | Runs the four in order. |
+
+### What the solver reads
+
+| File | What it is |
 |---|---|
-| **Inputs** | `input/geometry.dat` (shared, `slot_one_biofilm`), `input/growth.sym` (this case's own) |
-| **Offline work first** | none — unlike the surrogate, nothing has to be prepared |
-| **Outputs** | VTI fields for `acetate`, `o2`, `Bug`; the log, carrying the law and the clamp count |
-| **Runtime** | seconds, at 24 × 24 × 6 |
+| `input/geometry.dat` | The pore space. `preprocess.py` rebuilds it; this copy is here so the case runs before you have run anything. |
+| `input/growth.sym` | **The rate law itself** — four lines of algebra, read at start-up. A different law is a different file, with no rebuild. |
 
-## What to look for
+### The offline code this case ships
 
-The `[SYM]` block near the top of the log. It prints the provenance comment, the
-resolved units, every expression as parsed, and the valid range of each
-variable. Read it before believing the run: an expression that parsed
-differently from how you read it shows up here, and nowhere else.
+| File | What it is |
+|---|---|
+| `training/fit_symbolic.py` | The genetic-programming search over expression trees. Returns a Pareto set — one expression per node count — not one answer. |
+| `training/growth_samples.csv` | 400 samples of the dual-Monod law `input/growth.sym` describes, with 2% noise on the growth column, so the search has something realistic to work on. |
 
-At the end, the clamp count. A large fraction of evaluations clamped means the
-simulation is spending its time outside the box the law was fitted in, and the
-answer is an extrapolation whatever the numbers look like.
+### What it inherits
 
-## Where the file comes from
+Only the two shared kinetics headers, from
+[`../../config/kinetics/`](../../config/kinetics/), and the solver sources.
+`setup_case.sh` lays those down and copies this folder whole on top.
 
-`input/growth.sym` is written out by hand here so the case is readable without
-running anything. In a real study it comes from
-[`pipelines/B_offline_models/B3_symbolic_law/`](../../pipelines/B_offline_models/B3_symbolic_law/):
-a genetic-programming search over expression trees returns a **Pareto set** —
-one expression per node count, not one answer. You take the elbow: the shortest
-expression whose error is acceptable. Then you finish the file by hand, adding
-the other species as multiples and the `range` lines.
-
-`pipelines/B_offline_models/B3_symbolic_law/expected/` holds three real outputs
-of that search, including `abiotic.sym` — a law with no organism at all, pointed
-at by `<abiotic_file>` instead, which fires in every fluid voxel rather than
-only where biomass is.
+> **Why the training code is copied here rather than shared.** So that this
+> folder *is* the procedure. The cost is real and worth stating: a fix to a
+> trainer has to be applied to every case that carries it, and
+> `tests/check_repo.sh` fails if a copy drifts from `tools/`.

@@ -88,50 +88,51 @@ these cannot be applied to a simulation that calls them something else: the run
 stops at start-up naming the offending substrate rather than binding to the
 wrong lattice.
 
-## What to run
+## Everything this case needs is in this folder
+
+No cross-referencing, nothing to fetch. The metabolic model, the training
+code, the rate-law file and the pore space are all here, beside the
+configuration that uses them.
 
 ```bash
-./scripts/setup_case.sh 18_graph_network run/gnn
-cd run/gnn
-cmake -B build -S . && cmake --build build -j
-./build/complab CompLaB.xml
+./scripts/setup_case.sh 18_graph_network run/mycase
+cd run/mycase
+./pipeline.sh
 ```
 
-| | |
+### The pipeline
+
+| | File | What it does |
+|---|---|---|
+| **pre** | `preprocess.py` | Builds the pore space: a staggered slot, 24 × 24 × 6, with the biomass patches seeded. Reports porosity and refuses to continue if it does not percolate. Standard library only. |
+| **offline** | `offline.sh` | Retrains the network from the stoichiometry and samples that ship with this case, writes `input/aom_retrained.gnn`, and cross-validates it. |
+| **run** | `CompLaB.xml` | What the solver reads. Every tag is documented once, in [`../../config/CompLaB.reference.xml`](../../config/CompLaB.reference.xml). |
+| **post** | `postprocess.py` | Reads `output/summary.csv` and the log, reports every field's change, flags negatives, and runs this case's balance check. Standard library only. |
+| | `pipeline.sh` | Runs the four in order. |
+
+### What the solver reads
+
+| File | What it is |
 |---|---|
-| **Inputs** | `input/geometry.dat` (shared, `slot_one_biofilm`), `input/aom.gnn` (shared, from stage B4) |
-| **Offline work first** | none to run this case — the trained network ships. To train your own, stage **B4** |
-| **Outputs** | VTI fields for `CH4`, `SO4`, `HS`, `HCO3`, `ANME`; the log, carrying the network's provenance and the clamp count |
-| **Runtime** | seconds, at 24 × 24 × 6 |
+| `input/aom.gnn` | **The trained network** — weights, stoichiometry and the enforced training box, in one text file read at start-up. |
+| `input/geometry.dat` | The pore space. `preprocess.py` rebuilds it; this copy is here so the case runs before you have run anything. |
 
-## What to look for
+### The offline code this case ships
 
-**The stoichiometric ratio in the output.** Integrate the four fields over the
-domain between two writes. CH4 and SO4 consumed should match HS and HCO3
-produced, one for one, to within the transport error. If they do not, the graph
-in `stoich` is wrong — not the fit.
+| File | What it is |
+|---|---|
+| `training/aom_samples.csv` | The 400 samples `input/aom.gnn` was fitted from. |
+| `training/aom_stoich.csv` | The stoichiometric matrix — the STRUCTURE the trainer is given rather than asked to learn. |
+| `training/train_graphnet.py` | Trains the message-passing network and writes the `.gnn`. |
+| `training/xval_gnn.py` | The parity self-test: evaluates the same network through the Python trainer and the C++ loader and reports the disagreement. It takes no arguments and checks the shipped network, not one you just trained. |
 
-**The clamp count at the end.** Rising through the run means the simulation is
-walking out of the box the network was trained in. Concentrations drift as the
-colony grows, so a case that starts inside the box does not necessarily stay
-there.
+### What it inherits
 
-**The `[GNN]` provenance block in the log.** It carries the training command,
-the sample count and the fit quality, so the result is traceable to the data
-that produced it.
+Only the two shared kinetics headers, from
+[`../../config/kinetics/`](../../config/kinetics/), and the solver sources.
+`setup_case.sh` lays those down and copies this folder whole on top.
 
-## Training your own
-
-```bash
-cd pipelines/B_offline_models/B4_graph_network
-STOICH=mystoich.csv SAMPLES=mysamples.csv OUT=mynetwork.gnn ./run.sh
-```
-
-You supply two CSVs — the stoichiometric matrix and the samples — and a
-Damköhler number per reaction, which enters as an edge input so one network can
-span reaction-limited and transport-limited regimes. `run.sh` trains, then
-immediately cross-validates against the samples.
-
-The number that matters in that output is **not** the correlation. It is the
-ratio between species rates, which should come out close to the stoichiometry
-without ever having been a training target. If it does not, the graph is wrong.
+> **Why the training code is copied here rather than shared.** So that this
+> folder *is* the procedure. The cost is real and worth stating: a fix to a
+> trainer has to be applied to every case that carries it, and
+> `tests/check_repo.sh` fails if a copy drifts from `tools/`.
