@@ -1,0 +1,724 @@
+\part{Tutorial}
+
+Each chapter here is built on a worked example that ships with the code, in
+\file{examples/}. They are tiny --- 24\,$\times$\,24\,$\times$\,6 voxels,
+seconds on a laptop --- because the point is to show what a switch does, not to
+be physically interesting.
+
+Every chapter has the same shape: what the case is, what to run, what you
+should see, and what to change to learn something. Four of the cases have an
+answer that does not come from this code, and those are flagged: they are the
+ones worth trusting.
+
+% =====================================================================
+\chapter{Transport with no reaction}
+\label{ch:transport}
+
+\emph{Examples 01 and 02.}
+
+\section{The point}
+
+Before adding chemistry, be sure transport is right. These two cases have no
+reactions at all, and the second has an answer you can check on paper.
+
+\section{Example 01: flow and a tracer}
+
+A tracer is held at 1 on the inlet face and 0 on the outlet, and reacts with
+nothing. \tg{Peclet} is 1, so advection and diffusion are comparable.
+
+\textbf{Expect:} the tracer sweeping left to right; a profile that falls
+monotonically with $x$ and never rises; no \code{[NEG!]} warnings; no
+dependence on $z$.
+
+\section{Example 02: diffusion only}
+
+The same case with \tg{Peclet} set to 0, which switches the flow solver off
+entirely.
+
+\begin{cbnote}
+\textbf{\color{cbTeal}This one has a right answer.}\quad
+With no flow, no reaction, one face held at 1 and the other at 0, the steady
+state is the solution of $\nabla^2 C = 0$ with those boundaries --- a
+\textbf{straight line} from 1 to 0 along $x$.
+
+Plot the centreline profile. If it is straight, your diffusion coefficient,
+your boundary conditions and your relaxation time are all doing what you think.
+If it curves, one of them is not, and it is far easier to find out here than in
+a case with biology in it.
+\end{cbnote}
+
+\section{What to change}
+
+\begin{center}
+\begin{tabular}{@{}p{4.6cm}p{10.2cm}@{}}
+\toprule
+\textbf{Change} & \textbf{What it tells you}\\
+\midrule
+\tg{Peclet} 0 $\rightarrow$ 1 $\rightarrow$ 10 & how the balance of advection and diffusion moves the front. At high P\'eclet the front sharpens and the transport solver needs smaller steps.\\
+\tg{tau} away from 0.8 & the lattice-Boltzmann relaxation time. Values far from 1 are less stable; below about 0.55 the scheme misbehaves.\\
+right boundary Dirichlet $\rightarrow$ Neumann & a closed end: the tracer accumulates instead of leaving.\\
+\bottomrule
+\end{tabular}
+\end{center}
+
+\warn{If example 02 is not straight, stop here.}{Every later chapter builds on
+transport being correct. A curved profile with no reaction means something is
+firing that should not be, or a boundary is not being held, and both will
+corrupt everything downstream while looking plausible.}
+
+% =====================================================================
+\chapter{Abiotic kinetics}
+\label{ch:abiotic}
+
+\emph{Example 03.}
+
+\section{The point}
+
+Chemistry with no biology. Two reactants enter from opposite faces, meet, and
+make a product:
+\[
+  \mathrm{A} + \mathrm{B} \longrightarrow \mathrm{C},
+  \qquad \text{rate} = k\,[\mathrm{A}][\mathrm{B}]
+\]
+
+\section{Where the rate law lives}
+
+In \file{defineAbioticKinetics.hh}, in the example's own folder. The whole
+function is this:
+
+\begin{lstlisting}[style=cpp]
+void defineAbioticRxnKinetics(std::vector<double> C,
+                              std::vector<double>& subsR,
+                              plb::plint mask)
+{
+    for (std::size_t i = 0; i < subsR.size(); ++i) subsR[i] = 0.0;
+    if (C.size() < 3 || subsR.size() < 3) return;
+    if (mask < 2) return;              // nothing happens in solid or wall voxels
+
+    const double A = std::max(C[0], 0.0);
+    const double B = std::max(C[1], 0.0);
+    const double R = k_AB * A * B;     // mol/L/s
+
+    subsR[0] = -R;
+    subsR[1] = -R;
+    subsR[2] = +R;
+}
+\end{lstlisting}
+
+Three things in that snippet are conventions you will reuse everywhere:
+
+\begin{itemize}[leftmargin=1.2em]
+\item \textbf{\code{C} is indexed in \file{CompLaB.xml} order.} \code{C[0]} is
+\tg{substrate0}. There is no lookup by name.
+\item \textbf{\code{subsR} is a rate, per second}, positive for produced and
+negative for consumed. The solver multiplies by the time step.
+\item \textbf{\code{std::max(x, 0.0)}} floors the tiny negative values the
+lattice-Boltzmann solver can produce near steep fronts. Without it a rate law
+can amplify numerical noise into a real instability.
+\end{itemize}
+
+\section{What you should see}
+
+A peak in C near the middle, with A and B drawn down around it. With
+\tg{Peclet} at 0 the front is stationary; turn the flow on and it moves
+downstream.
+
+\begin{cbnote}
+\textbf{\color{cbTeal}This one has a right answer too.}\quad
+One A plus one B makes exactly one C, so summed over the domain
+\[
+  \Delta[\mathrm{A}] + \Delta[\mathrm{C}] = 0
+  \qquad\text{and}\qquad
+  \Delta[\mathrm{B}] + \Delta[\mathrm{C}] = 0
+\]
+at every step. Any drift in those sums is a bug, not chemistry.
+\end{cbnote}
+
+% =====================================================================
+\chapter{Aqueous speciation}
+\label{ch:equilibrium}
+
+\emph{Example 04.}
+
+\section{The point}
+
+Some chemistry is fast enough to treat as instantaneous equilibrium rather than
+as a rate. CompLB3D solves a components-and-species tableau in every pore
+voxel, at every step.
+
+The example uses the smallest tableau that is still real chemistry: the
+carbonate system, four species over two components.
+
+\begin{center}
+\begin{tabular}{@{}lccl@{}}
+\toprule
+\textbf{species} & \textbf{HCO$_3$} & \textbf{H} & \textbf{log\,K}\\
+\midrule
+HCO$_3$ \emph{(component)}  & 1 & 0 & 0\\
+H \emph{(component)}        & 0 & 1 & 0\\
+CO$_3$                      & 1 & $-1$ & $-10.33$\\
+H$_2$CO$_3$                 & 1 & 1 & $6.35$\\
+\bottomrule
+\end{tabular}
+\end{center}
+
+In XML:
+
+\begin{lstlisting}[style=xml]
+<equilibrium>
+    <enabled>true</enabled>
+    <components>HCO3 H</components>
+    <stoichiometry>
+        <species0>1  0</species0>
+        <species1>0  1</species1>
+        <species2>1 -1</species2>
+        <species3>1  1</species3>
+    </stoichiometry>
+    <logK>
+        <species0>0.</species0>     <species1>0.</species1>
+        <species2>-10.33</species2> <species3>6.35</species3>
+    </logK>
+</equilibrium>
+\end{lstlisting}
+
+\section{The rules of the tableau}
+
+\begin{itemize}[leftmargin=1.2em]
+\item \tg{components} names master species, and those names must match
+\tg{name\_of\_substrates} exactly.
+\item Each \tg{speciesN} row has one number per component, and \code{N} is the
+substrate index.
+\item A component's own row is the identity row with log\,K of 0.
+\item \textbf{A row of zeros means the solver ignores that species.} That is
+how minerals and biomass stay out of the tableau while still being substrates.
+\end{itemize}
+
+\section{What you should see}
+
+The banner reports the tableau it parsed --- 2 components, 4 species. Acid
+enters from the left, so H$_2$CO$_3$ should dominate near the inlet and CO$_3$
+away from it.
+
+\begin{cbnote}
+\textbf{\color{cbTeal}Check the totals.}\quad
+Total carbonate, summed over HCO$_3$, CO$_3$ and H$_2$CO$_3$, must change only
+through transport. Speciation moves mass \emph{between} species; it never
+creates or destroys a component.
+\end{cbnote}
+
+\warn{This is the expensive part.}{Speciation costs more than everything else
+in the code combined. Even on 3456 voxels you will see it in the step time.
+Leave it off until you need it, and if you do need it, expect the equilibrium
+solve to dominate your budget.}
+
+\section{Known limits, stated plainly}
+
+Activities are ideal --- no Debye--H\"uckel or Davies correction. There is no
+temperature dependence, no gas phase, no redox couple and no mineral saturation
+index. The log\,K values you supply are therefore conditional constants at your
+own ionic strength and 25\,\textdegree C. Say so in your methods section.
+
+% =====================================================================
+\chapter{Biomass and the three solvers}
+\label{ch:biomass}
+
+\emph{Examples 05, 06 and 07 --- the same case, one line different.}
+
+\section{The point}
+
+Biomass has to go somewhere when a colony grows. CompLB3D offers three ways of
+moving it, chosen per organism with \tg{solver\_type}. Examples 05 to 07 are
+identical apart from that one tag, so running all three shows you exactly what
+the choice costs.
+
+\section{The three}
+
+\begin{center}
+\begin{tabular}{@{}p{1.5cm}p{6.2cm}p{6.9cm}@{}}
+\toprule
+& \textbf{How it moves biomass} & \textbf{Use it when}\\
+\midrule
+\textbf{CA} & cellular automaton: biomass over the maximum density spills into neighbouring voxels & you want a biofilm that spreads by pushing, which is how biofilms actually grow\\
+\textbf{FD} & finite difference: biomass diffuses with its own coefficient & you want smooth spreading and a diffusivity you can justify\\
+\textbf{LBM} & biomass gets its own advection--diffusion lattice & biomass genuinely moves with the flow\\
+\bottomrule
+\end{tabular}
+\end{center}
+
+\begin{center}
+\begin{tikzpicture}[font=\footnotesize,
+  n/.style={draw=cbRule,fill=cbSand,rounded corners=2pt,minimum width=2.9cm,
+            minimum height=0.8cm,align=center,line width=0.7pt},
+  d/.style={draw=cbTeal,fill=white,diamond,aspect=2.6,inner sep=1.5pt,
+            align=center,line width=0.7pt},
+  a/.style={-{Latex[length=2mm]},cbGrey,line width=0.7pt}]
+\node[d] (q1) at (0,0) {does biomass move\\ with the water?};
+\node[n] (lbm) at (5.6,0.9) {\textbf{LBM}};
+\node[d] (q2) at (0,-2.2) {is it a biofilm that\\ pushes as it grows?};
+\node[n] (ca) at (5.6,-1.6) {\textbf{CA}};
+\node[n] (fd) at (5.6,-3.0) {\textbf{FD}};
+\draw[a] (q1) -- node[above,font=\tiny]{yes} (lbm);
+\draw[a] (q1) -- node[left,font=\tiny]{no} (q2);
+\draw[a] (q2) -- node[above,font=\tiny]{yes} (ca);
+\draw[a] (q2) -- node[below,font=\tiny]{no} (fd);
+\end{tikzpicture}
+\end{center}
+
+\section{What each one demands of the input file}
+
+\begin{center}
+\begin{tabular}{@{}p{1.4cm}p{13.4cm}@{}}
+\toprule
+\textbf{CA} & needs \tg{viscosity\_ratio\_in\_biofilm}, \tg{thrd\_biofilm\_fraction} and \tg{CA\_method}. \tg{CA\_method} \code{fraction} shares the excess in proportion to the space free in each neighbour.\\
+\textbf{FD} & needs \tg{biomass\_diffusion\_coefficients}. \textbf{Rejected for planktonic organisms} --- it requires a \tg{microbeN} entry under \tg{material\_numbers}.\\
+\textbf{LBM} & needs \tg{biomass\_diffusion\_coefficients}. Costs one extra lattice per organism, which is the most expensive of the three in memory.\\
+\bottomrule
+\end{tabular}
+\end{center}
+
+\section{The rate law}
+
+\file{defineKinetics.hh} in these folders implements Monod growth:
+\[
+  \text{growth} = \mu_{\max}\,\frac{S}{K_s+S}\,B,
+  \qquad
+  \frac{dS}{dt} = -\frac{\text{growth}}{Y},
+  \qquad
+  \frac{dB}{dt} = \text{growth} - k_d B
+\]
+
+\warn{\tg{half\_saturation\_constants} in the XML does not drive this.}{That
+tag feeds the flux balance and surrogate paths, which build their own uptake
+bounds from it. A hand-written kinetics file takes its parameters from its own
+table, in the header, next to the equation that uses them. If you change $K_s$
+in the XML and nothing happens, this is why.}
+
+\section{What you should see}
+
+Biomass rising from the seeded patch and then levelling off as growth and decay
+balance. The donor drawn down around the colony and replenished from the
+boundary. A product plume spreading from the colony. No \code{[NEG!]} warnings.
+
+Run 05, 06 and 07 and compare: the biomass \emph{totals} should be close, the
+spatial \emph{patterns} different. That is the honest way to see what the
+solver choice actually buys you.
+
+% =====================================================================
+\chapter{More than one organism}
+\label{ch:twomicrobes}
+
+\emph{Example 08.}
+
+\section{The point}
+
+\tg{solver\_type} and \tg{reaction\_type} are per organism, not global. Example
+08 has two microbes on opposite walls sharing one donor, one using the cellular
+automaton and the other lattice Boltzmann, in the same run.
+
+They differ in kinetics too: Bug1 has the higher $\mu_{\max}$ and the higher
+$K_s$; Bug2 the reverse. So Bug1 wins where the donor is plentiful and Bug2
+where it is scarce --- the classic $r$ versus $K$ trade-off. Bug1 sits nearer
+the inlet, so it should end up ahead.
+
+\section{What you should see}
+
+Both populations growing, then their \emph{ratio} going flat. A donor shadow
+between the two colonies.
+
+\section{What to change}
+
+Swap the two \tg{solver\_type} lines and rerun. The converged ratio should
+barely move: the solver decides how biomass spreads, not how much of it there
+is. If it moves a lot, that is worth understanding before you trust either
+solver on a real problem.
+
+% =====================================================================
+\chapter{Flux balance analysis}
+\label{ch:fba}
+
+\emph{Examples 09 and 10.}
+
+\section{The point}
+
+Instead of writing a rate law, hand the organism a genome-scale metabolic model
+and let a linear program work out how fast it can grow on what is locally
+available. CompLB3D solves that program in every voxel, at every step.
+
+\section{The toy model, solved by hand}
+
+Example 09 uses a model small enough to check on paper --- three metabolites,
+four reactions:
+
+\begin{center}
+\begin{tabular}{@{}clll@{}}
+\toprule
+\textbf{index} & \textbf{reaction} & \textbf{written as} & \textbf{meaning}\\
+\midrule
+0 & EX\_S & S$_c$ $\rightarrow$ & negative flux imports the donor\\
+1 & EX\_O & O$_c$ $\rightarrow$ & negative flux imports the acceptor\\
+2 & EX\_P & P$_c$ $\rightarrow$ & positive flux exports the product\\
+3 & BIO   & S$_c$ + 0.5\,O$_c$ $\rightarrow$ P$_c$ & the objective\\
+\bottomrule
+\end{tabular}
+\end{center}
+
+Steady state forces $v_0 = -v_3$ and $v_1 = -\tfrac12 v_3$, so with uptake
+bounds $V_S$ and $V_O$:
+
+\begin{cbnote}
+\[
+  \boxed{\ \text{growth} \;=\; \min\!\left(V_S,\; 2\,V_O\right)\ }
+  \qquad\text{where}\qquad
+  V = V_{\max}\,\frac{C}{K_c + C}
+\]
+With \code{fba\_maximum\_uptake\_flux} of 10 and 4, and both concentrations
+well above their half-saturation constants, $V_S \to 10$ and $2V_O \to 8$: the
+acceptor limits, and growth should settle near \textbf{8\,mmol/gDW/h}.
+
+That number comes from the stoichiometry, not from this code. It is the
+strongest check in the suite.
+\end{cbnote}
+
+Change \tg{fba\_maximum\_uptake\_flux} to \code{4. 10. 0.} and the donor limits
+instead, so growth should settle near 4. One line, a second independent check.
+
+\section{How a voxel gets its answer}
+
+\begin{center}
+\begin{tikzpicture}[font=\footnotesize,
+  s/.style={draw=cbRule,fill=cbSand,rounded corners=2pt,minimum width=3.0cm,
+            minimum height=0.95cm,align=center,line width=0.7pt},
+  a/.style={-{Latex[length=2mm]},cbGrey,line width=0.7pt}]
+\node[s] (r) at (0,0) {\textbf{1. read}\\ $C$ and $B$ here};
+\node[s] (b) at (3.9,0) {\textbf{2. bound}\\ $v_{lb}=-V_{\max}\frac{C}{K_c+C}$};
+\node[s] (l) at (7.8,0) {\textbf{3. solve}\\ GLPK or COBRApy};
+\node[s] (u) at (3.9,-1.8) {\textbf{4. read back}\\ growth, exchange fluxes};
+\node[s] (c) at (7.8,-1.8) {\textbf{5. convert}\\ to $\Delta C$, $\Delta B$};
+\draw[a] (r) -- (b);
+\draw[a] (b) -- (l);
+\draw[a] (l.south) -- ++(0,-0.45) -| (u.north);
+\draw[a] (u) -- (c);
+\end{tikzpicture}
+\end{center}
+
+Steps 1, 2, 4 and 5 are identical for GLPK and COBRApy. Only step 3 differs.
+
+\section{GLPK or COBRApy}
+
+\begin{center}
+\begin{tabular}{@{}p{2.2cm}p{6.2cm}p{6.2cm}@{}}
+\toprule
+& \textbf{GLPK} & \textbf{COBRApy}\\
+\midrule
+how it works & a persistent \code{glp\_prob}; per voxel it only resets column bounds and re-solves from the previous basis & rebuilds the problem through optlang on every \code{optimize()} call, across a Python boundary\\
+speed & the fast path & one to two orders of magnitude slower per voxel\\
+needs & \code{-DENABLE\_GLPK=ON} & \code{-DENABLE\_COBRAPY=ON}, cobrapy installed, and \file{src/complab3d\_cobrapy.py} present at run time\\
+\bottomrule
+\end{tabular}
+\end{center}
+
+\warn{COBRApy does not read SBML.}{Both solvers eat the same
+\file{*\_rGEM\_c.xml} matrix file produced by \file{extractMM.py}. COBRApy
+rebuilds a \code{cobra.Model} in memory from that matrix, with anonymous
+numbered reactions --- no gene names, no annotations. Its value here is as an
+independent second opinion, not as a richer interface.}
+
+\section{Getting your own model in}
+
+\file{extractMM.py} converts a genome-scale model into the matrix file the
+solvers read.
+
+\begin{lstlisting}[style=sh]
+python3 extractMM.py iAF987.xml -o input/geobacter.xml
+python3 extractMM.py iJO1366.mat -o input/ecoli.xml     # COBRA Toolbox .mat
+python3 extractMM.py model.json  -o input/model.xml
+\end{lstlisting}
+
+Then in \file{CompLaB.xml}:
+
+\begin{lstlisting}[style=xml]
+<model_filename>geobacter</model_filename>          <!-- no .xml -->
+<exchange_reaction_indices>6 55 418 -1</exchange_reaction_indices>
+<fba_maximum_uptake_flux>15. 25. 8. 0.</fba_maximum_uptake_flux>
+<substrate_lower_bounds>-15. -25. -8. 0.</substrate_lower_bounds>
+<substrate_upper_bounds>60. 60. 60. 0.</substrate_upper_bounds>
+<objective_direction>maximize</objective_direction>
+<biomass_molar_mass>24.6</biomass_molar_mass>
+\end{lstlisting}
+
+\tg{exchange\_reaction\_indices} maps each substrate, in XML order, onto the
+reaction in \emph{that organism's} model that exchanges it. Use \code{-1} for a
+substrate the organism does not exchange --- a single \code{-1} is what makes a
+mutualism obligate.
+
+\note{\tg{biomass\_molar\_mass}}{converts CompLB3D's molar biomass into the
+gDW a metabolic model expects; 24.6\,g/mol is the generic
+CH$_{1.8}$O$_{0.5}$N$_{0.2}$ formula weight. If your biomass is already in
+gDW/L, set it to 1.}
+
+\section{What you should see}
+
+The model loading with its metabolite and reaction counts. The metabolic
+summary naming the solver and the number of microbes using it. Growth
+approaching the value the stoichiometry predicts. Product accumulating at the
+rate biomass is made.
+
+Run examples 09 and 10 and compare. They receive an identical linear program
+and share nothing else, so agreement is strong evidence the coupling is right
+and disagreement localises the bug to one of the two.
+
+% =====================================================================
+\chapter{Surrogate models}
+\label{ch:surrogate}
+
+\emph{Example 11.}
+
+\section{The point}
+
+Flux balance analysis is expensive: one linear program per organism, per active
+voxel, per step. On a domain of a few million voxels it dominates everything.
+
+A surrogate replaces the program with a small function fitted to it offline:
+\[
+  \text{uptake rates} \;\longrightarrow\; \text{growth rate}
+\]
+evaluated in a few hundred multiplications. Speed-ups of 100 to 1000 times are
+typical.
+
+\section{The shipped network}
+
+\begin{center}
+\begin{tikzpicture}[font=\scriptsize, x=1.25cm, y=0.42cm,
+  nn/.style={circle,draw=cbRule,fill=cbSand,inner sep=1.1pt,line width=0.5pt}]
+\foreach \i in {0,1} \node[nn] (i\i) at (0, {2-\i*4}) {};
+\foreach \l in {1,2,3,4} \foreach \j in {0,...,4}
+  \node[nn] (h\l\j) at (\l, {4-\j*2}) {};
+\node[nn] (o) at (5,0) {};
+\foreach \i in {0,1} \foreach \j in {0,...,4} \draw[cbRule,line width=0.25pt] (i\i)--(h1\j);
+\foreach \l [evaluate=\l as \n using int(\l+1)] in {1,2,3}
+  \foreach \j in {0,...,4} \foreach \k in {0,...,4}
+    \draw[cbRule,line width=0.25pt] (h\l\j)--(h\n\k);
+\foreach \j in {0,...,4} \draw[cbRule,line width=0.25pt] (h4\j)--(o);
+\node[cbGrey,anchor=north] at (0,-3.2) {2 inputs};
+\node[cbGrey,anchor=north] at (2.5,-3.2) {4 hidden layers, 10 tansig each};
+\node[cbGrey,anchor=north] at (5,-3.2) {1 linear};
+\end{tikzpicture}
+\end{center}
+
+The network shipped in \file{surrogateModel.hh} is \emph{Geobacter
+metallireducens} on acetate and Fe(III), exported from MATLAB's Deep Learning
+Toolbox.
+
+\begin{cbwarn}
+\textbf{\color{cbRed}A network is only valid inside the range it was trained
+on.}\quad Outside it, a neural network does not fail --- it returns confident
+nonsense. The shipped one was trained on
+
+\begin{center}
+\begin{tabular}{@{}lr@{ \ to \ }l@{}}
+acetate  & 0.00089 & 9.998 \ mmol/gDW/h\\
+Fe(III)  & 0.000035 & 0.4997 \ mmol/gDW/h\\
+growth   & 0 & 0.0527 \ 1/h\\
+\end{tabular}
+\end{center}
+
+Ask it for an acetate uptake of 50 and an Fe(III) uptake of 5, well outside the
+box, and it cheerfully reports 0.0486\,1/h.
+
+That is why example 11 sets \tg{fba\_maximum\_uptake\_flux} to \code{8. 0.4} ---
+safely inside. Raise the second number above 0.5 and the run spends its time
+extrapolating.
+\end{cbwarn}
+
+Those bounds are not documented anywhere in the network file. They were
+recovered by inverting the \code{mapminmax} scaling, which is what
+\file{surrogate\_training/inspectSurrogate.py} does:
+
+\begin{lstlisting}[style=sh]
+python3 surrogate_training/inspectSurrogate.py surrogateModel.hh
+\end{lstlisting}
+
+Run that on any network before trusting it, including one somebody else fitted.
+
+\section{Fitting your own}
+
+The shipped network encodes one organism on two substrates over one range. For
+anything else you need to train your own, and Chapter~\ref{ch:trainsurrogate}
+covers that end to end.
+
+% =====================================================================
+\chapter{Combining metabolism types}
+\label{ch:combined}
+
+\emph{Example 12.}
+
+\section{The point}
+
+A metabolic model describes what the network can do; it does not describe
+everything a cell does. Maintenance is the standard example: a constant per
+biomass drain that yields no growth. A plain flux balance objective omits it,
+so the model over-predicts growth at low substrate.
+
+The combined reaction types run both paths and \textbf{add} the rates:
+
+\begin{center}
+\code{glpk\_and\_kinetics} \qquad \code{cobrapy\_and\_kinetics} \qquad
+\code{surrogate\_and\_kinetics}
+\end{center}
+
+\section{The sign discipline}
+
+\begin{cbwarn}
+\textbf{\color{cbRed}Do not write \code{bioR} in a kinetics file that runs
+alongside FBA.}\quad Growth belongs to the metabolic path. Writing it in both
+places double counts it, and the result looks plausible --- just wrong by a
+factor that depends on the substrate field.
+
+Example 12's \file{defineKinetics.hh} writes \code{subsR} only, and says so in
+a comment. Copy that discipline.
+\end{cbwarn}
+
+\section{Two Vmax tags, not one}
+
+A combined organism needs both:
+
+\begin{center}
+\begin{tabular}{@{}p{5.4cm}p{9.4cm}@{}}
+\toprule
+\tg{maximum\_uptake\_flux} & read by the \textbf{kinetics} path, in mol substrate per mol cells per second\\
+\tg{fba\_maximum\_uptake\_flux} & read by the \textbf{metabolic} path, in mmol/gDW/h\\
+\bottomrule
+\end{tabular}
+\end{center}
+
+One number cannot satisfy both meanings. If you supply only the shared tag, the
+metabolic layer uses it and prints a warning about the units.
+
+\section{What you should see}
+
+The same growth rate as example 09, because maintenance adds no biomass --- but
+the donor drawn down faster, by exactly the maintenance term. Diff the two
+donor profiles: the difference \emph{is} the maintenance, and it confirms the
+paths are adding rather than one silently winning.
+
+% =====================================================================
+\chapter{Precipitation and dissolution}
+\label{ch:precip}
+
+\emph{Examples 13, 14 and 15.}
+
+\section{The point}
+
+Minerals form, fill pore space and block the flow; acid arrives and eats them
+back out again. The geometry is not a fixed input --- it is a state variable.
+
+\section{The voxel life cycle}
+
+\begin{center}
+\begin{tikzpicture}[font=\footnotesize,
+  st/.style={draw=cbRule,fill=cbSand,rounded corners=2pt,minimum width=2.8cm,
+             minimum height=0.9cm,align=center,line width=0.7pt},
+  a/.style={-{Latex[length=2mm]},cbGrey,line width=0.7pt}]
+\node[st] (open) at (0,0) {\textbf{open pore}\\ mineral $=0$};
+\node[st] (fill) at (4.6,0) {\textbf{filling}\\ $0<$ mineral $<$ full};
+\node[st] (seal) at (9.2,0) {\textbf{sealed}\\ mineral $\ge$ full};
+\draw[a] (open) -- node[above,font=\tiny]{reaction} (fill);
+\draw[a] (fill) -- node[above,font=\tiny]{reaches \texttt{max\_precipRho}} (seal);
+\draw[a] (seal.south) to[out=-140,in=-40] node[below,font=\tiny]
+  {falls below \texttt{reopen\_fraction} $\times$ full} (fill.south);
+\draw[a] (fill.north) to[out=140,in=40] node[above,font=\tiny]{dissolved away} (open.north);
+\end{tikzpicture}
+\end{center}
+
+\section{Example 13: precipitation}
+
+\[ \mathrm{Fe}^{2+} + \mathrm{HS}^- \longrightarrow \mathrm{FeS(s)} \]
+
+Three things make this work:
+
+\begin{enumerate}[leftmargin=1.4em]
+\item The mineral substrate is \textbf{\tg{immobile}}. It never advects or
+diffuses, so it accumulates exactly where it forms. A mineral that moved would
+never seal anything.
+\item \tg{max\_precipRho} is the mol/L of a completely full voxel, derived from
+the mineral: $1000 / V_m$ with $V_m$ in cm$^3$/mol. Mackinawite is
+87.91\,g/mol over 4.30\,g/cm$^3$, so $V_m = 20.44$ and
+\tg{max\_precipRho} $= 48.9$.
+\item \tg{surface\_only} \code{1} restricts growth to wall-adjacent voxels ---
+heterogeneous nucleation, which is the physically right choice. Set it to 0 and
+the mineral grows anywhere, sealing pore throats far too readily.
+\end{enumerate}
+
+\textbf{Expect:} FeS building in a band across the middle; the porosity in the
+log falling in steps, one per update interval; the flow re-solved after each
+conversion; and mass conserved --- every mole of FeS removes one Fe$^{2+}$ and
+one HS$^-$.
+
+\section{Example 14: dissolution}
+
+\[ \mathrm{CaCO_3(s)} + \mathrm{H}^+ \longrightarrow \mathrm{Ca}^{2+} + \mathrm{HCO_3}^- \]
+
+Dissolution has its own hook, \code{defineDissolutionRate()}, in the same
+header. It is handed:
+
+\begin{center}
+\begin{tabular}{@{}p{2.2cm}p{12.6cm}@{}}
+\toprule
+\code{phaseId} & which declared phase this is, numbered from 1 in \tg{phaseN} order\\
+\code{C} & the water \textbf{touching} the mineral: the open neighbours' concentrations, averaged. A solid voxel has no water of its own that moves.\\
+\code{mineral} & mol/L of mineral left in this voxel\\
+\bottomrule
+\end{tabular}
+\end{center}
+
+and must return \code{mineralR} \textbf{negative}, plus the released solutes in
+\code{subsR}, positive. Do not write the mineral's own \code{subsR} entry --- the
+solver does that from \code{mineralR}.
+
+\subsection{Why phases must be declared}
+
+Only what appears in a \tg{phaseN} block can dissolve, and that is deliberate.
+If the rule were simply ``a solid voxel with no mineral left becomes pore'',
+then an inert quartz grain --- which never held any mineral --- is already below
+any threshold, and your whole grain pack would dissolve on the first step.
+Declaring phases makes quartz safe by construction.
+
+\begin{lstlisting}[style=xml]
+<phase0>
+    <name>calcite_grain</name>
+    <material_number>0</material_number>   <!-- the solid grains -->
+    <substrate>2</substrate>               <!-- holds its inventory -->
+    <full_density>27.1</full_density>      <!-- mol/L when full -->
+    <initial_fill>27.1</initial_fill>      <!-- starts solid -->
+</phase0>
+\end{lstlisting}
+
+\tg{initial\_fill} is the point of example 14: the grains \emph{start} solid
+and are eaten away. Dissolution is not limited to material that precipitated
+first. A precipitate phase instead uses \tg{initial\_fill} 0 and
+\tg{is\_precipitate} \code{true}.
+
+\textbf{Expect:} the acid eating into the \emph{upstream} faces first; Ca$^{2+}$
+leaving downstream; porosity rising in steps, the mirror of example 13.
+
+\section{Example 15: both at once}
+
+Both blocks enabled, on one mineral, so a voxel can seal and later reopen.
+
+\begin{cbnote}
+\textbf{\color{cbTeal}This is what \tg{reopen\_fraction} is for.}\quad
+With both directions active a voxel can sit near the threshold. A single
+threshold makes it flip open and shut every update interval, and every flip
+re-solves the flow. \tg{reopen\_fraction} 0.9 puts a gap between sealing at
+full density and reopening below $0.9\times$ full, so it settles instead of
+chattering.
+
+Set it to 0.99 and rerun: you should see the porosity oscillate, with a flow
+solve wasted on each flip. That is the failure the hysteresis prevents.
+\end{cbnote}
+
+The two rate laws are \emph{not} inverses. Precipitation is second order in the
+dissolved ions; dissolution is first order in acid and in remaining mineral.
+They are separate laws that happen to move the same mineral --- which is how the
+code has to work, because the speciation solver computes no solubility
+products and so there is no saturation state to drive a single reversible rate.

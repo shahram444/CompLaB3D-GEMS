@@ -1,0 +1,599 @@
+\part{Getting started}
+
+% =====================================================================
+\chapter{What CompLB3D does}
+\label{ch:what}
+
+CompLB3D simulates what happens in the pore space of a sediment, a soil or a
+porous rock: water flows through it, dissolved chemicals move with the water,
+microbes eat them and grow, minerals form and dissolve, and the pore space
+itself changes shape as a result.
+
+It does this at the \emph{pore scale}. The grid is fine enough that individual
+grains and pore throats are resolved, so you are not fitting an effective
+diffusivity or a tortuosity factor: the geometry is in the model, and transport
+follows from it.
+
+\section{The five things it couples}
+
+\begin{center}
+\begin{tikzpicture}[
+  font=\footnotesize,
+  box/.style={draw=cbRule, fill=cbSand, rounded corners=2pt, minimum width=3.1cm,
+              minimum height=1.0cm, align=center, line width=0.7pt},
+  arr/.style={-{Latex[length=2.4mm]}, cbGrey, line width=0.7pt}]
+
+\node[box] (flow) at (0,0) {\textbf{Flow}\\ Navier--Stokes, D3Q19};
+\node[box] (tr) at (4.2,0) {\textbf{Transport}\\ advection--diffusion, D3Q7};
+\node[box] (rx) at (8.4,0) {\textbf{Reaction}\\ metabolism, chemistry};
+\node[box] (eq) at (4.2,-1.9) {\textbf{Speciation}\\ equilibrium tableau};
+\node[box] (geo) at (8.4,-1.9) {\textbf{Geometry}\\ precipitation, dissolution};
+
+\draw[arr] (flow) -- node[above,font=\tiny]{velocity} (tr);
+\draw[arr] (tr) -- node[above,font=\tiny]{concentrations} (rx);
+\draw[arr] (rx) -- (eq);
+\draw[arr] (eq) -- (tr);
+\draw[arr] (rx) -- (geo);
+\draw[arr] (geo.west) -- ++(-1.0,0) |- (flow.south);
+\node[cbGrey,font=\tiny] at (2.0,-2.55) {pore space changed, flow re-solved};
+\end{tikzpicture}
+\end{center}
+
+Every box except the first two is optional and switched on from the input file.
+With all of them off, CompLB3D is a flow-and-transport solver and nothing more.
+That is deliberate: you should be able to turn one thing on at a time and see
+what it did.
+
+\section{What makes it different from the 2D CompLaB}
+
+CompLB3D began as a port of CompLaB to three dimensions and grew several
+capabilities the 2D code does not have.
+
+\begin{center}
+\begin{tabular}{@{}p{5.2cm}p{4.6cm}p{4.6cm}@{}}
+\toprule
+& \textbf{CompLaB (2D)} & \textbf{CompLB3D}\\
+\midrule
+Dimensions & D2Q9 / D2Q5 & D3Q19 / D3Q7\\
+Biomass solvers & CA, FD, LBM & CA, FD, LBM\\
+Metabolism & kinetics, FBA, surrogate & the same, plus combined types\\
+Aqueous speciation & --- & equilibrium tableau\\
+Abiotic kinetics & --- & separate hook\\
+Precipitation & --- & volume-of-pixel pore clogging\\
+Dissolution & --- & pore reopening\\
+Surrogate training & not distributed & MATLAB and Python paths\\
+Worked examples & 6, one problem & 15, one per capability\\
+\bottomrule
+\end{tabular}
+\end{center}
+
+\section{What it is not}
+
+Being honest about this saves time.
+
+\begin{itemize}[leftmargin=1.2em]
+\item \textbf{It is not a continuum reactive transport code.} There is no
+Darcy law and no representative elementary volume. If your domain is metres
+across, this is the wrong tool.
+\item \textbf{The speciation is ideal.} No activity corrections, no temperature
+dependence, no gas phase, no redox couples, no mineral saturation indices. The
+equilibrium constants you supply are conditional constants at your own ionic
+strength.
+\item \textbf{There is no unsaturated flow.} One fluid phase only.
+\item \textbf{Rate laws are compiled in.} Changing your chemistry means editing
+a C\texttt{++} header and rebuilding. This surprises people who expect an input
+file to be enough.
+\end{itemize}
+
+% =====================================================================
+\chapter{Installing and building}
+\label{ch:install}
+
+\section{What you need}
+
+\begin{center}
+\begin{tabular}{@{}p{3.6cm}p{2.4cm}p{8.6cm}@{}}
+\toprule
+\textbf{Component} & \textbf{Required?} & \textbf{Notes}\\
+\midrule
+C\texttt{++} compiler & yes & GCC or Clang, C\texttt{++}11 or later\\
+CMake & yes & 3.10 or later\\
+Palabos & yes & \textbf{version 2.3.0}. Downloaded separately.\\
+MPI & recommended & on by default; turn off with \code{-DENABLE\_MPI=OFF}\\
+GLPK & optional & only for flux balance analysis through GLPK\\
+Python 3 + cobrapy & optional & only for flux balance analysis through COBRApy\\
+ParaView & recommended & to look at the output\\
+\bottomrule
+\end{tabular}
+\end{center}
+
+\warn{Palabos version matters.}{CompLB3D is developed against Palabos
+\textbf{v2.3.0}. Later versions change data-processor interfaces, and the code
+will not compile against them without edits. Get 2.3.0.}
+
+\section{Step 1: get Palabos}
+
+Palabos is a lattice-Boltzmann framework and it is a separate work under its
+own licence. It is not distributed with CompLB3D, partly because it is around
+100\,MB and partly because bundling someone else's AGPL library inside yours
+muddies the licence question for everybody downstream.
+
+Download \code{palabos-v2.3.0} from \url{https://palabos.unige.ch/} and unpack
+it somewhere permanent.
+
+\begin{lstlisting}[style=sh]
+tar xzf palabos-v2.3.0.tar.gz -C /your/path/
+\end{lstlisting}
+
+You do not have to build Palabos separately --- CompLB3D compiles the parts it
+needs. But building it once on its own is worth the ten minutes, because if
+something is wrong with your compiler or MPI you will find out there, in a
+project with good documentation, rather than here.
+
+\begin{lstlisting}[style=sh]
+cd /your/path/palabos-v2.3.0/build
+cmake ..
+make
+\end{lstlisting}
+
+Warnings during that build are normal and can be ignored as long as it finishes.
+
+\section{Step 2: get CompLB3D}
+
+\begin{lstlisting}[style=sh]
+git clone https://github.com/shahram444/CompLB3D-lattice-Boltzmann-FBA-surrogate-COBRApy-GLPK.git
+cd CompLB3D-lattice-Boltzmann-FBA-surrogate-COBRApy-GLPK
+\end{lstlisting}
+
+\section{Step 3: point CMake at Palabos}
+
+Open \file{CMakeLists.txt} and edit the five lines that name the Palabos tree.
+They are around lines 85 to 93.
+
+\begin{lstlisting}[style=sh]
+include_directories("/your/path/palabos-v2.3.0/src")
+include_directories("/your/path/palabos-v2.3.0/externalLibraries")
+include_directories("/your/path/palabos-v2.3.0/externalLibraries/Eigen3")
+file(GLOB_RECURSE PALABOS_SRC "/your/path/palabos-v2.3.0/src/*.cpp")
+file(GLOB_RECURSE EXT_SRC "/your/path/palabos-v2.3.0/externalLibraries/tinyxml/*.cpp")
+\end{lstlisting}
+
+This is the single most common reason a first build fails. If CMake reports
+that it cannot find Palabos headers, this is why.
+
+\section{Step 4: build}
+
+\begin{lstlisting}[style=sh]
+mkdir build && cd build
+cmake ..
+make -j
+\end{lstlisting}
+
+That gives you the plain build: flow, transport, hand-written kinetics,
+speciation, precipitation and dissolution. It does \emph{not} include flux
+balance analysis, because that needs an optional dependency.
+
+\subsection{Optional: flux balance analysis through GLPK}
+
+Install GLPK first --- your package manager will have it
+(\code{apt install libglpk-dev}, \code{brew install glpk},
+\code{module load glpk} on a cluster). Then:
+
+\begin{lstlisting}[style=sh]
+cmake -DENABLE_GLPK=ON ..
+make -j
+\end{lstlisting}
+
+\subsection{Optional: flux balance analysis through COBRApy}
+
+This embeds a Python interpreter, so you need the Python \emph{development}
+headers, not just the interpreter.
+
+\begin{lstlisting}[style=sh]
+python3 -m pip install cobrapy
+cmake -DENABLE_COBRAPY=ON ..
+make -j
+\end{lstlisting}
+
+\note{Both at once.}{\code{cmake -DENABLE\_GLPK=ON -DENABLE\_COBRAPY=ON ..}
+builds an executable that can do either, chosen at run time from the input
+file. Worth doing once so you never think about it again.}
+
+\subsection{The build options in full}
+
+\begin{center}
+\begin{tabular}{@{}p{4.6cm}p{1.6cm}p{8.6cm}@{}}
+\toprule
+\textbf{Option} & \textbf{Default} & \textbf{Effect}\\
+\midrule
+\code{ENABLE\_MPI} & ON & parallel build. Turn off for a single-core debug build.\\
+\code{ENABLE\_GLPK} & OFF & links GLPK; enables \code{reaction\_type glpk}\\
+\code{ENABLE\_COBRAPY} & OFF & embeds Python; enables \code{reaction\_type cobrapy}\\
+\code{FBA\_BULK\_ONLY} & OFF & restricts the FBA processors to the bulk domain. An optimisation; leave it off until you have a reason.\\
+\bottomrule
+\end{tabular}
+\end{center}
+
+\section{Step 5: check the build}
+
+The fastest confidence check is the example suite, which ships with the code.
+
+\begin{lstlisting}[style=sh]
+python3 examples/makeGeometry.py
+python3 examples/makeExamples.py
+python3 examples/validateExamples.py .
+\end{lstlisting}
+
+The last command checks the fifteen examples structurally --- tag names, vector
+lengths, model file dimensions --- and compiles their kinetics headers. It
+takes about a second and should end with:
+
+\begin{lstlisting}[style=sh]
+15 case(s) checked, 0 failed, 0 note(s).
+\end{lstlisting}
+
+Then run them:
+
+\begin{lstlisting}[style=sh]
+./examples/runAllExamples.sh .
+\end{lstlisting}
+
+\section{When the build fails}
+
+\begin{center}
+\begin{tabular}{@{}p{6.2cm}p{8.6cm}@{}}
+\toprule
+\textbf{Message} & \textbf{Cause and fix}\\
+\midrule
+\code{Cannot find palabos3D.h} & The paths in \file{CMakeLists.txt} are wrong. Step 3.\\
+\code{ENABLE\_GLPK is ON but GLPK was not found} & Install \code{libglpk-dev}, or drop the flag.\\
+\code{ENABLE\_COBRAPY is ON but the Python development headers were not found} & You have Python but not \code{python3-dev}. Install it.\\
+undefined reference to \code{MPI\_*} & Building with MPI but linking without it. Load the same MPI module you configured with, and delete \file{build/} before reconfiguring.\\
+errors inside Palabos headers & Almost always the wrong Palabos version. Check it is 2.3.0.\\
+\code{defineKinetics.hh: C[94] out of range} & You are compiling a kinetics header written for different chemistry. Chapter~\ref{ch:ownkinetics}.\\
+\bottomrule
+\end{tabular}
+\end{center}
+
+\warn{Delete \file{build/} when you change configuration.}{CMake caches its
+options. Switching \code{ENABLE\_GLPK} on and off without clearing the cache
+produces builds that link the wrong things and fail in confusing ways.}
+
+% =====================================================================
+\chapter{Your first simulation}
+\label{ch:first}
+
+We will run example 01. It is the smallest thing that exercises both solvers:
+water driven through a channel, and a dissolved tracer that rides along and
+reacts with nothing.
+
+\section{Run it}
+
+\begin{lstlisting}[style=sh]
+# from the top of the CompLB3D tree
+cp examples/01_flow_only/defineKinetics.hh        .
+cp examples/01_flow_only/defineAbioticKinetics.hh .
+cd build && make -j && cd ..
+
+mkdir -p run01 && cd run01
+cp ../examples/01_flow_only/CompLaB.xml .
+cp -r ../examples/01_flow_only/input .
+mkdir -p output
+../build/complab
+\end{lstlisting}
+
+\warn{Why the two \file{.hh} files get copied.}{CompLaB compiles its rate laws
+in. \file{defineKinetics.hh} and \file{defineAbioticKinetics.hh} are
+\code{\#include}d, not read at run time, so a case with different chemistry
+needs a different binary. This catches everyone once. See
+Chapter~\ref{ch:ownkinetics}.}
+
+\note{\file{CompLaB.xml} is read by that exact name}{from the current working
+directory. Not from the executable's directory, not from a path you pass on the
+command line. Run the code from the folder that holds the input file.}
+
+\section{What you should see}
+
+The run prints a long banner at start-up. It is worth reading, because most
+input mistakes are visible in it. The parts that matter:
+
+\begin{lstlisting}[style=sh]
+[OK] XML configuration loaded and validated
+
+  domain          : 24 x 24 x 6   (3456 voxels)
+  substrates      : 1
+  microbes        : 0             (abiotic mode)
+  ...
+  [IMMOBILE] immobile (solid/precipitate) substrates: 0 of 1
+\end{lstlisting}
+
+then the flow solver converging, then the transport steps. At the end you have
+a folder of \file{.vti} files in \file{output/}.
+
+\section{Reading the run}
+
+Three things are worth checking on every run you ever do.
+
+\subsection{Did the flow converge?}
+
+The Navier--Stokes solver iterates until the velocity field stops changing by
+more than \tg{ns\_converge\_iT1}, or until \tg{ns\_max\_iT1} steps. If it hits
+the iteration cap instead of the tolerance, your flow field is not converged
+and everything downstream inherits that.
+
+\subsection{Are there \code{[NEG!]} warnings?}
+
+A negative concentration is not physical. It means a reaction removed more of
+something than was there, which usually means the time step is too long for the
+rate you specified. One or two at start-up while fields settle is tolerable;
+a stream of them is a real problem. Chapter~\ref{ch:errors}.
+
+\subsection{Does the answer depend on \textit{z}?}
+
+Every shipped example is 24\,$\times$\,24\,$\times$\,6 with $z$ periodic and
+the geometry extruded through the depth. That makes them quasi-2D on purpose:
+every $z$-plane sees identical conditions, so the answer \emph{must not} depend
+on $z$. If it does, something is wrong with the setup, not with the physics.
+It is a free check and it costs nothing to look.
+
+\section{Looking at the output}
+
+CompLB3D writes VTK ImageData (\file{.vti}) files, one per field per save
+interval. Open them in ParaView:
+
+\begin{enumerate}[leftmargin=1.4em]
+\item \textbf{File $\rightarrow$ Open}, select the numbered group
+      (ParaView collapses \file{subsLattice0\_0000500.vti} and friends into one
+      entry), and hit Apply.
+\item Set the \textbf{Coloring} dropdown to the field you want.
+\item Use \textbf{Slice} to cut through the domain; the raw view of a 3D block
+      shows you only its outer surface.
+\end{enumerate}
+
+\note{The \file{.vti} files use unit spacing.}{ParaView therefore shows lattice
+coordinates, not micrometres. Multiply by \tg{dx} if you need physical
+distance. This is a known wart, not a setting.}
+
+\section{What to try next}
+
+Change one thing and rerun. Good first experiments:
+
+\begin{center}
+\begin{tabular}{@{}p{5.0cm}p{9.8cm}@{}}
+\toprule
+\textbf{Change} & \textbf{What should happen}\\
+\midrule
+\tg{Peclet} from 1 to 0 & flow switches off; the tracer profile becomes a straight line. This is example 02.\\
+\tg{Peclet} from 1 to 10 & advection dominates; the tracer front sharpens and moves faster.\\
+\tg{delta\_P} up & higher velocity, and the flow solver takes longer to converge.\\
+\tg{nz} from 6 to 12 & the answer must not change. If it does, tell us.\\
+\bottomrule
+\end{tabular}
+\end{center}
+
+% =====================================================================
+\chapter{The input file}
+\label{ch:xml}
+
+Everything about a run is in \file{CompLaB.xml}. This chapter walks through its
+structure. Chapter~\ref{ch:reference} is the exhaustive tag list; this one is
+the map.
+
+\section{The six blocks}
+
+\begin{center}
+\begin{tikzpicture}[font=\footnotesize,
+  b/.style={draw=cbRule,fill=cbSand,line width=0.7pt,minimum width=3.2cm,
+            minimum height=0.85cm,align=center,rounded corners=2pt}]
+\node[b] (p)  at (0,0)    {\texttt{<path>}};
+\node[b] (s)  at (0,-1.1) {\texttt{<simulation\_mode>}};
+\node[b] (l)  at (0,-2.2) {\texttt{<LB\_numerics>}};
+\node[b] (c)  at (0,-3.3) {\texttt{<chemistry>}};
+\node[b] (m)  at (0,-4.4) {\texttt{<microbiology>}};
+\node[b] (o)  at (0,-5.5) {\texttt{<equilibrium>}, \texttt{<precipitation>},\\ \texttt{<dissolution>}, \texttt{<IO>}};
+
+\node[anchor=west,cbGrey] at (2.1,0)    {where the input and output folders are};
+\node[anchor=west,cbGrey] at (2.1,-1.1) {which physics is switched on};
+\node[anchor=west,cbGrey] at (2.1,-2.2) {domain, geometry, time stepping};
+\node[anchor=west,cbGrey] at (2.1,-3.3) {the solutes: one block each};
+\node[anchor=west,cbGrey] at (2.1,-4.4) {the organisms: one block each};
+\node[anchor=west,cbGrey] at (2.1,-5.5) {optional features and output};
+\end{tikzpicture}
+\end{center}
+
+\section{\tg{simulation\_mode}: the master switches}
+
+This block decides which physics runs at all. Everything in it is a
+\code{true} or \code{false}.
+
+\begin{lstlisting}[style=xml]
+<simulation_mode>
+    <biotic_mode>true</biotic_mode>
+    <enable_kinetics>true</enable_kinetics>
+    <enable_abiotic_kinetics>false</enable_abiotic_kinetics>
+    <enable_fba_glpk>false</enable_fba_glpk>
+    <enable_fba_cobrapy>false</enable_fba_cobrapy>
+    <enable_surrogate>false</enable_surrogate>
+</simulation_mode>
+\end{lstlisting}
+
+\tg{biotic\_mode} is the big one: \code{false} skips the whole
+\tg{microbiology} block, and CompLB3D becomes a chemistry-and-transport code.
+
+The three metabolic switches are \emph{global}. Each microbe then chooses its
+own \tg{reaction\_type}, and the two have to agree --- a microbe asking for
+\code{glpk} while \tg{enable\_fba\_glpk} is \code{false} stops the run with a
+message. That double gate is deliberate: it means you cannot accidentally get
+different biology from the one you asked for.
+
+\section{\tg{LB\_numerics}: domain and time}
+
+\begin{lstlisting}[style=xml]
+<domain>
+    <nx>24</nx> <ny>24</ny> <nz>6</nz>
+    <dx>10</dx> <unit>um</unit>
+    <characteristic_length>24</characteristic_length>
+    <filename>geometry.dat</filename>
+    <material_numbers>
+        <pore>2</pore>
+        <solid>0</solid>
+        <bounce_back>1</bounce_back>
+        <microbe0>3</microbe0>
+    </material_numbers>
+</domain>
+\end{lstlisting}
+
+\tg{dx} and \tg{unit} set the physical size of one voxel; here 10\,\textmu m.
+\tg{characteristic\_length} is the length scale the Reynolds and P\'eclet
+numbers are built on, in voxels.
+
+\subsection{Material numbers}
+\label{sec:materials}
+
+Every voxel in the geometry file carries an integer. The
+\tg{material\_numbers} block says what those integers mean.
+
+\begin{center}
+\begin{tikzpicture}[font=\footnotesize,scale=0.62]
+\foreach \y in {0,...,7} \foreach \x in {0,...,11} {
+  \pgfmathsetmacro{\v}{(\y==0 || \y==7) ? 1 : (((\x-3)*(\x-3)+(\y-4)*(\y-4) < 3) ? 0 : 2)}
+  \pgfmathtruncatemacro{\vv}{\v}
+  \ifnum\vv=1 \fill[cbGrey!55] (\x,\y) rectangle ++(1,1);\fi
+  \ifnum\vv=0 \fill[cbRed!45] (\x,\y) rectangle ++(1,1);\fi
+  \ifnum\vv=2 \fill[cbTeal!18] (\x,\y) rectangle ++(1,1);\fi
+  \draw[white,line width=0.4pt] (\x,\y) rectangle ++(1,1);
+}
+\foreach \x in {7,8,9} \foreach \y in {1,2} {
+  \fill[cbBlue!45] (\x,\y) rectangle ++(1,1);
+  \draw[white,line width=0.4pt] (\x,\y) rectangle ++(1,1);}
+\node[anchor=west,font=\scriptsize] at (12.6,7.0) {\tikz\fill[cbGrey!55](0,0)rectangle(0.3,0.3); \ \ \texttt{1} bounce\_back (walls)};
+\node[anchor=west,font=\scriptsize] at (12.6,6.2) {\tikz\fill[cbRed!45](0,0)rectangle(0.3,0.3); \ \ \texttt{0} solid (grain)};
+\node[anchor=west,font=\scriptsize] at (12.6,5.4) {\tikz\fill[cbTeal!18](0,0)rectangle(0.3,0.3); \ \ \texttt{2} pore (water)};
+\node[anchor=west,font=\scriptsize] at (12.6,4.6) {\tikz\fill[cbBlue!45](0,0)rectangle(0.3,0.3); \ \ \texttt{3} microbe0 seed};
+\node[anchor=west,font=\scriptsize,cbGrey,align=left] at (12.6,2.8)
+  {one $z$-plane of a\\ 24 $\times$ 24 $\times$ 6 domain};
+\node[cbGrey,font=\scriptsize] at (6,-0.7) {flow direction $\rightarrow$};
+\end{tikzpicture}
+\end{center}
+
+The distinction between \code{solid} and \code{bounce\_back} matters: both stop
+the flow, but \code{solid} voxels get no dynamics at all, while
+\code{bounce\_back} voxels reflect the fluid. Use \code{bounce\_back} for the
+domain walls and \code{solid} for grains.
+
+A \tg{microbeN} entry does double duty: it says which voxels that organism is
+seeded in, \emph{and} it marks the organism as a biofilm former rather than a
+planktonic one. That has consequences described in Section~\ref{sec:biofilm}.
+
+\subsection{The geometry file}
+\label{sec:geomfile}
+
+The geometry is a plain text file, one integer per line, $x$ fastest, then $y$,
+then $z$:
+
+\begin{lstlisting}[style=py]
+for z in range(nz):
+    for y in range(ny):
+        for x in range(nx):
+            write(mask[x][y][z])
+\end{lstlisting}
+
+So the file has exactly \code{nx*ny*nz} lines. There is no header. The examples
+ship a generator, \file{examples/makeGeometry.py}, which is the easiest thing
+to adapt for your own geometry.
+
+\warn{Order, not shape.}{Nothing in the file records \code{nx}, \code{ny} or
+\code{nz} --- those come from the XML. A file with the right number of values
+but the wrong loop order produces a geometry that is silently transposed. If
+your pore structure looks scrambled in ParaView, this is why.}
+
+\section{\tg{chemistry}: the solutes}
+
+One \tg{substrateN} block per solute, numbered from zero with no gaps.
+
+\begin{lstlisting}[style=xml]
+<chemistry>
+    <number_of_substrates>2</number_of_substrates>
+
+    <substrate0>
+        <name_of_substrates>donor</name_of_substrates>
+        <initial_concentration>0.1</initial_concentration>
+        <substrate_diffusion_coefficients>
+            <in_pore>5e-10</in_pore>
+            <in_biofilm>5e-10</in_biofilm>
+        </substrate_diffusion_coefficients>
+        <left_boundary_type>Dirichlet</left_boundary_type>
+        <left_boundary_condition>0.5</left_boundary_condition>
+        <right_boundary_type>Neumann</right_boundary_type>
+        <right_boundary_condition>0.</right_boundary_condition>
+    </substrate0>
+    ...
+</chemistry>
+\end{lstlisting}
+
+\textbf{Dirichlet} holds the concentration at the boundary; \textbf{Neumann}
+sets the flux, and \code{0} means no flux, i.e.\ a closed end.
+
+Two optional flags are worth knowing early:
+
+\begin{center}
+\begin{tabular}{@{}p{4.0cm}p{10.8cm}@{}}
+\toprule
+\tg{immobile} & \code{true} means this substrate never advects or diffuses. It only receives its reaction source term. This is how minerals are represented: they must accumulate exactly where they form.\\
+\tg{fix\_concentration} & a per-substrate list in \tg{chemistry}. Marks a solute as an inexhaustible reservoir: reactions read it but never draw it down.\\
+\bottomrule
+\end{tabular}
+\end{center}
+
+\section{\tg{microbiology}: the organisms}
+
+One \tg{microbeN} block per organism. Two of its tags carry most of the
+meaning, and they are independent of each other.
+
+\begin{lstlisting}[style=xml]
+<microbe0>
+    <name_of_microbes>Bug</name_of_microbes>
+    <solver_type>CA</solver_type>          <!-- how biomass MOVES -->
+    <reaction_type>kinetics</reaction_type><!-- how it METABOLISES -->
+    <initial_densities>1.0</initial_densities>
+    <decay_coefficient>0.0</decay_coefficient>
+    <viscosity_ratio_in_biofilm>0</viscosity_ratio_in_biofilm>
+    <half_saturation_constants>0.05 0</half_saturation_constants>
+    ...
+</microbe0>
+\end{lstlisting}
+
+\subsection{Biofilm or planktonic}
+\label{sec:biofilm}
+
+An organism with a \tg{microbeN} entry under \tg{material\_numbers} is a
+\emph{biofilm} former: it is seeded in those voxels and it can clog them. One
+without is \emph{planktonic}: seeded uniformly through the pore space.
+
+Three rules follow, and each stops a run when broken:
+
+\begin{itemize}[leftmargin=1.2em]
+\item \tg{viscosity\_ratio\_in\_biofilm} must be present for exactly the
+biofilm organisms. The parser counts them and compares.
+\item \tg{initial\_densities} must have one entry per material number the
+organism is seeded in.
+\item \code{solver\_type FD} is rejected for planktonic organisms.
+\end{itemize}
+
+\section{Where to look things up}
+
+\begin{center}
+\begin{tabular}{@{}p{6.4cm}p{8.4cm}@{}}
+\toprule
+\textbf{Question} & \textbf{Where}\\
+\midrule
+what does this tag do, exactly? & Chapter~\ref{ch:reference}, or the inline comments in \file{CompLaB\_reference\_template.xml}\\
+what is a realistic value? & the example closest to your problem, Part~II\\
+why did the run refuse to start? & Chapter~\ref{ch:errors}\\
+\bottomrule
+\end{tabular}
+\end{center}
+
+\note{\file{CompLaB\_reference\_template.xml}}{ships with the code and
+documents every tag inline, next to a plausible value, with its units and known
+limits. It is the fastest reference when you are actually editing a file.}

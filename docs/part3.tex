@@ -1,0 +1,394 @@
+\part{Going further}
+
+% =====================================================================
+\chapter{Writing your own kinetics}
+\label{ch:ownkinetics}
+
+\section{The thing to understand first}
+
+\begin{cbwarn}
+\textbf{\color{cbRed}Rate laws are compiled in, not read from the input
+file.}\quad
+\file{defineKinetics.hh} and \file{defineAbioticKinetics.hh} are
+\code{\#include}d into the executable. Changing your chemistry means editing a
+C\texttt{++} header and rebuilding. Two problems with different chemistry need
+two binaries.
+
+This is the single most surprising thing about the code, and it is why every
+example folder carries its own pair of headers and why
+\file{runAllExamples.sh} rebuilds between cases.
+\end{cbwarn}
+
+\section{The two hooks}
+
+\begin{center}
+\begin{tabular}{@{}p{4.6cm}p{10.2cm}@{}}
+\toprule
+\code{defineRxnKinetics} & biotic. Gets the biomass vector as well as the
+concentrations, and writes growth rates. Runs when \tg{enable\_kinetics} is
+true, for organisms whose \tg{reaction\_type} includes kinetics.\\
+\code{defineAbioticRxnKinetics} & abiotic. Concentrations only. Runs when
+\tg{enable\_abiotic\_kinetics} is true.\\
+\code{defineDissolutionRate} & the dissolution hook, in the abiotic file. Runs
+only when \tg{dissolution} is enabled.\\
+\bottomrule
+\end{tabular}
+\end{center}
+
+\section{Anatomy of a biotic rate law}
+
+\begin{lstlisting}[style=cpp]
+void defineRxnKinetics(
+    std::vector<double>  B,      // IN : biomass here, gDW/L, one per microbe
+    std::vector<double>  C,      // IN : concentrations here, XML order
+    std::vector<double>& subsR,  // OUT: dC/dt per substrate, per SECOND
+    std::vector<double>& bioR,   // OUT: dB/dt per microbe,   per SECOND
+    plb::plint           mask)   // IN : material number of this voxel
+{
+    for (std::size_t i = 0; i < subsR.size(); ++i) subsR[i] = 0.0;
+    for (std::size_t i = 0; i < bioR.size();  ++i) bioR[i]  = 0.0;
+    if (C.size() < 2 || subsR.size() < 2) return;   // guard: your chemistry size
+    if (mask < 2) return;                           // no biology in solid/wall
+
+    const double S = std::max(C[0], 0.0);
+
+    for (std::size_t m = 0; m < B.size(); ++m) {
+        const double Bm = std::max(B[m], 0.0);
+        if (Bm <= 0.0) continue;
+
+        const double growth = mu_max[m] * S / (Ks[m] + S) * Bm;   // gDW/L/s
+
+        bioR[m]  += growth - kd[m] * Bm;
+        subsR[0] -= growth / Y[m];
+        subsR[1] += growth * fP[m];
+    }
+}
+\end{lstlisting}
+
+\section{The six rules}
+
+\begin{enumerate}[leftmargin=1.4em]
+\item \textbf{Indices follow \file{CompLaB.xml}.} \code{C[0]} is
+\tg{substrate0}; \code{B[0]} is \tg{microbe0}. There is no lookup by name, so
+reordering substrates in the XML silently changes what your rate law means.
+Keep a comment naming each index at the top of the file.
+
+\item \textbf{Everything is per second.} A rate constant published per day must
+be divided by 86400.
+
+\begin{cbwarn}
+\textbf{\color{cbRed}This causes more dead runs than anything else in the
+code.}\quad A rate 86400 times too large blows up on the first step; a rate
+86400 times too small does nothing at all and looks like a configuration
+problem. Write the unit in a comment next to every constant.
+\end{cbwarn}
+
+\item \textbf{Zero the output arrays first.} They are reused between voxels. A
+rate law that returns early without zeroing leaks the previous voxel's answer
+into this one.
+
+\item \textbf{Guard on size, and match your chemistry.} The
+\code{if (C.size() < 2)} line is not decoration. The shipped uranium network
+guards with \code{C.size() < 14}; drop that file into a two-substrate case and
+it reads past the end of the array. \file{validateExamples.py} checks this
+guard against the substrate count for exactly that reason.
+
+\item \textbf{Floor negatives.} \code{std::max(x, 0.0)} on every concentration
+you read. The lattice-Boltzmann solver can produce small negative values near
+steep fronts, and a rate law that squares one amplifies noise into an
+instability.
+
+\item \textbf{Never call \code{exit()}.} Under MPI it leaves the other ranks
+hanging and destroys the run. Print a warning and return a safe value; a voxel
+that grows at zero rate is visible in the output and recoverable.
+\end{enumerate}
+
+\section{Checking a rate law before you trust it}
+
+Mass balance is the cheapest real test, and you can do it without Palabos.
+Compile the header on its own against a stub, feed it random states, and check
+the conservation you know must hold:
+
+\begin{lstlisting}[style=cpp]
+// mini driver: A + B -> C must satisfy dA + dC = 0 and dB + dC = 0
+for (int trial = 0; trial < 20000; ++trial) {
+    std::vector<double> C = {rnd(), rnd(), rnd()}, R(3);
+    defineAbioticRxnKinetics(C, R, 2);
+    assert(std::fabs(R[0] + R[2]) < 1e-12);
+    assert(std::fabs(R[1] + R[2]) < 1e-12);
+}
+\end{lstlisting}
+
+\file{validateExamples.py} does the compile half of this for every example; the
+balance half is worth writing for your own chemistry, once.
+
+% =====================================================================
+\chapter{Training your own surrogate}
+\label{ch:trainsurrogate}
+
+The network shipped in \file{surrogateModel.hh} encodes one organism, two
+substrates, one range. For anything else you fit your own. Everything for that
+is in \file{surrogate\_training/}.
+
+\section{The three steps}
+
+\begin{center}
+\begin{tikzpicture}[font=\footnotesize,
+  s/.style={draw=cbRule,fill=cbSand,rounded corners=2pt,minimum width=3.5cm,
+            minimum height=0.9cm,align=center,line width=0.7pt},
+  a/.style={-{Latex[length=2mm]},cbGrey,line width=0.7pt}]
+\node[s] (m) at (0,0)    {your model\\ \texttt{.xml / .mat / .json}};
+\node[s] (d) at (0,-1.8) {\texttt{training\_data.csv}};
+\node[s] (h) at (0,-3.6) {\texttt{surrogate\_weights\_*.hh}};
+\node[s] (v) at (0,-5.4) {verified against the fit};
+\draw[a] (m) -- node[right,font=\tiny,xshift=2pt]{\texttt{generateTrainingData.py} \ \ offline FBA sweep} (d);
+\draw[a] (d) -- node[right,font=\tiny,xshift=2pt]{\texttt{trainSurrogate.py} \ or \ \texttt{trainSurrogate.m}} (h);
+\draw[a] (h) -- node[right,font=\tiny,xshift=2pt]{\texttt{verifyExport.py} \ \ compiles it and compares} (v);
+\end{tikzpicture}
+\end{center}
+
+\section{Step 1: sweep the FBA offline}
+
+\begin{lstlisting}[style=sh]
+python3 generateTrainingData.py iAF987.xml \
+    --exchange EX_ac_e   --range 1e-3 10   --log \
+    --exchange EX_fe3_e  --range 1e-5 0.5  --log \
+    --samples 4000 --seed 1 \
+    -o geobacter_training.csv
+\end{lstlisting}
+
+\subsection{Choosing the range}
+
+\begin{cbnote}
+Use the range the \textbf{simulation} will visit, not the range the organism
+can tolerate. CompLB3D's uptake bound is
+$V = V_{\max} C/(K_c+C)$, so the largest uptake any voxel can ever request is
+$V_{\max}$ --- your \tg{fba\_maximum\_uptake\_flux}. That is the natural upper
+end of the sweep. The lower end should be small but non-zero.
+\end{cbnote}
+
+Sample \textbf{logarithmically} whenever the range spans more than about one
+order of magnitude. Pore-network concentrations routinely span four, and a
+linear grid puts nearly all its points in the top decade --- so the fit is worst
+exactly where the biology is most sensitive.
+
+Keep to \textbf{1 to 3 inputs}. Beyond that the sample count needed for the
+same accuracy grows fast and the fit stops being worth the trouble.
+
+\section{Step 2: fit and export}
+
+Two paths, writing byte-identical output. Use whichever you have:
+
+\begin{center}
+\begin{tabular}{@{}p{4.8cm}p{10.0cm}@{}}
+\toprule
+\file{trainSurrogate.m} & MATLAB, Deep Learning Toolbox, \code{trainlm}. Reconstructs how the shipped network was made.\\
+\file{trainSurrogate.py} & numpy and scipy, L-BFGS-B on analytic gradients. No licence needed.\\
+\bottomrule
+\end{tabular}
+\end{center}
+
+\begin{lstlisting}[style=sh]
+python3 trainSurrogate.py geobacter_training.csv \
+    --name geobacter --microbe-id 0 \
+    -o surrogate_weights_geobacter.hh
+\end{lstlisting}
+
+Both default to the shipped architecture --- 4 hidden layers of 10 tansig
+neurons and a linear output, with \code{mapminmax} scaling on both ends --- so a
+retrained network drops into an existing build with no other change.
+
+\section{Step 3: verify}
+
+\begin{lstlisting}[style=sh]
+python3 verifyExport.py surrogate_weights_geobacter.hh
+\end{lstlisting}
+
+\begin{cbnote}
+\textbf{\color{cbTeal}Do not skip this.}\quad An exporter that transposes a
+matrix or drops a digit produces a header that compiles, runs, and is wrong,
+with no independent reference to notice. So the trainer writes 512 reference
+predictions next to the header, and \file{verifyExport.py} compiles the header
+and checks them. It should report agreement to about $10^{-13}$ relative.
+\end{cbnote}
+
+\section{Installing it}
+
+The generated header is namespaced, so several organisms coexist:
+
+\begin{lstlisting}[style=cpp]
+#include "surrogate_weights_geobacter.hh"
+...
+else if (microbeId == 0) {
+    bioR[microbeId] = srgnet_geobacter::eval(Fin[microbeId]);
+}
+\end{lstlisting}
+
+Then \tg{enable\_surrogate} \code{true} and
+\tg{reaction\_type} \code{surrogate} in the XML.
+
+Every generated header also carries \code{inTrainingRange()}. Call it if a run
+may wander outside the box.
+
+\section{Inspecting a network somebody else fitted}
+
+\begin{lstlisting}[style=sh]
+python3 inspectSurrogate.py surrogateModel.hh
+\end{lstlisting}
+
+The training range is not stored anywhere as such --- but \code{mapminmax} is
+invertible, so it can be recovered exactly:
+\[
+  \text{gain} = \frac{2}{x_{\max}-x_{\min}},\quad
+  \text{offset} = x_{\min}
+  \qquad\Longrightarrow\qquad
+  x_{\max} = \text{offset} + \frac{2}{\text{gain}}
+\]
+
+Run it before trusting any network, including the shipped one.
+
+% =====================================================================
+\chapter{Running on a cluster}
+\label{ch:cluster}
+
+\section{MPI}
+
+MPI is on by default. Nothing in the input file changes; you launch with
+\code{srun} or \code{mpirun} instead of running the binary directly.
+
+\begin{lstlisting}[style=sh]
+srun ./complab
+\end{lstlisting}
+
+Palabos decomposes the domain into blocks, one per rank, with a halo. That has
+a consequence worth internalising:
+
+\begin{cbwarn}
+\textbf{\color{cbRed}More ranks is not always faster.}\quad Each rank needs
+enough interior voxels to be worth the halo exchange. The shipped examples are
+3456 voxels; on 36 ranks that is about 96 voxels each, nearly all of them halo,
+and the run is slower than on one core. Ask for ranks in proportion to your
+domain, not to what the queue will give you.
+\end{cbwarn}
+
+\section{A Slurm script}
+
+\file{comp.sh} is a production template; \file{examples/runExamples.slurm}
+submits the example suite. The parts that matter:
+
+\begin{lstlisting}[style=sh]
+#SBATCH --account=PROJECT          # required, or the job is rejected
+#SBATCH --nodes=1
+#SBATCH --ntasks-per-node=36       # match this to your domain size
+#SBATCH --time=04:00:00
+
+cd $SLURM_SUBMIT_DIR               # complab reads CompLaB.xml from the cwd
+module purge
+module load gcc openmpi            # THE SAME modules you built with
+srun ./complab
+\end{lstlisting}
+
+\note{Load the same modules you built with.}{A binary built against one MPI and
+launched under another fails in ways that look like your code is broken. Put
+the \code{module load} line in both the build script and the run script, and
+keep them identical.}
+
+\section{Optional dependencies on a cluster}
+
+\begin{center}
+\begin{tabular}{@{}p{3.4cm}p{11.4cm}@{}}
+\toprule
+GLPK & \code{module load glpk}, or build it in your home directory and point \file{CMakeLists.txt} at it\\
+COBRApy & needs cobrapy importable \textbf{at run time}, not just at build time, and \file{src/complab3d\_cobrapy.py} present at \tg{src\_path}. A virtualenv that is not activated in the job script is the usual failure.\\
+\bottomrule
+\end{tabular}
+\end{center}
+
+\section{Restarting}
+
+Long runs should checkpoint. Set \tg{save\_CHK\_interval} to something
+non-zero, and resume with:
+
+\begin{lstlisting}[style=xml]
+<read_NS_file>true</read_NS_file>
+<read_ADE_file>true</read_ADE_file>
+\end{lstlisting}
+
+The flow field and the chemistry restart independently, which is useful: a
+converged flow field on a fixed geometry can be reused across many chemistry
+runs.
+
+% =====================================================================
+\chapter{Output and post-processing}
+\label{ch:output}
+
+\section{What gets written}
+
+\begin{center}
+\begin{tabular}{@{}p{4.2cm}p{3.0cm}p{7.4cm}@{}}
+\toprule
+\textbf{File} & \textbf{Format} & \textbf{Contents}\\
+\midrule
+\code{nsLattice*.vti} & VTK ImageData & velocity and pressure\\
+\code{maskLattice*.vti} & VTK ImageData & material numbers, which change if minerals do\\
+\code{subsLattice}$n$\code{*.vti} & VTK ImageData & substrate $n$\\
+\code{bioLattice}$n$\code{*.vti} & VTK ImageData & microbe $n$\\
+\code{*.chk} & Palabos binary & checkpoints, for restart\\
+\bottomrule
+\end{tabular}
+\end{center}
+
+The index and the iteration number are appended to each filename, so
+\file{subsLattice0\_0000500.vti} is substrate 0 at step 500.
+
+\section{ParaView}
+
+\begin{enumerate}[leftmargin=1.4em]
+\item \textbf{Open} the numbered group; ParaView collapses the time series into
+one entry.
+\item \textbf{Apply}, then set \textbf{Coloring} to the field.
+\item \textbf{Slice} to see inside. The default view of a 3D block shows only
+its outer surface, which for a pore network is almost useless.
+\item \textbf{Threshold} on the mask field to hide solid voxels.
+\end{enumerate}
+
+\note{Unit spacing.}{The \file{.vti} files are written with spacing 1, so
+ParaView shows lattice coordinates. Multiply by \tg{dx} for physical distance,
+or set the spacing in ParaView's Information panel.}
+
+\section{Getting numbers out}
+
+For anything quantitative --- a breakthrough curve, a mass balance, a converged
+biomass ratio --- read the \file{.vti} files with a script rather than reading
+values off a picture.
+
+\begin{lstlisting}[style=py]
+# pip install vtk numpy
+import vtk
+from vtk.util.numpy_support import vtk_to_numpy
+
+r = vtk.vtkXMLImageDataReader()
+r.SetFileName("output/subsLattice0_0000500.vti")
+r.Update()
+img  = r.GetOutput()
+dims = img.GetDimensions()
+arr  = vtk_to_numpy(img.GetPointData().GetArray(0)).reshape(dims[::-1])
+
+print("total:", arr.sum())          # for mass balance
+print("mid-plane profile:", arr[dims[2]//2, dims[1]//2, :])
+\end{lstlisting}
+
+\section{The checks worth automating}
+
+\begin{center}
+\begin{tabular}{@{}p{4.2cm}p{10.6cm}@{}}
+\toprule
+\textbf{Check} & \textbf{Why}\\
+\midrule
+totals over time & mass balance. A conservative tracer's total should change only through the boundaries.\\
+$z$-independence & every shipped example is quasi-2D; a $z$ dependence is a bug.\\
+negative minimum & should never be below zero by more than round-off.\\
+porosity & for precipitation and dissolution runs, the number that tells the story.\\
+\bottomrule
+\end{tabular}
+\end{center}

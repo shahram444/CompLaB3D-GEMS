@@ -1,0 +1,433 @@
+\part{Reference}
+
+% =====================================================================
+\chapter{Every tag in CompLaB.xml}
+\label{ch:reference}
+
+This chapter lists every element the code reads, with its type, default and
+units. Where a tag is mandatory only under some condition, that condition is
+stated: those are the ones that stop a run.
+
+\note{The file that documents itself.}{\file{CompLaB\_reference\_template.xml}
+ships with the code and carries all of this as inline comments, next to a
+plausible value. When you are actually editing a file, that is faster than this
+chapter.}
+
+\section{\tg{path}}
+
+\begin{longtable}{@{}p{3.2cm}p{1.6cm}p{2.0cm}p{7.6cm}@{}}
+\toprule
+\textbf{Tag} & \textbf{Type} & \textbf{Default} & \textbf{Meaning}\\
+\midrule\endhead
+\tg{src\_path} & string & \code{src} & where \file{complab3d\_cobrapy.py} is found at run time. Only used by the COBRApy path, but it is imported by name, so the file must be there.\\
+\tg{input\_path} & string & \code{input} & geometry and metabolic model files\\
+\tg{output\_path} & string & \code{output} & VTK and checkpoint files. Must exist; the code does not create it.\\
+\bottomrule
+\end{longtable}
+
+\section{\tg{simulation\_mode}}
+
+\begin{longtable}{@{}p{4.6cm}p{1.4cm}p{1.6cm}p{6.8cm}@{}}
+\toprule
+\textbf{Tag} & \textbf{Type} & \textbf{Default} & \textbf{Meaning}\\
+\midrule\endhead
+\tg{biotic\_mode} & bool & \code{true} & \code{false} skips the whole \tg{microbiology} block and runs pure chemistry\\
+\tg{enable\_kinetics} & bool & \code{true} & run \file{defineKinetics.hh}\\
+\tg{enable\_abiotic\_kinetics} & bool & \code{false} & run \file{defineAbioticKinetics.hh}\\
+\tg{enable\_fba\_glpk} & bool & \code{false} & global switch for GLPK. Needs \code{-DENABLE\_GLPK=ON}.\\
+\tg{enable\_fba\_cobrapy} & bool & \code{false} & global switch for COBRApy. Needs \code{-DENABLE\_COBRAPY=ON}.\\
+\tg{enable\_surrogate} & bool & \code{false} & global switch for the surrogate network\\
+\tg{fba\_concentration\_basis} & string & \code{free} & \code{free} or \code{total}. With speciation on, whether the uptake bound is built from the free ion or the total.\\
+\tg{glpk\_lpsolver} & int & 1 & 1 simplex, 2 interior point. GLPK only.\\
+\tg{glpk\_save\_problem} & bool & \code{false} & dump the LP of the first solve, for debugging\\
+\tg{enable\_validation\_diagnostics} & bool & \code{false} & extra consistency printing at start-up. Worth switching on while setting a case up.\\
+\bottomrule
+\end{longtable}
+
+\warn{The two gates must agree.}{A microbe asking for \code{glpk} while
+\tg{enable\_fba\_glpk} is \code{false} terminates the run with a message. So
+does a switch that is on in an executable built without the dependency. That is
+deliberate: you cannot silently get different biology from the one you asked
+for.}
+
+\section{\tg{LB\_numerics}}
+
+\subsection{\tg{domain}}
+
+\begin{longtable}{@{}p{4.2cm}p{1.6cm}p{1.6cm}p{7.0cm}@{}}
+\toprule
+\textbf{Tag} & \textbf{Type} & \textbf{Default} & \textbf{Meaning}\\
+\midrule\endhead
+\tg{nx} \tg{ny} \tg{nz} & int & --- & domain size in voxels. Mandatory.\\
+\tg{dx} & float & --- & voxel size, in \tg{unit}\\
+\tg{unit} & string & \code{um} & \code{m}, \code{mm} or \code{um}\\
+\tg{characteristic\_length} & float & \code{ny} & length scale for the P\'eclet and Reynolds numbers, in voxels\\
+\tg{filename} & string & --- & geometry file, inside \tg{input\_path}\\
+\bottomrule
+\end{longtable}
+
+\subsection{\tg{material\_numbers}}
+
+\begin{longtable}{@{}p{3.4cm}p{2.4cm}p{1.4cm}p{7.6cm}@{}}
+\toprule
+\textbf{Tag} & \textbf{Type} & \textbf{Default} & \textbf{Meaning}\\
+\midrule\endhead
+\tg{pore} & int list & 2 & open fluid. A list, so several codes can be pore.\\
+\tg{solid} & int & 0 & no dynamics at all\\
+\tg{bounce\_back} & int & 1 & no-slip wall\\
+\tg{microbe}$n$ & int list & --- & voxels where microbe $n$ is seeded. Its presence also marks the organism as a biofilm former.\\
+\bottomrule
+\end{longtable}
+
+\subsection{Flow and time stepping}
+
+\begin{longtable}{@{}p{4.0cm}p{1.4cm}p{1.8cm}p{7.2cm}@{}}
+\toprule
+\textbf{Tag} & \textbf{Type} & \textbf{Default} & \textbf{Meaning}\\
+\midrule\endhead
+\tg{delta\_P} & float & 0 & pressure drop driving the flow, lattice units\\
+\tg{Peclet} & float & 0 & 0 means no flow: pure diffusion, and the Navier--Stokes solver never runs\\
+\tg{tau} & float & 0.8 & lattice-Boltzmann relaxation time. Values below about 0.55 are unstable.\\
+\tg{track\_performance} & bool & \code{false} & timing output. Suppresses all VTI and checkpoint writing.\\
+\tg{ns\_max\_iT1} & int & 100000 & flow solver step cap, first solve\\
+\tg{ns\_max\_iT2} & int & 100000 & the same for later re-solves, after the geometry changes\\
+\tg{ns\_converge\_iT1} & float & 1e-8 & ``flow is steady'' tolerance, first solve\\
+\tg{ns\_converge\_iT2} & float & 1e-6 & the same, later\\
+\tg{ns\_update\_interval} & int & 1 & re-solve the flow every $N$ reaction steps\\
+\tg{ade\_update\_interval} & int & 1 & apply reactions every $N$ transport steps\\
+\tg{ade\_max\_iT} & int & 1e7 & reaction and transport steps to run\\
+\tg{ade\_converge\_iT} & float & 1e-8 & stop early if the chemistry stops changing\\
+\bottomrule
+\end{longtable}
+
+\section{\tg{chemistry}}
+
+\begin{longtable}{@{}p{4.6cm}p{1.8cm}p{1.4cm}p{6.6cm}@{}}
+\toprule
+\textbf{Tag} & \textbf{Type} & \textbf{Default} & \textbf{Meaning}\\
+\midrule\endhead
+\tg{number\_of\_substrates} & int & --- & must equal the number of \tg{substrateN} blocks\\
+\tg{fix\_concentration} & bool list & all false & one per substrate. Marks an inexhaustible reservoir: read but never drawn down. Accepts \code{yes}/\code{no} and \code{1}/\code{0}.\\
+\tg{fix\_lower\_bounds} & bool list & all false & one per substrate. Clamps the FBA uptake bound to what is locally present.\\
+\bottomrule
+\end{longtable}
+
+\subsection{Each \tg{substrateN}}
+
+\begin{longtable}{@{}p{5.4cm}p{1.4cm}p{1.4cm}p{6.2cm}@{}}
+\toprule
+\textbf{Tag} & \textbf{Type} & \textbf{Default} & \textbf{Meaning}\\
+\midrule\endhead
+\tg{name\_of\_substrates} & string & --- & used in output and to match \tg{components}\\
+\tg{initial\_concentration} & float & 0 & mol/L everywhere at $t=0$\\
+\tg{substrate\_diffusion\_} \tg{coefficients}/\tg{in\_pore} & float & 1e-9 & m$^2$/s in open water\\
+\quad \dots/\tg{in\_biofilm} & float & 2e-10 & m$^2$/s inside biofilm\\
+\tg{immobile} & bool & \code{false} & \code{true} means never advects or diffuses; receives only its reaction source. How minerals are represented.\\
+\tg{left\_boundary\_type} & string & --- & \code{Dirichlet} or \code{Neumann}\\
+\tg{left\_boundary\_condition} & float & 0 & the value: concentration for Dirichlet, flux for Neumann\\
+\tg{right\_boundary\_type} & string & --- & as above\\
+\tg{right\_boundary\_condition} & float & 0 & as above\\
+\bottomrule
+\end{longtable}
+
+\section{\tg{microbiology}}
+
+\begin{longtable}{@{}p{4.6cm}p{1.4cm}p{1.6cm}p{6.8cm}@{}}
+\toprule
+\textbf{Tag} & \textbf{Type} & \textbf{Default} & \textbf{Meaning}\\
+\midrule\endhead
+\tg{number\_of\_microbes} & int & 0 & must equal the number of \tg{microbeN} blocks\\
+\tg{maximum\_biomass\_density} & float & --- & gDW/L at which a voxel is full. Mandatory with CA.\\
+\tg{thrd\_biofilm\_fraction} & float & --- & fraction above which a voxel counts as biofilm. Mandatory with CA.\\
+\tg{CA\_method} & string & \code{fraction} & how the cellular automaton shares excess biomass\\
+\bottomrule
+\end{longtable}
+
+\subsection{Each \tg{microbeN}: always}
+
+\begin{longtable}{@{}p{5.4cm}p{1.4cm}p{1.4cm}p{6.2cm}@{}}
+\toprule
+\textbf{Tag} & \textbf{Type} & \textbf{Default} & \textbf{Meaning}\\
+\midrule\endhead
+\tg{name\_of\_microbes} & string & --- & used in output\\
+\tg{solver\_type} & string & --- & \code{CA}, \code{FD} or \code{LBM}. Mandatory.\\
+\tg{reaction\_type} & string & \code{kinetics} & see the table below\\
+\tg{initial\_densities} & float list & --- & gDW/L. One entry per material number the organism is seeded in.\\
+\tg{decay\_coefficient} & float & 0 & 1/s, first order\\
+\tg{half\_saturation\_constants} & float list & --- & mol/L, one per substrate. Feeds the FBA and surrogate uptake bounds.\\
+\tg{maximum\_uptake\_flux} & float list & all 0 & the \textbf{kinetics} path's Vmax, mol substrate per mol cells per second\\
+\tg{left\_boundary\_type} \dots & --- & Neumann 0 & as for substrates\\
+\bottomrule
+\end{longtable}
+
+\subsection{Each \tg{microbeN}: conditionally}
+
+\begin{longtable}{@{}p{5.4cm}p{4.0cm}p{5.2cm}@{}}
+\toprule
+\textbf{Tag} & \textbf{Required when} & \textbf{Meaning}\\
+\midrule\endhead
+\tg{viscosity\_ratio\_in\_biofilm} & the organism has a \tg{microbeN} material entry & ratio used for the flow through biofilm. Must be present for \emph{exactly} the seeded organisms; the parser counts them.\\
+\tg{biomass\_diffusion\_} \tg{coefficients} & \code{solver\_type} is FD & m$^2$/s, \tg{in\_pore} and \tg{in\_biofilm}\\
+\tg{model\_filename} & \code{reaction\_type} uses FBA & name without \file{.xml}, inside \tg{input\_path}\\
+\tg{exchange\_reaction\_indices} & \code{reaction\_type} uses FBA & one per substrate; \code{-1} for one the organism does not exchange\\
+\tg{fba\_maximum\_uptake\_flux} & FBA or surrogate & the \textbf{metabolic} path's Vmax, mmol/gDW/h. Separate from \tg{maximum\_uptake\_flux}.\\
+\tg{substrate\_lower\_bounds} & FBA & hard floor on each exchange flux; eating is negative\\
+\tg{substrate\_upper\_bounds} & FBA & hard ceiling\\
+\tg{objective\_direction} & FBA & \code{maximize} or \code{minimize}, default maximize\\
+\tg{biomass\_molar\_mass} & FBA or surrogate & gDW per mol of cells, default 24.6\\
+\tg{equate\_bounds} & optional, FBA & \code{yes} forces uptake to exactly the bound instead of letting the solver choose anything up to it. Default \code{no}.\\
+\tg{constraint\_indices} & optional, FBA & extra reactions to re-bound at load time\\
+\tg{constraint\_lower\_bounds} & with the above & same length\\
+\tg{constraint\_upper\_bounds} & with the above & same length\\
+\bottomrule
+\end{longtable}
+
+\subsection{\tg{reaction\_type} spellings}
+
+\begin{center}
+\begin{tabular}{@{}p{6.4cm}p{8.4cm}@{}}
+\toprule
+\textbf{Accepted} & \textbf{Meaning}\\
+\midrule
+\code{none} \ \code{no} \ \code{0} & no metabolism\\
+\code{kinetics} \ \code{kns} \ \code{1} & \file{defineKinetics.hh}\\
+\code{glpk} \ \code{fba} \ \code{fba\_glpk} \ \code{2} & flux balance analysis through GLPK\\
+\code{surrogate} \ \code{srg} \ \code{ann} \ \code{3} & the trained network\\
+\code{cobrapy} \ \code{cpy} \ \code{fba\_cobrapy} \ \code{4} & flux balance analysis through COBRApy\\
+\code{glpk\_and\_kinetics} \ \code{5} & both, rates added\\
+\code{surrogate\_and\_kinetics} \ \code{6} & both\\
+\code{cobrapy\_and\_kinetics} \ \code{7} & both\\
+\bottomrule
+\end{tabular}
+\end{center}
+
+\section{\tg{equilibrium}}
+
+\begin{longtable}{@{}p{3.6cm}p{2.6cm}p{8.4cm}@{}}
+\toprule
+\textbf{Tag} & \textbf{Type} & \textbf{Meaning}\\
+\midrule\endhead
+\tg{enabled} & bool & default \code{false}\\
+\tg{components} & string list & master species. Names must match \tg{name\_of\_substrates}.\\
+\tg{stoichiometry}/\tg{species}$n$ & float list & one row per substrate, one number per component. A row of zeros excludes the species.\\
+\tg{logK}/\tg{species}$n$ & float & formation constant. Components take 0.\\
+\bottomrule
+\end{longtable}
+
+\section{\tg{precipitation}}
+
+\begin{longtable}{@{}p{3.8cm}p{1.6cm}p{1.4cm}p{7.6cm}@{}}
+\toprule
+\textbf{Tag} & \textbf{Type} & \textbf{Default} & \textbf{Meaning}\\
+\midrule\endhead
+\tg{enabled} & bool & \code{false} & \\
+\tg{solid\_substrate} & int & --- & index of the mineral substrate. Must be \tg{immobile}.\\
+\tg{max\_precipRho} & float & --- & mol/L of a full voxel; $1000/V_m$ with $V_m$ in cm$^3$/mol\\
+\tg{surface\_only} & int & 1 & 1 grows only on wall-adjacent voxels (heterogeneous nucleation); 0 grows anywhere\\
+\tg{perm\_ratio} & float & 0 & 0 makes a filled voxel an impermeable wall\\
+\tg{update\_interval} & int & --- & steps between geometry re-checks. Each check that changes anything re-solves the flow.\\
+\bottomrule
+\end{longtable}
+
+\section{\tg{dissolution}}
+
+\begin{longtable}{@{}p{3.8cm}p{1.6cm}p{1.4cm}p{7.6cm}@{}}
+\toprule
+\textbf{Tag} & \textbf{Type} & \textbf{Default} & \textbf{Meaning}\\
+\midrule\endhead
+\tg{enabled} & bool & \code{false} & independent of \tg{precipitation}\\
+\tg{reopen\_fraction} & float & 0.9 & a voxel reopens below this fraction of full. Hysteresis; see below.\\
+\tg{surface\_only} & int & 1 & 1 dissolves only wetted voxels\\
+\tg{update\_interval} & int & --- & steps between geometry re-checks\\
+\tg{phase}$n$/\tg{name} & string & \code{phase}$n$ & label, for output\\
+\tg{phase}$n$/\tg{material\_number} & int & --- & which mask code this phase occupies\\
+\tg{phase}$n$/\tg{substrate} & int & --- & which \tg{immobile} substrate holds its inventory\\
+\tg{phase}$n$/\tg{full\_density} & float & --- & mol/L when completely full\\
+\tg{phase}$n$/\tg{initial\_fill} & float & 0 & mol/L at $t=0$. Non-zero for an original grain; 0 for a precipitate.\\
+\tg{phase}$n$/\tg{is\_precipitate} & bool & \code{false} & marks the phase that \tg{precipitation} creates, so its voxels can later reopen\\
+\bottomrule
+\end{longtable}
+
+\warn{Only declared phases dissolve.}{Anything without a \tg{phaseN} block can
+never dissolve, and that is deliberate. If ``a solid voxel with no mineral left
+becomes pore'' were the rule, an inert quartz grain --- which never held any
+mineral --- is already below any threshold, and your grain pack would dissolve
+on the first step.}
+
+\section{\tg{IO}}
+
+\begin{longtable}{@{}p{3.8cm}p{1.6cm}p{1.8cm}p{7.2cm}@{}}
+\toprule
+\textbf{Tag} & \textbf{Type} & \textbf{Default} & \textbf{Meaning}\\
+\midrule\endhead
+\tg{read\_NS\_file} & bool & \code{false} & restart the flow from a checkpoint\\
+\tg{read\_ADE\_file} & bool & \code{false} & restart the chemistry from a checkpoint\\
+\tg{ns\_filename} & string & \code{nsLattice} & \\
+\tg{mask\_filename} & string & \code{maskLattice} & \\
+\tg{subs\_filename} & string & \code{subsLattice} & index and iteration appended\\
+\tg{bio\_filename} & string & \code{bioLattice} & index and iteration appended\\
+\tg{save\_VTK\_interval} & int & 1000 & steps between snapshots\\
+\tg{save\_CHK\_interval} & int & 1e6 & steps between restart points\\
+\tg{debug\_updRxn} & int & 0 & 1 prints reaction-application debug lines\\
+\bottomrule
+\end{longtable}
+
+% =====================================================================
+\chapter{When something goes wrong}
+\label{ch:errors}
+
+\section{The run refuses to start}
+
+CompLB3D validates its input before doing any work and stops with a named
+message. That is by design: a run that starts and produces nonsense is worse
+than one that refuses.
+
+\begin{longtable}{@{}p{7.0cm}p{7.8cm}@{}}
+\toprule
+\textbf{Message contains} & \textbf{Cause and fix}\\
+\midrule\endhead
+\code{The length of \dots does not match} & A vector is the wrong length. The message names the tag. Almost always a substrate or microbe added without updating every per-substrate list.\\
+\code{reaction\_type \dots is not defined} & A spelling the parser does not accept. See the table in Chapter~\ref{ch:reference}.\\
+\code{asks for reaction\_type glpk but <enable\_fba\_glpk> is false} & The per-microbe choice and the global switch disagree. Set the switch, or change the microbe.\\
+\code{is true but this executable was built without GLPK} & Rebuild with \code{-DENABLE\_GLPK=ON}.\\
+\code{solver\_type \dots is not defined} & Not \code{FD}, \code{CA} or \code{LBM}.\\
+\code{must be defined when solver\_type is Finite Difference} & FD needs \tg{biomass\_diffusion\_coefficients}.\\
+\code{biofilm\_permeability\_ratio vector does not match} & \tg{viscosity\_ratio\_in\_biofilm} is present for a different set of organisms than the ones seeded under \tg{material\_numbers}. It must be exactly the seeded ones.\\
+\code{<S> has \dots entries but nmet*nrxn =} & The metabolic model file is truncated or mis-generated. Re-run \file{extractMM.py}.\\
+\code{<exchange\_reaction\_indices> entry \dots is outside} & An index past the end of that organism's model.\\
+\code{must be defined when solver\_type is Cellular Automata} & CA needs \tg{thrd\_biofilm\_fraction}.\\
+\bottomrule
+\end{longtable}
+
+\note{Catch these before you build.}{\file{examples/validateExamples.py} applies
+most of these rules to an input file in about a second, without compiling
+anything. Point it at a folder containing your \file{CompLaB.xml}.}
+
+\section{The run starts but the answer is wrong}
+
+\begin{longtable}{@{}p{5.0cm}p{9.8cm}@{}}
+\toprule
+\textbf{Symptom} & \textbf{Usual cause}\\
+\midrule\endhead
+\code{[NEG!]} warnings & A reaction removed more than was present in one step. Reduce \tg{ade\_update\_interval}, or your rate constant is too large --- check the per-second conversion.\\
+nothing grows & Several possibilities, in order of likelihood: rate constants 86400 times too small (a per-day constant used directly); \tg{enable\_kinetics} false; the organism seeded on a material number that does not occur in the geometry; substrate never reaching it.\\
+biomass explodes & No decay, no maximum density, or growth not limited by anything. Check \tg{maximum\_biomass\_density}.\\
+the answer depends on $z$ & In a quasi-2D setup it must not. Usually the geometry file was written in the wrong loop order.\\
+the geometry looks scrambled & The geometry file loop order. $x$ fastest, then $y$, then $z$.\\
+flow never converges & \tg{tau} too close to 0.5; or \tg{delta\_P} so large the flow is not creeping; or the domain has no percolating path.\\
+FBA growth is always zero & The uptake bounds are zero, or \tg{exchange\_reaction\_indices} points at the wrong reactions, or the model's objective is not the biomass reaction.\\
+surrogate returns nonsense & The run has left the network's training box. Run \file{inspectSurrogate.py} and compare with your \tg{fba\_maximum\_uptake\_flux}.\\
+combined type double counts growth & The kinetics file is writing \code{bioR} as well as the FBA path. It must not.\\
+porosity oscillates & \tg{reopen\_fraction} too close to 1. Try 0.9.\\
+\bottomrule
+\end{longtable}
+
+\section{Performance}
+
+\begin{longtable}{@{}p{5.0cm}p{9.8cm}@{}}
+\toprule
+\textbf{Symptom} & \textbf{What to do}\\
+\midrule\endhead
+speciation dominates the run & It will. It is the most expensive part of the code by a wide margin. Turn it off unless you need it.\\
+COBRApy is very slow & Expected: one to two orders of magnitude slower than GLPK per voxel. Use GLPK for production and COBRApy as a cross-check.\\
+FBA dominates & Fit a surrogate. Chapter~\ref{ch:trainsurrogate}.\\
+more MPI ranks made it slower & Too few voxels per rank. See Chapter~\ref{ch:cluster}.\\
+the flow re-solves constantly & \tg{update\_interval} in \tg{precipitation} or \tg{dissolution} is too small, or the porosity is chattering.\\
+\bottomrule
+\end{longtable}
+
+% =====================================================================
+\chapter{Known limits}
+\label{ch:limits}
+
+Stated plainly, because knowing them saves more time than working around them.
+
+\begin{itemize}[leftmargin=1.2em]
+\item \textbf{Speciation is ideal.} No activity corrections, no temperature
+dependence, no gas phase, no redox couples, no mineral saturation indices. Your
+log\,K values are conditional constants at your own ionic strength and
+25\,\textdegree C.
+
+\item \textbf{Dissolution is not driven by saturation state.} Because there are
+no solubility products, precipitation and dissolution are separate rate laws
+that happen to move the same mineral, rather than one reversible reaction.
+
+\item \textbf{Rate laws are compiled in.} Two problems with different chemistry
+need two binaries.
+
+\item \textbf{One fluid phase.} No unsaturated flow.
+
+\item \textbf{The \file{.vti} output has unit spacing}, so ParaView shows
+lattice coordinates rather than micrometres.
+
+\item \textbf{The shipped surrogate is one organism on two substrates} over one
+range. It is a demonstration of the mechanism, not a general-purpose solver
+option the way GLPK is.
+
+\item \textbf{Palabos v2.3.0 specifically.} Later versions change
+data-processor interfaces.
+
+\item \textbf{\file{src/complab3d\_glpkcpp.hh} derives from GLPKMEX} / the
+Octave-Forge \file{glpkcc.cpp}, which is GPL-licensed. Its provenance is
+recorded in the file header; anyone redistributing should satisfy themselves
+this is correct for their situation.
+\end{itemize}
+
+% =====================================================================
+\chapter{Where everything lives}
+\label{ch:filemap}
+
+\begin{longtable}{@{}p{6.0cm}p{8.8cm}@{}}
+\toprule
+\textbf{Path} & \textbf{What it is}\\
+\midrule\endhead
+\multicolumn{2}{@{}l}{\textit{You will edit these}}\\
+\file{CompLaB.xml} & the run\\
+\file{defineKinetics.hh} & your biotic rate laws, compiled in\\
+\file{defineAbioticKinetics.hh} & your abiotic rate laws and the dissolution hook\\
+\file{surrogateModel.hh} & the trained surrogate network\\
+\file{CMakeLists.txt} & the Palabos path, lines 85 to 93\\
+\midrule
+\multicolumn{2}{@{}l}{\textit{Reference and tools}}\\
+\file{CompLaB\_reference\_template.xml} & every tag, documented inline\\
+\file{CompLaB\_example\_uranium\_zhao.xml} & a full 95-species production case\\
+\file{extractMM.py} & genome-scale model $\rightarrow$ matrix file\\
+\file{comp.sh} & Slurm template\\
+\midrule
+\multicolumn{2}{@{}l}{\textit{The test suite}}\\
+\file{examples/} & fifteen cases, one per capability\\
+\file{examples/makeExamples.py} & regenerates them\\
+\file{examples/validateExamples.py} & structural check, one second\\
+\file{examples/runAllExamples.sh} & builds and runs all fifteen\\
+\file{examples/runExamples.slurm} & the same, under Slurm\\
+\midrule
+\multicolumn{2}{@{}l}{\textit{Surrogate training}}\\
+\file{surrogate\_training/generateTrainingData.py} & offline FBA sweep\\
+\file{surrogate\_training/trainSurrogate.py} & fit and export, no licence needed\\
+\file{surrogate\_training/trainSurrogate.m} & the MATLAB path\\
+\file{surrogate\_training/verifyExport.py} & compiles the export and checks it\\
+\file{surrogate\_training/inspectSurrogate.py} & recovers a network's valid range\\
+\midrule
+\multicolumn{2}{@{}l}{\textit{Source you are unlikely to touch}}\\
+\file{src/complab.cpp} & the driver: parse, set up lattices, time loop\\
+\file{src/complab\_functions.hh} & XML parsing and lattice setup\\
+\file{src/complab3d\_processors*.hh} & the data processors, one file per concern\\
+\file{src/complab3d\_metabolic.hh} & the optional metabolic layer\\
+\file{src/complab3d\_glpkcpp.hh} & the GLPK wrapper\\
+\file{src/complab3d\_pythonAPI.hh} & the COBRApy bridge, C\texttt{++} side\\
+\file{src/complab3d\_cobrapy.py} & the COBRApy bridge, Python side\\
+\file{src/precipitationVOP.hh} & pore clogging\\
+\file{src/dissolutionVOP.hh} & pore reopening\\
+\bottomrule
+\end{longtable}
+
+\vspace{14pt}
+\begin{cbnote}
+\textbf{\color{cbTeal}Reporting a problem.}\quad
+Open an issue at
+\url{https://github.com/shahram444/CompLB3D-lattice-Boltzmann-FBA-surrogate-COBRApy-GLPK}
+with your \file{CompLaB.xml}, the domain size, the cmake line and the terminal
+output. The start-up banner is verbose and usually contains the answer. If it
+is a crash, the smallest input that still reproduces it is worth more than a
+large one.
+\end{cbnote}

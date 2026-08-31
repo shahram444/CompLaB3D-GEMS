@@ -1,0 +1,197 @@
+% =====================================================================
+%  CompLB3D User Guide
+%  Build with:  pdflatex main && pdflatex main   (twice, for the TOC)
+% =====================================================================
+\documentclass[11pt,a4paper]{report}
+
+\usepackage[T1]{fontenc}
+\usepackage[utf8]{inputenc}
+\usepackage{lmodern}
+\usepackage{amsmath}
+\usepackage{amssymb}
+\usepackage{microtype}
+\usepackage[margin=2.4cm,top=2.6cm,bottom=2.6cm]{geometry}
+\usepackage{graphicx}
+\usepackage{booktabs}
+\usepackage{longtable}
+\usepackage{array}
+\usepackage{enumitem}
+\usepackage{xcolor}
+\usepackage{listings}
+\usepackage{tcolorbox}
+\usepackage{tikz}
+\usepackage{fancyhdr}
+\usepackage{titlesec}
+\usepackage[hidelinks,bookmarksnumbered]{hyperref}
+\usetikzlibrary{shapes.geometric,arrows.meta,positioning,fit,backgrounds,calc,decorations.pathreplacing}
+\tcbuselibrary{skins,breakable}
+
+% ---------------------------------------------------------------- colours
+\definecolor{cbBlue}{HTML}{1F4E79}
+\definecolor{cbTeal}{HTML}{2E7D74}
+\definecolor{cbSand}{HTML}{F5F2EC}
+\definecolor{cbRule}{HTML}{C8C2B6}
+\definecolor{cbRed}{HTML}{9C3B2E}
+\definecolor{cbGrey}{HTML}{5A5A5A}
+\definecolor{cbCode}{HTML}{F7F7F4}
+
+% ---------------------------------------------------------------- headings
+\titleformat{\chapter}[display]
+  {\normalfont\Large\bfseries\color{cbBlue}}
+  {\filright\normalsize\color{cbGrey}\MakeUppercase{\chaptertitlename}\ \thechapter}
+  {6pt}{\Huge\color{cbBlue}}
+\titlespacing*{\chapter}{0pt}{0pt}{28pt}
+\titleformat{\section}{\normalfont\large\bfseries\color{cbBlue}}{\thesection}{0.7em}{}
+\titleformat{\subsection}{\normalfont\normalsize\bfseries\color{cbTeal}}{\thesubsection}{0.7em}{}
+
+\pagestyle{fancy}
+\fancyhf{}
+\renewcommand{\headrulewidth}{0.4pt}
+\fancyhead[L]{\small\color{cbGrey}\leftmark}
+\fancyhead[R]{\small\color{cbGrey}CompLB3D User Guide}
+\fancyfoot[C]{\small\thepage}
+\fancypagestyle{plain}{\fancyhf{}\fancyfoot[C]{\small\thepage}\renewcommand{\headrulewidth}{0pt}}
+
+% ---------------------------------------------------------------- listings
+\lstdefinestyle{cbstyle}{
+  basicstyle=\ttfamily\footnotesize,
+  backgroundcolor=\color{cbCode},
+  frame=leftline, framerule=1.6pt, rulecolor=\color{cbRule},
+  framexleftmargin=5pt, xleftmargin=8pt,
+  breaklines=true, breakatwhitespace=false,
+  showstringspaces=false,
+  keywordstyle=\color{cbBlue}\bfseries,
+  commentstyle=\color{cbTeal}\itshape,
+  stringstyle=\color{cbRed},
+  columns=fullflexible, keepspaces=true,
+  aboveskip=8pt, belowskip=8pt,
+}
+\lstset{style=cbstyle}
+\lstdefinelanguage{xmlish}{
+  morestring=[b]",
+  morecomment=[s]{<!--}{-->},
+  morekeywords={},
+  moredelim=[s][\color{cbBlue}\bfseries]{<}{>},
+}
+\lstdefinestyle{sh}{language=bash,style=cbstyle}
+\lstdefinestyle{xml}{language=xmlish,style=cbstyle}
+\lstdefinestyle{cpp}{language=C++,style=cbstyle}
+\lstdefinestyle{py}{language=Python,style=cbstyle}
+
+% ---------------------------------------------------------------- boxes
+\newtcolorbox{cbnote}[1][]{
+  enhanced, breakable, colback=cbSand, colframe=cbTeal,
+  boxrule=0pt, leftrule=2.4pt, arc=0pt, outer arc=0pt,
+  left=8pt,right=8pt,top=6pt,bottom=6pt, #1}
+\newtcolorbox{cbwarn}[1][]{
+  enhanced, breakable, colback=cbSand, colframe=cbRed,
+  boxrule=0pt, leftrule=2.4pt, arc=0pt, outer arc=0pt,
+  left=8pt,right=8pt,top=6pt,bottom=6pt, #1}
+
+\newcommand{\note}[2]{\begin{cbnote}\textbf{\color{cbTeal}#1}\quad #2\end{cbnote}}
+\newcommand{\warn}[2]{\begin{cbwarn}\textbf{\color{cbRed}#1}\quad #2\end{cbwarn}}
+\newcommand{\tg}[1]{\texttt{<#1>}}
+\newcommand{\code}[1]{\texttt{#1}}
+\newcommand{\file}[1]{\texttt{#1}}
+
+\setlength{\parskip}{5pt}
+\setlength{\parindent}{0pt}
+\renewcommand{\arraystretch}{1.25}
+
+% =====================================================================
+\begin{document}
+
+% ------------------------------------------------------------- title page
+\begin{titlepage}
+\centering
+\vspace*{2.2cm}
+
+{\color{cbGrey}\large USER GUIDE}\\[6pt]
+{\color{cbBlue}\Huge\bfseries CompLB3D}\\[10pt]
+{\color{cbBlue}\large A 3D pore-scale reactive transport model\\ with microbial metabolism}\\[26pt]
+
+\begin{tikzpicture}
+\draw[cbRule,line width=1pt] (0,0) -- (11,0);
+\end{tikzpicture}
+
+\vspace{22pt}
+{\large Version 1.0.0}\\[26pt]
+
+{\large Shahram Asgari \quad\textbullet\quad Christof Meile}\\[6pt]
+{\small Department of Marine Sciences\\ University of Georgia, Athens, GA, USA\\[4pt]
+\texttt{shahram.asgari@uga.edu}}
+
+\vfill
+
+{\small\color{cbGrey}
+CompLB3D extends the two-dimensional CompLaB, developed by Heewon Jung\\
+(Chungnam National University) and co-workers with the University of Georgia.\\[10pt]
+Licensed under the GNU Affero General Public License v3.0 or later.}
+
+\vspace{10pt}
+\end{titlepage}
+
+% ------------------------------------------------------------- how to read
+\chapter*{How to read this guide}
+\addcontentsline{toc}{chapter}{How to read this guide}
+\markboth{HOW TO READ THIS GUIDE}{}
+
+This guide is written to be followed in order, not sampled. It is divided into
+four parts and they do different jobs.
+
+\vspace{4pt}
+\begin{tabular}{@{}p{3.4cm}p{12cm}@{}}
+\toprule
+\textbf{Part I} & \textbf{Getting started.} Install the code, build it, run one
+simulation, and understand what came out. Read this once, in order. Nothing
+later makes sense without it.\\
+\textbf{Part II} & \textbf{Tutorial.} One chapter per capability, each built on
+a worked example that ships with the code and runs in seconds. Read the
+chapters you need.\\
+\textbf{Part III} & \textbf{Going further.} Writing your own chemistry, fitting
+a surrogate, running on a cluster, post-processing.\\
+\textbf{Part IV} & \textbf{Reference.} Every XML tag with its type, default and
+units. Every error message with its cause and fix. Look things up here.\\
+\bottomrule
+\end{tabular}
+
+\vspace{10pt}
+\textbf{If you have thirty minutes}, read Chapter~\ref{ch:install} and
+Chapter~\ref{ch:first}, and run the first example. That is enough to know
+whether this code does what you need.
+
+\vspace{6pt}
+\textbf{If you are here to do one specific thing}, the map is:
+
+\vspace{4pt}
+\begin{tabular}{@{}p{7.6cm}p{7.6cm}@{}}
+\toprule
+I want to \dots & Go to \dots\\
+\midrule
+run my own pore geometry & Chapter~\ref{ch:xml}, Section~\ref{sec:geomfile}\\
+write my own rate laws & Chapter~\ref{ch:ownkinetics}\\
+use a genome-scale metabolic model & Chapter~\ref{ch:fba}\\
+make my simulation faster than FBA & Chapter~\ref{ch:surrogate}\\
+model pore clogging or mineral loss & Chapter~\ref{ch:precip}\\
+run on a cluster & Chapter~\ref{ch:cluster}\\
+understand an error message & Chapter~\ref{ch:errors}\\
+look up one tag & Chapter~\ref{ch:reference}\\
+\bottomrule
+\end{tabular}
+
+\vspace{12pt}
+\begin{cbnote}
+\textbf{\color{cbTeal}Conventions.}\quad
+Commands you type are shown in a shaded box. \tg{tag} means an element of
+\file{CompLaB.xml}. A boxed note in teal is something worth knowing; a boxed
+note in red is something that will cost you a day if you get it wrong.
+\end{cbnote}
+
+\tableofcontents
+
+\input{part1}
+\input{part2}
+\input{part3}
+\input{part4}
+
+\end{document}
