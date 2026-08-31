@@ -87,33 +87,6 @@ the file they read.
 needs offline work to run: the `.sym` and the `.gnn` both ship. Point any of
 05–08 at one and it will use that instead of its compiled kinetics.
 
-## Which one answers my question?
-
-**"Does my geometry work?"** → 01. If the flow does not percolate, nothing else
-will either.
-
-**"Is my chemistry right?"** → 03, with the organisms switched off. A rate law
-that misbehaves is much easier to see without biomass moving underneath it.
-
-**"Why is my pore not clogging?"** → 13. Compare its `max_precipRho` with yours;
-the usual cause is a fill density derived from the wrong molar volume.
-
-**"Why does my dissolution lose mass?"** → 14, run on one process. Then read the
-MPI limitation in [`../pipelines/C_run/README.md`](../pipelines/C_run/README.md).
-
-**"Is the surrogate worth it?"** → run 09 and 11 on the same geometry and
-compare the biomass fields. That difference is what the approximation costs you.
-
-**"Symbolic law or graph network?"** → 17 and 18 are the same question asked
-twice. 17 keeps the stoichiometry right because you wrote it that way; 18 keeps
-it right structurally, at 20× the cost per evaluation. With four species, use
-17. With twenty, use 18.
-
-## Which geometry each case runs on
-
-Four geometries serve all eighteen, and they are described in
-[`../config/geometry/README.md`](../config/geometry/README.md).
-
 | Geometry | Cases |
 |---|---|
 | `slot_bare.dat` — wall and pore only | 01–04 |
