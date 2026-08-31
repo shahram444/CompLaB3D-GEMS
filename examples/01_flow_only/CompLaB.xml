@@ -41,6 +41,29 @@
             <unit>um</unit>
             <characteristic_length>24</characteristic_length>
             <filename>geometry.dat</filename>
+            <!-- ====================================================
+                 [NEW] GENERATING THE PORE SPACE INSTEAD OF READING ONE
+
+                 Uncomment this and <filename> above is ignored: the
+                 domain is built here, inspected, and written back to
+                 input/generated.dat so the run is reproducible from its
+                 own output.
+
+                 It writes pore, solid and wall ONLY. It cannot seed the
+                 microbe material numbers cases 05 to 12 need, which is
+                 why those still ship a geometry file.
+
+                 A pore space that does not percolate along x stops the
+                 run: a pressure drop across a sealed medium has no
+                 solution, and the flow solver would spend its whole
+                 iteration budget failing to converge to one.
+            <generate>spheres</generate>
+            <porosity>0.55</porosity>
+            <grain_radius>3.0</grain_radius>
+            <seed>12345</seed>
+            <walls>y</walls>
+            <write_geometry>generated.dat</write_geometry>
+                 ==================================================== -->
             <material_numbers>
                 <pore>2</pore>
                 <solid>0</solid>

@@ -37,14 +37,61 @@ COBRApy needs `src/complab3d_cobrapy.py` present at `<src_path>`
 at run time; it is imported by name, not compiled in. Expect one
 to two orders of magnitude slower than GLPK.
 
-## Running it
+**A safer way to write the exchange mapping.** `<exchange_reaction_indices>` is
+positional: the numbers are correct only for this exact model file.
+Insert one reaction into it and every index after that points somewhere
+else, with nothing to complain.
+
+`<exchange_reaction_names>` names the reactions instead, and they are
+resolved against the model at start-up, so a wrong one stops the run and
+prints the near matches. It needs an SBML model; the matrix format that
+`toy_model.xml` uses does not carry reaction names, which is why this
+case still uses indices. **Example 16 shows the named form**, on a real
+genome-scale model.
+
+## Everything this case needs is in this folder
+
+No cross-referencing, nothing to fetch. The metabolic model, the training
+code, the rate-law file and the pore space are all here, beside the
+configuration that uses them.
 
 ```bash
-cp defineKinetics.hh defineAbioticKinetics.hh  <path to CompLB3D>/
-cd <path to CompLB3D> && cd build && cmake -DENABLE_COBRAPY=ON .. && make
-cd .. && cp <path to this folder>/CompLaB.xml .
-cp -r <path to this folder>/input .
-./complab
+./scripts/setup_case.sh 10_fba_cobrapy run/mycase
+cd run/mycase
+./pipeline.sh
 ```
 
-`runAllExamples.sh` in the parent folder does all of that for every case.
+### The pipeline
+
+| | File | What it does |
+|---|---|---|
+| **pre** | `preprocess.py` | Builds the pore space: a staggered slot, 24 × 24 × 6, with the biomass patches seeded. Reports porosity and refuses to continue if it does not percolate. Standard library only. |
+| **offline** | `offline.sh` | Checks the model loads, and prints which Python it loaded in — the embedded interpreter finding a different Python from the one you installed cobra into is the usual failure here. |
+| **run** | `CompLaB.xml` | What the solver reads. Every tag is documented once, in [`../../config/CompLaB.reference.xml`](../../config/CompLaB.reference.xml). |
+| **post** | `postprocess.py` | Reads `output/summary.csv` and the log, reports every field's change, flags negatives, and runs this case's balance check. Standard library only. |
+| | `pipeline.sh` | Runs the four in order. |
+
+### What the solver reads
+
+| File | What it is |
+|---|---|
+| `input/geometry.dat` | The pore space. `preprocess.py` rebuilds it; this copy is here so the case runs before you have run anything. |
+| `input/toy_model.xml` | The metabolic model, in the directory the solver reads it from. |
+
+### The offline code this case ships
+
+| File | What it is |
+|---|---|
+| `training/complab3d_cobrapy.py` | The Python side of the COBRApy back end — what the embedded interpreter actually calls. |
+| `training/extractMM.py` | Exports an SBML or BiGG model to the tabular form the GLPK path reads, and answers the first question worth asking: can this model grow at all when nothing constrains it? |
+
+### What it inherits
+
+Only the two shared kinetics headers, from
+[`../../config/kinetics/`](../../config/kinetics/), and the solver sources.
+`setup_case.sh` lays those down and copies this folder whole on top.
+
+> **Why the training code is copied here rather than shared.** So that this
+> folder *is* the procedure. The cost is real and worth stating: a fix to a
+> trainer has to be applied to every case that carries it, and
+> `tests/check_repo.sh` fails if a copy drifts from `tools/`.
