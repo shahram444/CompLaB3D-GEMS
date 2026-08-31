@@ -1,0 +1,12 @@
+# Example 17: aerobic growth on acetate, dual Monod, written out by hand from a stage-B3 Pareto set.
+# Yield 0.4 mol biomass per mol acetate; two oxygen per acetate. See this case's README.md.
+version 1
+units   per_hour
+vars    acetate o2 Bug
+
+rate    growth  = 0.35 * acetate / (0.05 + acetate) * o2 / (0.01 + o2)
+rate    acetate = -2.5 * growth * Bug
+rate    o2      = -5.0 * growth * Bug
+
+range   acetate 1e-6 5.0e-3
+range   o2      1e-6 2.0e-3

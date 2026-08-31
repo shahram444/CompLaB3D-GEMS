@@ -1,0 +1,11 @@
+# examples/17_symbolic_law
+# Files this case shares with the rest of the repository.
+#
+# Each line is:   <path from the repository root>   <where it lands in the case>
+# scripts/setup_case.sh copies them in before the case's own files, so anything
+# the case carries itself wins.  They are listed here rather than copied into
+# the case so that one geometry serves the cases that share it.
+#
+#   config/geometry/slot_one_biofilm.dat  the same slot with one biofilm patch (3) on each wall
+
+config/geometry/slot_one_biofilm.dat  input/geometry.dat

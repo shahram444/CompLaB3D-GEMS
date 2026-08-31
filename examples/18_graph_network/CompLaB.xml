@@ -1,0 +1,194 @@
+<?xml version="1.0" ?>
+<!-- =========================================================================
+     CompLB3D EXAMPLE 18  |  A GRAPH NETWORK, READ FROM A TEXT FILE
+     =========================================================================
+
+     Anaerobic oxidation of methane coupled to sulfate reduction:
+
+         CH4 + SO4(2-)  ->  HS(-) + HCO3(-) + H2O
+
+     Four species, one reaction, and all four rates returned by ONE
+     evaluation of a message-passing network over the bipartite graph
+     of species and reactions.
+
+     What distinguishes this from the symbolic path next door is the
+     stoichiometry. It is given to the trainer as STRUCTURE, not
+     learned: the returned rates stay in the ratio -1:-1:+1:+1
+     without that ratio ever having been a training target. A
+     symbolic law gets the same guarantee only because you wrote the
+     other species as multiples of the fitted one by hand.
+
+     THE SPECIES NAMES ARE THE BINDING. aom.gnn declares
+     CH4 SO4 HS HCO3 and the substrates below carry exactly those
+     names. A network fitted to these cannot be applied to a
+     simulation that calls them something else: the run stops at
+     start-up naming the offending substrate.
+
+     trainmin and trainmax travel inside the .gnn and are enforced at
+     every evaluation. Every initial and boundary value below sits
+     inside that box on purpose: outside it, a neural network does
+     not fail, it returns confident nonsense.
+     ========================================================================= -->
+<parameters>
+
+    <path>
+        <src_path>src</src_path>
+        <input_path>input</input_path>
+        <output_path>output</output_path>
+    </path>
+
+    <simulation_mode>
+        <biotic_mode>true</biotic_mode>
+        <enable_kinetics>false</enable_kinetics>
+        <enable_abiotic_kinetics>false</enable_abiotic_kinetics>
+        <enable_fba_glpk>false</enable_fba_glpk>
+        <enable_fba_cobrapy>false</enable_fba_cobrapy>
+        <enable_surrogate>false</enable_surrogate>
+        <enable_validation_diagnostics>true</enable_validation_diagnostics>
+    </simulation_mode>
+
+    <LB_numerics>
+        <domain>
+            <nx>24</nx>
+            <ny>24</ny>
+            <nz>6</nz>
+            <dx>10</dx>
+            <unit>um</unit>
+            <characteristic_length>24</characteristic_length>
+            <filename>geometry.dat</filename>
+            <material_numbers>
+                <pore>2</pore>
+                <solid>0</solid>
+                <bounce_back>1</bounce_back>
+                <microbe0>3</microbe0>
+            </material_numbers>
+        </domain>
+
+        <delta_P>1e-6</delta_P>
+        <Peclet>0</Peclet>
+        <tau>0.8</tau>
+        <track_performance>false</track_performance>
+
+        <iteration>
+            <ns_max_iT1>20000</ns_max_iT1>
+            <ns_max_iT2>2000</ns_max_iT2>
+            <ns_converge_iT1>1e-6</ns_converge_iT1>
+            <ns_converge_iT2>1e-4</ns_converge_iT2>
+            <ns_update_interval>10</ns_update_interval>
+            <ade_update_interval>1</ade_update_interval>
+            <ade_max_iT>1000</ade_max_iT>
+            <ade_converge_iT>1e-8</ade_converge_iT>
+        </iteration>
+    </LB_numerics>
+
+    <!-- The whole rate vector comes from here. -->
+    <graphnet>
+        <enabled>true</enabled>
+        <network_file>input/aom.gnn</network_file>
+    </graphnet>
+
+    <chemistry>
+        <number_of_substrates>4</number_of_substrates>
+
+        <substrate0>                                    <!-- methane, fed from the left -->
+            <name_of_substrates>CH4</name_of_substrates>
+            <initial_concentration>2.0e-3</initial_concentration>
+            <substrate_diffusion_coefficients>
+                <in_pore>2.0e-9</in_pore>
+                <in_biofilm>1.0e-9</in_biofilm>
+            </substrate_diffusion_coefficients>
+            <left_boundary_type>Dirichlet</left_boundary_type>
+            <left_boundary_condition>4.0e-3</left_boundary_condition>
+            <right_boundary_type>Neumann</right_boundary_type>
+            <right_boundary_condition>0.</right_boundary_condition>
+        </substrate0>
+
+        <substrate1>                                    <!-- sulfate, fed from the left -->
+            <name_of_substrates>SO4</name_of_substrates>
+            <initial_concentration>4.0e-3</initial_concentration>
+            <substrate_diffusion_coefficients>
+                <in_pore>1.0e-9</in_pore>
+                <in_biofilm>5.0e-10</in_biofilm>
+            </substrate_diffusion_coefficients>
+            <left_boundary_type>Dirichlet</left_boundary_type>
+            <left_boundary_condition>6.0e-3</left_boundary_condition>
+            <right_boundary_type>Neumann</right_boundary_type>
+            <right_boundary_condition>0.</right_boundary_condition>
+        </substrate1>
+
+        <substrate2>                                    <!-- sulfide, a product -->
+            <name_of_substrates>HS</name_of_substrates>
+            <initial_concentration>1.0e-4</initial_concentration>
+            <substrate_diffusion_coefficients>
+                <in_pore>1.5e-9</in_pore>
+                <in_biofilm>7.5e-10</in_biofilm>
+            </substrate_diffusion_coefficients>
+            <left_boundary_type>Neumann</left_boundary_type>
+            <left_boundary_condition>0.</left_boundary_condition>
+            <right_boundary_type>Neumann</right_boundary_type>
+            <right_boundary_condition>0.</right_boundary_condition>
+        </substrate2>
+
+        <substrate3>                                    <!-- bicarbonate, a product -->
+            <name_of_substrates>HCO3</name_of_substrates>
+            <initial_concentration>5.0e-4</initial_concentration>
+            <substrate_diffusion_coefficients>
+                <in_pore>1.2e-9</in_pore>
+                <in_biofilm>6.0e-10</in_biofilm>
+            </substrate_diffusion_coefficients>
+            <left_boundary_type>Neumann</left_boundary_type>
+            <left_boundary_condition>0.</left_boundary_condition>
+            <right_boundary_type>Neumann</right_boundary_type>
+            <right_boundary_condition>0.</right_boundary_condition>
+        </substrate3>
+
+    </chemistry>
+
+    <microbiology>
+        <number_of_microbes>1</number_of_microbes>
+        <maximum_biomass_density>1.0e-3</maximum_biomass_density>
+        <thrd_biofilm_fraction>0.01</thrd_biofilm_fraction>
+        <CA_method>fraction</CA_method>
+
+        <microbe0>                                <!-- seeded on material number 3 -->
+            <name_of_microbes>ANME</name_of_microbes>       <!-- the consortium, one pool -->
+            <solver_type>CA</solver_type>
+            <reaction_type>graphnet</reaction_type>
+            <initial_densities>1.0e-5</initial_densities>
+            <decay_coefficient>0.0</decay_coefficient>
+            <viscosity_ratio_in_biofilm>0</viscosity_ratio_in_biofilm>
+            <half_saturation_constants>0 0 0 0</half_saturation_constants>  <!-- unused: the .gnn carries its own -->
+            <maximum_uptake_flux>0 0 0 0</maximum_uptake_flux>
+            <left_boundary_type>Neumann</left_boundary_type>
+            <left_boundary_condition>0.</left_boundary_condition>
+            <right_boundary_type>Neumann</right_boundary_type>
+            <right_boundary_condition>0.</right_boundary_condition>
+        </microbe0>
+
+    </microbiology>
+
+    <equilibrium>
+        <enabled>false</enabled>
+    </equilibrium>
+
+    <precipitation>
+        <enabled>false</enabled>
+    </precipitation>
+
+    <dissolution>
+        <enabled>false</enabled>
+    </dissolution>
+
+    <IO>
+        <read_NS_file>false</read_NS_file>
+        <read_ADE_file>false</read_ADE_file>
+        <ns_filename>nsLattice</ns_filename>
+        <mask_filename>maskLattice</mask_filename>
+        <subs_filename>subsLattice</subs_filename>
+        <bio_filename>bioLattice</bio_filename>
+        <save_VTK_interval>200</save_VTK_interval>
+        <save_CHK_interval>0</save_CHK_interval>
+        <debug_updRxn>0</debug_updRxn>
+    </IO>
+
+</parameters>
