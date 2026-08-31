@@ -1,163 +1,132 @@
-# CompLB3D example suite
+# Examples
 
-Fifteen tiny cases, one per capability. Each runs in seconds on a laptop, each
-is self-contained, and each says what it should produce.
+Eighteen cases, arranged so that each one adds a single thing to the one before
+it. If you are new to the model, run them in order until something breaks in a
+way you do not understand — that is the piece worth reading about.
 
-They are deliberately small. The point is to prove a feature works and to show
-what the switches do, not to be physically interesting. Every domain is
-24 × 24 × 6 with z periodic, which makes it quasi-2D: every z-plane sees
-identical conditions, so a result that depends on z is a bug rather than
-physics.
+## How to run one
+
+An example directory is not runnable as it stands, and deliberately so: it holds
+only what is unique to that case. Assemble a working directory instead:
 
 ```bash
-python3 makeGeometry.py                       # writes input_shared/
-python3 makeExamples.py                       # writes the 15 case folders
-python3 validateExamples.py ../CompLB3D       # structural check, one second
-./runAllExamples.sh ../CompLB3D               # build and run everything
-./runAllExamples.sh ../CompLB3D 09 10         # or just these two
+./scripts/setup_case.sh 13_precipitation run/mycase
+cd run/mycase
+cmake -B build -S . && cmake --build build -j
+./build/complab CompLaB.xml
 ```
 
----
+`setup_case.sh` works in three passes, each overwriting the last, so a case can
+always override anything it inherits:
 
-## The cases
-
-| | case | what it exercises |
+| | Pass | Where it comes from |
 |---|---|---|
-| 01 | `flow_only` | Navier–Stokes plus advection–diffusion, no chemistry. The smoke test. |
-| 02 | `diffusion_only` | `<Peclet>0`, so no flow. **Has an analytic answer.** |
-| 03 | `abiotic_kinetics` | `defineAbioticKinetics.hh`: A + B → C |
-| 04 | `equilibrium` | the speciation tableau, on the carbonate system |
-| 05 | `biotic_cellular_automaton` | Monod growth, CA biomass solver |
-| 06 | `biotic_finite_difference` | the same case, FD solver |
-| 07 | `biotic_lattice_boltzmann` | the same case, LBM solver |
-| 08 | `two_microbes` | two organisms, two *different* solvers, competing |
-| 09 | `fba_glpk` | flux balance analysis through GLPK. **Has an analytic answer.** |
-| 10 | `fba_cobrapy` | the same model through COBRApy. Must agree with 09. |
-| 11 | `surrogate` | the trained network instead of an LP |
-| 12 | `mixed_reaction_types` | `glpk_and_kinetics`: both paths, rates added |
-| 13 | `precipitation` | mineral growth and pore clogging |
-| 14 | `dissolution` | mineral loss and pore reopening |
-| 15 | `precip_and_dissolution` | both directions on one mineral |
+| 1 | the default chemistry, so the case always compiles | `config/kinetics/*.default.hh` |
+| 2 | whatever this case borrows | the paths listed in the case's own `case.files` |
+| 3 | whatever this case owns | `examples/NN_case/kinetics/`, `CompLaB.xml`, `input/` |
 
-Cases 05, 06 and 07 are **the same case with one line changed**. So are 09 and
-10. Those pairs are the useful ones: they isolate a single decision.
+Six of the eighteen carry a chemistry header of their own; the rest use the
+shared ones unchanged. Every case borrows a geometry, the three FBA cases also
+borrow the toy metabolic model, and case 18 borrows the trained graph network
+from pipeline stage B4.
 
----
+### `case.files`
 
-## What is worth checking, not just running
-
-`runAllExamples.sh` checks that each case runs, exits cleanly and never
-reports a negative concentration. That catches crashes and instabilities. It
-does **not** check the numbers, and four of these cases have a right answer
-that does not come from this code:
-
-**02** — with no reaction and one face held at 1, the other at 0, the steady
-profile is a **straight line**. Curvature means a reaction is firing somewhere
-it should not, or a boundary is not being held.
-
-**03, 13, 14, 15** — **mass balance.** One A plus one B makes exactly one C;
-one mole of calcite removed appears as exactly one mole of Ca²⁺. Any drift is a
-bug, not chemistry.
-
-**09 and 10** — the toy model is four reactions, so the answer is a formula:
+Each case has one. It is two columns — the path from the repository root, and
+where that file lands in the assembled directory — with a comment above saying
+what each borrowed file is:
 
 ```
-growth = min( Vs, 2 · Vo ),    V = Vmax · C / (Kc + C)
+config/geometry/slot_one_biofilm.dat  input/geometry.dat
+models/toy_model.xml                  input/toy_model.xml
 ```
 
-With Vmax 10 and 4 and both concentrations well above their half-saturation
-constants, the acceptor limits and growth should settle near **8 mmol/gDW/h**.
-That number comes from the stoichiometry. And 09 and 10 must agree with each
-other, because the two solvers receive an identical linear program and share
-nothing else.
+Read it when you want to know what a case is actually made of. Edit it if you
+want a case to start from a different geometry permanently; to do it once, just
+replace `input/geometry.dat` in the assembled directory instead.
 
----
+## The eighteen
 
-## Why each folder carries its own kinetics headers
+| | Case | What it adds | Offline work first |
+|---|---|---|---|
+| 01 | `flow_only` | Navier–Stokes on a pore space, nothing else | — |
+| 02 | `diffusion_only` | one solute, transported, no reaction | — |
+| 03 | `abiotic_kinetics` | a chemical rate law, no organisms | — |
+| 04 | `equilibrium` | aqueous speciation by continued fractions | — |
+| 05 | `biotic_cellular_automaton` | biomass, spread by the automaton | — |
+| 06 | `biotic_finite_difference` | the same, by finite difference | — |
+| 07 | `biotic_lattice_boltzmann` | the same, on a D3Q7 lattice | — |
+| 08 | `two_microbes` | two populations competing for one substrate | — |
+| 09 | `fba_glpk` | growth from a genome-scale linear program | **B1** |
+| 10 | `fba_cobrapy` | the same through the reference implementation | **B1** |
+| 11 | `surrogate` | a fitted network in place of the linear program | **B1 → B2** |
+| 12 | `mixed_reaction_types` | one population on FBA beside one on kinetics | **B1** |
+| 13 | `precipitation` | FeS fills the pore and seals it | — |
+| 14 | `dissolution` | calcite is eaten away and the pore reopens | — |
+| 15 | `precip_and_dissolution` | both at once, on different phases | — |
+| 16 | `complete_pipeline` | geometry, chemistry, biology and metabolism together | **B1** |
+| 17 | `symbolic_law` | the rate law read from a text file, no rebuild | — |
+| 18 | `graph_network` | the whole coupled rate vector from one evaluation | — |
 
-CompLaB compiles its rate laws in. `defineKinetics.hh` and
-`defineAbioticKinetics.hh` are `#include`d, not read at run time, so two cases
-with different chemistry need different binaries. `runAllExamples.sh` copies
-each case's headers in and rebuilds, restoring your own on exit — including on
-Ctrl-C.
+The offline column points into [`../pipelines/`](../pipelines/). Twelve of the
+eighteen need nothing prepared at all — 17 and 18 included, because both ship
+the file they read.
 
-That is not this suite being awkward; it is how the code is built. The 2D suite
-worked the same way: every `example/scalability` case shipped its own
-`defineKinetics.hh`.
+## Where the six rate paths appear
 
-The shipped headers implement the 95-substrate uranium network. Dropped into a
-2-substrate case they index `C[0]` to `C[94]` and read past the end of the
-array, so every example replaces them. `validateExamples.py` checks each
-header's own `C.size()` guard against the case's substrate count, which catches
-exactly the mistake of forgetting to.
+| Rate path | Example |
+|---|---|
+| Compiled kinetics | 03, 05–08 |
+| Flux balance, GLPK | 09, 12, 16 |
+| Flux balance, COBRApy | 10 |
+| Surrogate network | 11 |
+| Symbolic law | **17** |
+| Graph network | **18** |
 
-Three cases need a different cmake configuration: 09 and 12 need
-`-DENABLE_GLPK=ON`, 10 needs `-DENABLE_COBRAPY=ON`. The runner groups them, so
-the tree is reconfigured three times rather than fifteen.
+17 and 18 are driven by a file rather than a build setting, which is why neither
+needs offline work to run: the `.sym` and the `.gnn` both ship. Point any of
+05–08 at one and it will use that instead of its compiled kinetics.
 
----
+## Which one answers my question?
 
-## validateExamples.py
+**"Does my geometry work?"** → 01. If the flow does not percolate, nothing else
+will either.
 
-A one-second structural check, run before you build anything. It verifies:
+**"Is my chemistry right?"** → 03, with the organisms switched off. A rate law
+that misbehaves is much easier to see without biomass moving underneath it.
 
-- every XML is well formed, and **no comment contains a double hyphen** — XML
-  forbids it and this codebase has tripped over it repeatedly
-- every tag name appears in the set the **source actually reads**, extracted
-  mechanically from CompLB3D rather than typed out. A tag renamed upstream
-  shows up as an unknown tag instead of as silence
-- the vector-length and presence rules that terminate a run: `Kc` and `Vmax`
-  lengths against the substrate count, `initial_densities` against the material
-  numbers, `viscosity_ratio_in_biofilm` present for exactly the seeded microbes,
-  `biomass_diffusion_coefficients` present when the solver is FD, FD rejected
-  for planktonic microbes
-- reaction types spelled acceptably, and the matching `enable_*` switch on
-- geometry files: the right voxel count, and every material number the XML
-  refers to actually present
-- metabolic model files: `nmet`, `nrxn`, and the lengths of S, b, c, lb, ub;
-  exchange indices inside range
-- precipitation and dissolution pointing at substrates that are actually
-  `<immobile>true</immobile>`
-- the kinetics headers **compile**, at `-Wall -Wextra`
+**"Why is my pore not clogging?"** → 13. Compare its `max_precipRho` with yours;
+the usual cause is a fill density derived from the wrong molar volume.
 
-It is not Palabos. It builds no lattices and runs nothing.
+**"Why does my dissolution lose mass?"** → 14, run on one process. Then read the
+MPI limitation in [`../pipelines/C_run/README.md`](../pipelines/C_run/README.md).
 
-**It was checked against deliberate breakage**, which is the only way to trust
-a checker. Ten mutations were introduced one at a time — a short `Kc` vector, an
-exchange index past the end of the model, `gplk` for `glpk`, the enable switch
-turned off, a mistyped tag, FD on a planktonic microbe, a truncated S matrix, a
-double hyphen in a comment, a kinetics guard written for other chemistry, a
-syntax error in a rate law. **All ten were caught.**
+**"Is the surrogate worth it?"** → run 09 and 11 on the same geometry and
+compare the biomass fields. That difference is what the approximation costs you.
 
----
+**"Symbolic law or graph network?"** → 17 and 18 are the same question asked
+twice. 17 keeps the stoichiometry right because you wrote it that way; 18 keeps
+it right structurally, at 20× the cost per evaluation. With four species, use
+17. With twenty, use 18.
 
-## Extending the suite
+## Which geometry each case runs on
 
-`makeExamples.py` generates the folders from shared fragments in `_build/`.
-Edit and regenerate rather than hand-patching fifteen XMLs; that is how the
-suite stays consistent after the validator finds something.
+Four geometries serve all eighteen, and they are described in
+[`../config/geometry/README.md`](../config/geometry/README.md).
 
-A case is a `case(...)` call: a number, a name, the XML, a README, a geometry,
-and optionally its own kinetics headers and a metabolic model.
+| Geometry | Cases |
+|---|---|
+| `slot_bare.dat` — wall and pore only | 01–04 |
+| `slot_one_biofilm.dat` — one seeded population | 05–07, 09–12, 16–18 |
+| `slot_two_biofilms.dat` — two populations facing each other | 08 |
+| `slot_mineral_phase.dat` — a declared solid phase on the walls | 13–15 |
 
----
+All four are 24 × 12 × 12, which runs in seconds. Scale up only once the case
+does what you expect at this size.
 
-## Not covered here
+## A note on `CompLaB.xml`
 
-- **checkpoint restart** — `<read_NS_file>` and `<read_ADE_file>`, which resume
-  from a `.chk` written by `<save_CHK_interval>`. Set `save_CHK_interval` in any
-  case above, run it, then rerun with the read flags on.
-- **MPI** — every case runs under `mpirun` unchanged; the domain is too small
-  for the scaling to mean anything.
-- **the scalability benchmarks** from the 2D suite (`example/scalability`,
-  four cases). Those are performance measurements rather than capability
-  demonstrations, and are still to be ported.
-
----
-
-## Standing caveat
-
-None of this has been compiled against real Palabos. The XML, the geometry, the
-model files and the kinetics headers are all validated — tag names, lengths,
-indices, well-formedness, and the headers genuinely compile — but the first real
-build is on Tahoma.
+Each case has its own, and they are all genuinely different — that is the point
+of having eighteen. None of them is a reference: every tag is documented once, in
+[`../config/CompLaB.reference.xml`](../config/CompLaB.reference.xml), and
+nowhere else.
