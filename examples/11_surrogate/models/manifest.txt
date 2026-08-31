@@ -1,0 +1,26 @@
+# CompLB3D model manifest
+#
+# One row per known genome-scale model. The solver uses this to
+#   * find a bundled or cached copy before ever touching the network,
+#   * verify that the file it found is the file it expected, and
+#   * warn when a model is a DIFFERENT REVISION than the case was built against.
+#
+# That last check is the important one. <exchange_reaction_indices> in CompLaB.xml
+# is POSITIONAL: if a revision inserts one reaction, every index after it silently
+# points somewhere else and the run does not complain. Naming exchanges instead,
+# with <exchange_reaction_names>, makes that impossible rather than merely visible.
+#
+# Two pairs of counts, because they answer different questions:
+#   raw_species / raw_reactions   how many <species  and <reaction  tags are in the
+#                                 file. A cheap check before parsing.
+#   met / rxn                     how many the parsed MODEL has. Smaller than the raw
+#                                 counts, because boundaryCondition species are tags
+#                                 but are not metabolites. The exact check.
+#
+# hash and bytes are of the UNPACKED xml, so a bundled .xml.gz and a downloaded .xml
+# give the same values. Set any field to 0 to skip that check.
+#
+# name  raw_species  raw_reactions  met  rxn  objective  hash  bytes  url
+STM_v1_0 2436 3357 2436 3357 BIOMASS_iRR1083_1 13926089614200281235 12044462 http://bigg.ucsd.edu/static/models/STM_v1_0.xml
+e_coli_core 72 95 72 95 Biomass_Ecoli_core 15205955408896559808 351123 http://bigg.ucsd.edu/static/models/e_coli_core.xml
+iJO1366 1805 2583 1805 2583 BIOMASS_Ec_iJO1366_core_53p95M 12765565909324901633 9164172 http://bigg.ucsd.edu/static/models/iJO1366.xml

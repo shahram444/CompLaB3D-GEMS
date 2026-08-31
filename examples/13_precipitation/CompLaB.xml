@@ -44,6 +44,16 @@
         <enable_validation_diagnostics>true</enable_validation_diagnostics>
     </simulation_mode>
 
+    <!-- The run's own scalar record. output/summary.csv gets one row every 100 steps.
+         The porosity column is the headline result of this case: watch it in
+         output/summary.csv rather than by eye in the log. -->
+    <diagnostics>
+        <enabled>true</enabled>
+        <summary_csv>summary.csv</summary_csv>
+        <interval>100</interval>
+        <tolerance>1e-6</tolerance>
+    </diagnostics>
+
     <LB_numerics>
         <domain>
             <nx>24</nx>
