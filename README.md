@@ -1,10 +1,10 @@
 # CompLaB3D-GEMS
 
-GEMS:
-Geometry evolution, precipitation, dissolution
-Equilibrium and kinetics, the base chemistry these attach to
-Metabolism, flux balance analysis, GLPK and COBRApy
-Surrogates, the neural, symbolic and graph-network rate laws
+# GEMS:
+# Geometry evolution: precipitation, dissolution
+# Equilibrium and kinetics: 
+# Metabolism: flux balance analysis, GLPK and COBRApy
+# Surrogates: the neural, symbolic and graph-network rate laws
 
 A three-dimensional pore-scale reactive transport model. Lattice Boltzmann flow
 and solute transport are coupled to microbial growth, abiotic chemistry and
