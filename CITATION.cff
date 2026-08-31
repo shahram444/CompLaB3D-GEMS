@@ -1,0 +1,68 @@
+cff-version: 1.2.0
+title: "CompLB3D: a 3D pore-scale reactive transport model with microbial metabolism"
+message: "If you use this software, please cite it using these metadata."
+type: software
+
+authors:
+  - family-names: Asgari
+    given-names: Shahram
+    affiliation: "Department of Marine Sciences, University of Georgia, Athens, GA, USA"
+    email: shahram.asgari@uga.edu
+    # orcid: "https://orcid.org/0000-0000-0000-0000"   # add yours, JOSS asks for it
+  - family-names: Meile
+    given-names: Christof
+    affiliation: "Department of Marine Sciences, University of Georgia, Athens, GA, USA"
+    # email: FILL IN
+    # orcid: "https://orcid.org/0000-0000-0000-0000"
+
+abstract: >-
+  CompLB3D is a three-dimensional pore-scale reactive transport model. It
+  couples lattice-Boltzmann flow and solute transport to microbial metabolism,
+  aqueous speciation, and mineral precipitation and dissolution that change the
+  pore geometry as the simulation runs. Metabolism is chosen per organism:
+  hand-written kinetics, flux balance analysis through GLPK or COBRApy, or a
+  trained surrogate neural network. It extends the two-dimensional CompLaB model
+  and adds an equilibrium chemistry solver, an abiotic kinetics path, and
+  mineral dissolution.
+
+repository-code: "https://github.com/shahram444/CompLB3D-lattice-Boltzmann-FBA-surrogate-COBRApy-GLPK"
+license: AGPL-3.0-or-later
+
+version: 1.0.0
+date-released: 2026-08-13
+
+# Add the Zenodo DOI here once you have cut the release. JOSS asks for it, and
+# it is what makes this file cite a fixed version rather than a moving branch.
+# doi: "10.5281/zenodo.XXXXXXX"
+
+keywords:
+  - lattice Boltzmann
+  - reactive transport
+  - pore scale
+  - flux balance analysis
+  - genome-scale metabolic model
+  - surrogate model
+  - biogeochemistry
+  - microbial metabolism
+  - biofilm
+
+# ---------------------------------------------------------------------------
+# The 2D predecessor. Cite it alongside this one: CompLB3D extends CompLaB
+# rather than replacing it, and the flux balance and surrogate machinery here
+# derives from that work.
+#
+# FILL IN the remaining author names, the journal, volume, pages and DOI from
+# the published CompLaB paper. The doi line is COMMENTED OUT on purpose: the
+# CFF schema validates it against the pattern ^10\.\d{4,9}/..., so a
+# placeholder string makes the whole file invalid and GitHub then silently
+# refuses to show any of it. Uncomment it only when you have the real DOI.
+# ---------------------------------------------------------------------------
+references:
+  - type: article
+    authors:
+      - family-names: Jung
+        given-names: Heewon
+    title: "CompLaB: a reactive transport model for pore-scale simulation of microbial metabolism"
+    year: 2023
+    journal: "FILL IN"
+    # doi: "10.XXXX/XXXXX"
