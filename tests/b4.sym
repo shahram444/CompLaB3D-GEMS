@@ -1,0 +1,3 @@
+vars a
+rate x = a
+rate x = 2*a

@@ -1,0 +1,27 @@
+# The example 03 chemistry, plus a microbe and a dissolving phase,
+# so the generator is exercised on all three block types at once.
+
+substrates: A B C H Ca calcite
+microbes:   Bug
+
+abiotic R1:
+    equation: A + B -> C
+    k: 5.0e-2
+
+abiotic R2:                 # non-unit stoichiometry, to test the coefficients
+    equation: 2 A + C -> 3 B
+    k: 1.0e-3
+
+microbe Bug:
+    mu_max: 2.0e-4
+    monod: A 0.05
+    monod: B 0.01
+    inhibit: C 1.0
+    yield: A 0.4
+    release: C 2.0
+    decay: 1.0e-6
+
+dissolve calcite:
+    equation: calcite + H -> Ca
+    k: 1.0e-2
+    driver: H

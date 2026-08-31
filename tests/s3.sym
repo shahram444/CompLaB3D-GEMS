@@ -1,0 +1,4 @@
+version 1
+units per_second
+vars S P X
+rate growth = -1000

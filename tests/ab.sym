@@ -1,0 +1,6 @@
+# abiotic iron sulfide formation, second order
+version 1
+units per_second
+vars Fe HS
+rate Fe = -12.0 * Fe * HS
+rate HS = -12.0 * Fe * HS

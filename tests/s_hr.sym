@@ -1,0 +1,7 @@
+# a rate law whose answer can be worked out on paper
+version 1
+units per_hour
+vars S P X
+rate growth = 0.05 * S
+rate S = -0.2 * S
+rate P = -0.5 * S

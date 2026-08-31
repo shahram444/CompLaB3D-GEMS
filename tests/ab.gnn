@@ -1,0 +1,30 @@
+version 1
+units per_second
+species Fe HS
+reactions R1
+rounds 1
+width 1
+growth 0
+stoich 2 1
+-1
+-1
+da 1
+xoffset 0 0
+xgain 1 1
+xymin 0
+yoffset -4 -4
+ygain 1 1
+yymin 0
+trainmin 0 0
+trainmax 100 100
+Wenc 0
+benc 0
+layer 0
+Wsr 0
+Wda 0
+bR 0
+Wss 0
+Wrs 0
+bS 0
+Wout 0
+bout 0

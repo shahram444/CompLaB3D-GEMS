@@ -1,0 +1,6 @@
+version 1
+units per_second
+vars S P X
+rate S = -2
+rate P = 3
+rate growth = 0

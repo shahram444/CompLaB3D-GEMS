@@ -1,0 +1,32 @@
+# a network small enough to check by hand
+provenance written by test_gnn.cpp
+version 1
+units per_second
+species A B
+reactions R1
+rounds 1
+width 1
+growth 0
+stoich 2 1
+-1
+2
+da 0.5
+xoffset 0 0
+xgain 1 1
+xymin 0
+yoffset 0 0
+ygain 1 1
+yymin 0
+trainmin 0 0
+trainmax 10 10
+Wenc 1
+benc 0
+layer 0
+Wsr 1
+Wda 2
+bR 0
+Wss 0.5
+Wrs 1
+bS 0
+Wout 1
+bout 0
