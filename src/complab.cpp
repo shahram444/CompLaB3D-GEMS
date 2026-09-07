@@ -52,21 +52,27 @@
 #include "complab3d_processors.hh"
 #include "../defineKinetics.hh"        // For KineticsStats namespace - in project root
 #include "../defineAbioticKinetics.hh" // For abiotic kinetics (substrate-only reactions)
-#include "complab3d_rates.hh"      // [RATE-OUT] optional reaction rate output, off unless CompLaB.xml asks
 #include "precipitationVOP.hh"         // [PRECIP-VOP] surface precipitation + pore-clogging feedback
 #include "dissolutionVOP.hh"           // [DISSOL-VOP] mineral dissolution + pore re-opening
-#include "complab3d_processors_symbolic.hh"  // [SYM] rate laws read from a .sym file at run time
-#include "complab3d_processors_graphnet.hh"  // [GNN] a graph network read from a .gnn file
-#include "complab3d_processors_abiotic_learned.hh"  // [SYM][GNN] the same two, swept abiotically
+// [NEW] The pipeline blocks: <model_source>, geometry generation, <surrogate>, <diagnostics>.
+//   Header-only, and every one of them is inert unless its XML block is present, so a run with an
+//   unchanged CompLaB.xml takes exactly the path it took before these lines existed.
+#include "complab3d_integration.hh"
+#include "complab3d_outerfaces.hh"     // the four faces nobody gave a boundary condition
+#include "complab3d_upscale.hh"        // one aggregate -> an effectiveness factor
+#include "complab3d_srgtrain_glpk.hh"  // [NEW] the LP callback that in-run surrogate training uses
 #include <algorithm>
 #include <cctype>
+#include <sstream>
 
 #include <chrono>
 #include <string>
 #include <iostream>
+#include <fstream>
 #include <cstring>
 #include <vector>
 #include <sys/stat.h>
+#include <unistd.h>
 #include <iomanip>
 #include <cmath>
 
@@ -110,9 +116,154 @@ void printStabilityReport(const StabilityReport& report) {
 }
 
 
+/* ==================================================================================================
+ *  complab_upscale_sample  --  one diagnostic interval's worth of the upscaling record
+ *
+ *  Lives here rather than in complab3d_upscale.hh because it needs two things that belong to the
+ *  program and not to a header: defineRxnKinetics(), which is the user's own compiled rate law, and
+ *  the thermodynamic gate, which is bound to this run's microbes. Everything reusable -- the
+ *  reductions, the classical curve, the record and the report -- is in the header.
+ *
+ *  The numerator is measured from the increment lattices, which hold the rate every path just
+ *  computed. The denominator is the SAME rate law evaluated once at the bulk composition, which is
+ *  exactly what a continuum model would do with one concentration per grid block. Their ratio is
+ *  the error that upscaling would make, measured rather than argued.
+ * ================================================================================================== */
+/* The biomass a run is actually holding, summed over the per-microbe lattices.
+ *
+ * NOT over totalbFilmLattice, which is the combined field the cellular automaton works on. Its
+ * wall voxels are never parked at zero the way the per-microbe ones are, so reading its
+ * populations counts one unit of nothing for every wall voxel in the domain -- 2000 of them on
+ * example 07, against a real biomass of 126.
+ *
+ * The per-microbe lattices ARE parked, by the stabilisation block in main(), so the population
+ * sum over them is the honest total: what is in the open voxels plus what is in transit at a
+ * wall, which computeDensity() alone cannot see. */
+static T complab_total_biomass(
+        std::vector< MultiBlockLattice3D<T,RXNDES> > &bFilm,
+        std::vector< MultiBlockLattice3D<T,RXNDES> > &bFree,
+        T *seenOut = 0)
+{
+    T total = T(), seen = T();
+    for (size_t i = 0; i < bFilm.size(); ++i) {
+        seen  += computeSum(*computeDensity(bFilm[i]));
+        total += (T) PopulationSum3D(bFilm[i].getBoundingBox(), bFilm[i]);
+    }
+    for (size_t i = 0; i < bFree.size(); ++i) {
+        seen  += computeSum(*computeDensity(bFree[i]));
+        total += (T) PopulationSum3D(bFree[i].getBoundingBox(), bFree[i]);
+    }
+    if (seenOut) *seenOut = seen;
+    return total;
+}
+
+static void complab_upscale_sample(
+        plint iT, const integ::Config &icfg, T dt, T dx, plint nx, plint ny, plint nz,
+        plint num_of_substrates, plint num_of_microbes,
+        std::vector< MultiBlockLattice3D<T,RXNDES> > &subs,
+        std::vector< MultiBlockLattice3D<T,RXNDES> > &dC,
+        MultiBlockLattice3D<T,RXNDES> &maskLattice,
+        std::vector< MultiBlockLattice3D<T,RXNDES> > &bFilm,
+        std::vector< MultiBlockLattice3D<T,RXNDES> > &bFree,
+        const std::vector<bool> &bmass_type, const std::vector<plint> &loctrack,
+        const std::vector<plint> &pore_dynamics,
+        const std::vector<T> &vec_solute_bFilmD)
+{
+    (void) ny; (void) nz;
+    const plint iS = (plint) icfg.upsSpecies;
+    if (iS < 0 || iS >= num_of_substrates) return;
+
+    const Box3D box(1, nx-2, 0, ny-1, 0, nz-1);
+    std::unique_ptr< MultiScalarField3D<T> > live = computeDensity(maskLattice);
+
+    /* The bulk is open pore OUTSIDE the aggregate. Named as a material list rather than
+     * "everything that is not aggregate", so a wall or a grain can never be counted as water. */
+    std::vector<plint> bulkMat;
+    for (size_t k = 0; k < pore_dynamics.size(); ++k) {
+        bool isAgg = false;
+        for (size_t j = 0; j < icfg.upsAggregateMat.size(); ++j)
+            if (pore_dynamics[k] == icfg.upsAggregateMat[j]) { isAgg = true; break; }
+        if (!isAgg) bulkMat.push_back(pore_dynamics[k]);
+    }
+
+    complab_upscale::Point p;
+    p.iteration = (long) iT;
+
+    /* < r > inside the aggregate, straight off the increment lattice. */
+    {
+        complab_upscale::RegionRateFunctional3D<T,RXNDES,T> f(icfg.upsAggregateMat, dt);
+        applyProcessingFunctional(f, box, dC[iS], *live);
+        p.aggregateVoxels = f.getCount();
+        p.rateMean = (p.aggregateVoxels > 0) ? f.getSum() / p.aggregateVoxels : 0.0;
+    }
+    /* Every substrate at its bulk mean, so the rate law sees a composition a continuum model
+     * could actually have had. */
+    std::vector<double> Cbulk((size_t) num_of_substrates, 0.0);
+    for (plint k = 0; k < num_of_substrates; ++k) {
+        complab_upscale::RegionMeanFunctional3D<T,RXNDES,T> f(bulkMat);
+        applyProcessingFunctional(f, box, subs[k], *live);
+        if (k == iS) { p.bulkVoxels = f.getCount(); }
+        Cbulk[(size_t) k] = (f.getCount() > 0) ? f.getSum() / f.getCount() : 0.0;
+    }
+    p.bulkConc = Cbulk[(size_t) iS];
+
+    /* The mean biomass inside the aggregate. r(C_bulk) has to be evaluated at the same amount of
+     * catalyst the aggregate actually holds, or the ratio measures the biomass rather than the
+     * transport limitation it is supposed to measure. */
+    std::vector<double> Bbulk((size_t) num_of_microbes, 0.0);
+    for (plint iM = 0; iM < num_of_microbes; ++iM) {
+        MultiBlockLattice3D<T,RXNDES> &bl = (bmass_type[iM] == 1) ? bFilm[loctrack[iM]]
+                                                                 : bFree[loctrack[iM]];
+        complab_upscale::RegionMeanFunctional3D<T,RXNDES,T> f(icfg.upsAggregateMat);
+        applyProcessingFunctional(f, box, bl, *live);
+        Bbulk[(size_t) iM] = (f.getCount() > 0) ? f.getSum() / f.getCount() : 0.0;
+    }
+
+    /* r(C_bulk): the user's own rate law, once, at the bulk composition. mask 2 so the law's own
+     * "no biology in a wall" guard lets it through. */
+    std::vector<double> subsR((size_t) num_of_substrates, 0.0), bioR((size_t) num_of_microbes, 0.0);
+    defineRxnKinetics(Bbulk, Cbulk, subsR, bioR, (plint) 2);
+    p.rateAtBulk = -subsR[(size_t) iS];
+
+    /* The gate at the bulk composition. This is the number somebody upscaling by hand would reach
+     * for, and reporting it beside eta is what shows it is not a substitute: r(C_bulk) already has
+     * it in, so whatever eta departs from 1 is exactly the error that shortcut would make. */
+    if (complab_thermo::enabled()) {
+        double g = 1.0;
+        for (plint iM = 0; iM < num_of_microbes; ++iM) {
+            const double gm = complab_thermo::gateFor((int) iM, Cbulk);
+            if (gm < g) g = gm;
+        }
+        p.gateAtBulk = g;
+        p.rateAtBulk *= g;
+    }
+
+    /* R from the measured aggregate volume when it was not declared: the radius of the sphere of
+     * the same volume, which is the length the Thiele modulus is built on. dx is in metres. */
+    double R = icfg.upsRadius * 1e-6;
+    if (!(R > 0) && p.aggregateVoxels > 0)
+        R = std::pow(3.0 * p.aggregateVoxels / (4.0 * 3.14159265358979323846), 1.0/3.0) * (double) dx;
+
+    double D = icfg.upsDiffusivity;
+    if (!(D > 0) && iS < (plint) vec_solute_bFilmD.size()) D = (double) vec_solute_bFilmD[(size_t) iS];
+
+    p.eta = (std::fabs(p.rateAtBulk) > 0) ? p.rateMean / p.rateAtBulk : 0.0;
+    const double k = (std::fabs(p.bulkConc) > 0) ? p.rateAtBulk / p.bulkConc : 0.0;   /* 1/s */
+    p.thiele = (k > 0 && D > 0 && R > 0) ? R * std::sqrt(k / D) : 0.0;
+    p.etaClassical = complab_upscale::classicalEta(p.thiele);
+
+    complab_upscale::record().push_back(p);
+}
+
 int main(int argc, char **argv) {
 
     plbInit(&argc, &argv);
+
+    /* The configuration file, from the command line when one is given.  Every
+     * reader in the program goes through complab_input::configPath(); before
+     * this line existed, argv[1] was accepted and silently ignored, so
+     * `./complab variant.xml` ran CompLaB.xml instead. */
+    if (argc > 1 && argv[1] && argv[1][0] != '\0') complab_input::configPath() = argv[1];
     /* [FLUSH-FIX 2026-07-24] On a SLURM cluster stdout->file is block-buffered, so pcout lines
      * that end in "\n" (Phase 3 setup, the per-iteration ITERATION block) sit unflushed for a long
      * time and the run LOOKS frozen even though it is progressing. unitbuf flushes after every write. */
@@ -139,6 +290,9 @@ int main(int argc, char **argv) {
     plint diag_ca_triggers = 0;
     plint diag_ca_redistributions = 0;
     T diag_initial_biomass = 0.0;
+    /* The conserved starting total, so the closing report can say what actually grew
+     * rather than what happened to the peak. */
+    T diag_initial_total_biomass = 0.0;
 
     // asserted variables
     plint kns_count=0, fd_count=0, lb_count=0, ca_count=0, bfilm_count=0, bfree_count=0;
@@ -151,7 +305,9 @@ int main(int argc, char **argv) {
     plint nx, ny, nz, num_of_microbes, num_of_substrates;
     T dx, dy, dz, deltaP, Pe, charcs_length;
     std::string geom_filename, mask_filename;
-    std::vector<bool> vec_left_btype, vec_right_btype, bio_left_btype, bio_right_btype;
+    /* 0 = Dirichlet (held at a value), 1 = Neumann (zero gradient, an outflow),
+     * 2 = closed (no flux). See the parser for why the third one had to exist. */
+    std::vector<plint> vec_left_btype, vec_right_btype, bio_left_btype, bio_right_btype;
     std::vector<T> vec_c0, vec_b0_free, vec_left_bcondition, vec_right_bcondition, bio_left_bcondition, bio_right_bcondition, vec_permRatio;
     std::vector< std::vector<T> > vec_b0_all, vec_b0_film, vec_Kc_kns, vec_Vmax, vec_Vmax_kns;
     std::vector<T> vec_mu;
@@ -162,7 +318,14 @@ int main(int argc, char **argv) {
     bool read_NS_file=0, read_ADE_file=0, soluteDindex=0, bmassDindex=0, track_performance=0., halfflag=0;
     plint no_dynamics=0, bounce_back=1, ns_rerun_iT0=0, ns_update_interval=1, ade_update_interval=1,
         ns_maxiTer_1, ns_maxiTer_2, ade_rerun_iT0=0, ade_maxiTer=10000000, ade_VTI_iTer=1000, ade_CHK_iTer=1000000;
-    T tau=0.8, max_bMassRho=1., ns_converge_iT1=1e-8, ns_converge_iT2=1e-4, ade_converge_iT=1e-8, thrd_bFilmFrac;
+    /* [v1.3] thrd_bFilmFrac had no initialiser. The parser only assigns it when
+     * <thrd_biofilm_fraction> is present, and only DEMANDS it when a microbe is on the CA, so an
+     * abiotic run or a finite-difference/LBM biofilm run that omits the tag read an indeterminate
+     * double -- printed in the configuration summary, and used as the pore/biofilm reclassification
+     * threshold in updateLocalMaskNtotalLattices3D, which decides voxel identity, solute omega and
+     * the flow geometry. Zero is the value the [FIX-3D] note in processors_part2.hh already
+     * assumed was the default. */
+    T tau=0.8, max_bMassRho=1., ns_converge_iT1=1e-8, ns_converge_iT2=1e-4, ade_converge_iT=1e-8, thrd_bFilmFrac=0.;
 
     T DarcyOutletUx=0., permeability=0., u_target=0., deltaP_new=0., u_final=0., Pe_achieved=0.;
     T tau_ADE_fixed=0.8, D_lattice_fixed=0., tortuosity_factor=3.0, safety_factor=1.5;
@@ -221,6 +384,35 @@ int main(int argc, char **argv) {
     pcout << "  [OK] XML configuration loaded and validated\n";
 
     // ============================================================================
+    // [NEW] THE PIPELINE BLOCKS
+    //
+    //   <model_source>, <surrogate>, <diagnostics>, and geometry generation inside
+    //   <domain>.  These are the settings that replace the Python and MATLAB steps a
+    //   user used to run by hand before and after a simulation.
+    //
+    //   Read here, from a fresh XMLreader rather than threaded through
+    //   initialize_complab(), which already takes over sixty arguments by reference.
+    //   Every block is optional: with none of them present icfg keeps its defaults and
+    //   nothing below this point behaves differently.
+    // ============================================================================
+    integ::Config icfg;
+    {
+        XMLreader idoc(complab_input::configPath());
+        const std::string imsg = integ::readConfig(idoc, icfg);
+        if (!imsg.empty()) { pcout << imsg; return -1; }
+    }
+
+    //   <diagnostics>: the run's own scalar record.  Until now CompLB3D wrote VTI volumes and
+    //   nothing else, so answering "did mass balance?" or "how did porosity change?" meant
+    //   post-processing the volumes in Python.  With this block on, the run writes a summary
+    //   CSV as it goes and checks the conserved sums the user names.
+    //   Only rank 0 writes the file; the numbers are Palabos reductions and are already global.
+    //   Configured further down, once the output directory is known, so that summary.csv
+    //   lands beside the VTI files rather than in whatever directory the job was launched
+    //   from.  Declared here so it is in scope for the whole run.
+    complab_diag::Diagnostics diag;
+
+    // ============================================================================
     // OPTIONAL METABOLIC LAYER -- flux balance analysis and surrogate models.
     //
     //   Reads only the metabolic settings, out of the same CompLaB.xml.  It is
@@ -251,7 +443,7 @@ int main(int argc, char **argv) {
     // ============================================================================
     std::vector<bool> vec_immobile(num_of_substrates, false);
     try {
-        XMLreader immdoc("CompLaB.xml");
+        XMLreader immdoc(complab_input::configPath());
         for (plint iS = 0; iS < num_of_substrates; ++iS) {
             std::string chemname = "substrate" + std::to_string(iS);
             try {
@@ -277,7 +469,7 @@ int main(int argc, char **argv) {
     T     max_precipRho = 1e30;       int   precip_surfaceOnly = 1;
     T     precip_permRatio = 0.0;     plint precip_update_interval = 200;
     try {
-        XMLreader pdoc("CompLaB.xml");
+        XMLreader pdoc(complab_input::configPath());
         try { std::string s; pdoc["parameters"]["precipitation"]["enabled"].read(s);
               std::transform(s.begin(),s.end(),s.begin(),[](unsigned char c){ return std::tolower(c); });
               if (s=="true"||s=="1"||s=="yes") precip_enabled = 1; } catch (PlbIOException&) {}
@@ -310,7 +502,7 @@ int main(int argc, char **argv) {
     DissolutionConfig dissolCfg;
     plint precip_phase_id = 0;      // phase id stamped on a voxel that seals
     try {
-        XMLreader ddoc("CompLaB.xml");
+        XMLreader ddoc(complab_input::configPath());
         try { std::string s2; ddoc["parameters"]["dissolution"]["enabled"].read(s2);
               std::transform(s2.begin(),s2.end(),s2.begin(),[](unsigned char c){ return std::tolower(c); });
               dissolCfg.enabled = (s2=="true"||s2=="1"||s2=="yes"||s2=="on"); } catch (PlbIOException&) {}
@@ -402,244 +594,6 @@ int main(int argc, char **argv) {
         pcout << " solver=" << (solver_type[iM]==1 ? "FD" : (solver_type[iM]==2 ? "CA" : "LBM"));
         pcout << " rxn=" << rxntype::name(reaction_type[iM]) << "\n";
     }
-    /* ============================ [SYM] symbolic rate laws ============================
-     * Read once, by every rank: the file is small, and reading it everywhere avoids the
-     * rank-0 barrier the surrogate needs (which exists only so training cannot happen twice).
-     * A file that will not parse, or a name that does not resolve, stops the run.  An index
-     * that silently points at the wrong species produces a well-posed simulation with a wrong
-     * answer in every voxel, which is the failure mode <exchange_reaction_names> was added to
-     * prevent, and the same argument applies here. */
-    complab_sym::Program symProg;
-    std::vector<plint>   sym_globalId;
-    plint sym_count = 0;
-    for (plint iM = 0; iM < num_of_microbes; ++iM)
-        if (rxntype::usesSymbolic(reaction_type[iM])) ++sym_count;
-
-    if (sym_count > 0) {
-        std::string symFile;
-        try {
-            std::string on;
-            XMLreader sdoc("CompLaB.xml");
-            sdoc["parameters"]["symbolic"]["enabled"].read(on);
-            std::transform(on.begin(), on.end(), on.begin(),
-                           [](unsigned char c){ return std::tolower(c); });
-            if (on == "true" || on == "1" || on == "yes")
-                sdoc["parameters"]["symbolic"]["expressions_file"].read(symFile);
-        } catch (PlbIOException&) { }
-
-        if (symFile.empty()) {
-            pcout << "  [SYM] " << sym_count << " microbe(s) ask for <reaction_type>symbolic, but\n"
-                  << "  [SYM] <symbolic><enabled>true</enabled><expressions_file>...</> is not set.\n";
-            return -1;
-        }
-        std::string serr;
-        if (!complab_sym::load(symProg, symFile, &serr)) {
-            pcout << "  [SYM] " << serr << "\n"
-                  << "  [SYM] A rate law that will not parse is a stop, not a warning.\n";
-            return -1;
-        }
-        pcout << complab_sym::describe(symProg, symFile);
-
-        complab_sym::Runtime &SR = complab_sym::runtime();
-        SR.byMicrobe.assign((size_t) num_of_microbes, complab_sym::Binding());
-        for (plint iM = 0; iM < num_of_microbes; ++iM) {
-            if (!rxntype::usesSymbolic(reaction_type[iM])) continue;
-            complab_sym::Binding &B = SR.byMicrobe[(size_t) iM];
-            B.prog = &symProg;
-
-            B.subsOfVar.assign(symProg.vars.size(), -1);
-            for (size_t v = 0; v < symProg.vars.size(); ++v) {
-                if (symProg.vars[v] == vec_microbes_names[iM]) continue;   /* -1 means biomass */
-                for (plint iS = 0; iS < num_of_substrates; ++iS)
-                    if (vec_subs_names[iS] == symProg.vars[v]) { B.subsOfVar[v] = (int) iS; break; }
-                if (B.subsOfVar[v] < 0) {
-                    pcout << "  [SYM] '" << symProg.vars[v] << "' in the vars line is neither a "
-                          << "substrate nor the biomass of " << vec_microbes_names[iM] << ".\n";
-                    return -1;
-                }
-            }
-            B.subsOfRate.assign(symProg.rates.size(), -1);
-            for (size_t r = 0; r < symProg.rates.size(); ++r) {
-                if (symProg.rates[r].name == "growth") continue;            /* -1 means bioR */
-                for (plint iS = 0; iS < num_of_substrates; ++iS)
-                    if (vec_subs_names[iS] == symProg.rates[r].name) { B.subsOfRate[r] = (int) iS; break; }
-                if (B.subsOfRate[r] < 0) {
-                    pcout << "  [SYM] rate '" << symProg.rates[r].name
-                          << "' names neither a substrate nor 'growth'.\n";
-                    return -1;
-                }
-            }
-        }
-    }
-    /* ================================================================================== */
-
-    /* ============================ [GNN] graph network ================================
-     * Same shape as the symbolic block above, and for the same reasons: read by every rank
-     * because the file is small, and a name that does not resolve stops the run rather than
-     * silently pointing at the wrong species.
-     *
-     * The one difference is what has to be bound.  A .sym file names its own variables, so a
-     * variable may be a substrate OR this organism's biomass.  A .gnn file names the species
-     * of a reaction network, and every one of them has to be a substrate the simulation
-     * actually carries -- biomass enters through the growth output, not through the graph. */
-    complab_gnn::Network gnnNet;
-    std::vector<plint>   gnn_globalId;
-    plint gnn_count = 0;
-    for (plint iM = 0; iM < num_of_microbes; ++iM)
-        if (rxntype::usesGraphnet(reaction_type[iM])) ++gnn_count;
-
-    if (gnn_count > 0) {
-        std::string gnnFile;
-        try {
-            std::string on;
-            XMLreader gdoc("CompLaB.xml");
-            gdoc["parameters"]["graphnet"]["enabled"].read(on);
-            std::transform(on.begin(), on.end(), on.begin(),
-                           [](unsigned char c){ return std::tolower(c); });
-            if (on == "true" || on == "1" || on == "yes")
-                gdoc["parameters"]["graphnet"]["network_file"].read(gnnFile);
-        } catch (PlbIOException&) { }
-
-        if (gnnFile.empty()) {
-            pcout << "  [GNN] " << gnn_count << " microbe(s) ask for <reaction_type>graphnet, but\n"
-                  << "  [GNN] <graphnet><enabled>true</enabled><network_file>...</> is not set.\n";
-            return -1;
-        }
-        std::string gerr;
-        if (!complab_gnn::load(gnnNet, gnnFile, &gerr)) {
-            pcout << "  [GNN] " << gerr << "\n"
-                  << "  [GNN] A network that will not load is a stop, not a warning.\n";
-            return -1;
-        }
-        pcout << complab_gnn::describe(gnnNet, gnnFile);
-
-        complab_gnn::Runtime &GR = complab_gnn::runtime();
-        GR.byMicrobe.assign((size_t) num_of_microbes, complab_gnn::Binding());
-        for (plint iM = 0; iM < num_of_microbes; ++iM) {
-            if (!rxntype::usesGraphnet(reaction_type[iM])) continue;
-            complab_gnn::Binding &B = GR.byMicrobe[(size_t) iM];
-            B.net = &gnnNet;
-
-            B.subsOfSpecies.assign((size_t) gnnNet.nS, -1);
-            for (int sp = 0; sp < gnnNet.nS; ++sp) {
-                const std::string &nm = gnnNet.species[(size_t) sp];
-                for (plint iS = 0; iS < num_of_substrates; ++iS)
-                    if (vec_subs_names[iS] == nm) { B.subsOfSpecies[(size_t) sp] = (int) iS; break; }
-                if (B.subsOfSpecies[(size_t) sp] < 0) {
-                    pcout << "  [GNN] the network names species '" << nm << "', which is not one of\n"
-                          << "  [GNN] this simulation's substrates. A network fitted to a different\n"
-                          << "  [GNN] set of species cannot be applied to this one.\n";
-                    return -1;
-                }
-            }
-            /* The growth rate is the last output when the file declares one.  Without it the
-             * network changes the chemistry but no biomass grows, which is a legitimate setup
-             * (an abiotic network) and so is not an error -- but it is worth saying out loud. */
-            B.growthSlot = gnnNet.hasGrowth ? gnnNet.nS : -1;
-            if (!gnnNet.hasGrowth)
-                pcout << "  [GNN] note: this network has no growth output, so " << vec_microbes_names[iM]
-                      << " will\n  [GNN] change the chemistry but will not itself grow.\n";
-        }
-    }
-    /* ================================================================================== */
-
-    /* ==================== [SYM][GNN] the ABIOTIC half ================================
-     * Everything above binds a learned rate law to an ORGANISM, and the sweep that uses it
-     * skips any voxel with no biomass.  That is right for a microbe and wrong for abiotic
-     * chemistry, which happens in open water whether or not anything is alive nearby.
-     *
-     * So an abiotic law is loaded separately, bound to no organism, and swept over every fluid
-     * voxel by run_symbolic_abiotic3D / run_graphnet_abiotic3D.  It is the learned counterpart of
-     * defineAbioticKinetics.hh and it switches on the same way: name a file, and it runs. */
-    complab_sym::Program symAbioticProg;
-    complab_gnn::Network gnnAbioticNet;
-    bool haveSymAbiotic = false, haveGnnAbiotic = false;
-    {
-        std::string symAbFile, gnnAbFile;
-        try {
-            XMLreader adoc("CompLaB.xml");
-            try { adoc["parameters"]["symbolic"]["abiotic_file"].read(symAbFile); }
-            catch (PlbIOException&) { }
-            try { adoc["parameters"]["graphnet"]["abiotic_file"].read(gnnAbFile); }
-            catch (PlbIOException&) { }
-        } catch (PlbIOException&) { }
-
-        if (!symAbFile.empty()) {
-            std::string aerr;
-            if (!complab_sym::load(symAbioticProg, symAbFile, &aerr)) {
-                pcout << "  [SYM-ABIOTIC] " << aerr << "\n";
-                return -1;
-            }
-            pcout << "  [SYM-ABIOTIC] this law is swept over EVERY fluid voxel, biomass or not\n";
-            pcout << complab_sym::describe(symAbioticProg, symAbFile);
-
-            complab_sym::Binding &A = complab_sym::runtime().abiotic;
-            A.prog = &symAbioticProg;
-            A.subsOfVar.assign(symAbioticProg.vars.size(), -1);
-            for (size_t v = 0; v < symAbioticProg.vars.size(); ++v) {
-                for (plint iS = 0; iS < num_of_substrates; ++iS)
-                    if (vec_subs_names[iS] == symAbioticProg.vars[v]) { A.subsOfVar[v] = (int) iS; break; }
-                if (A.subsOfVar[v] < 0) {
-                    pcout << "  [SYM-ABIOTIC] '" << symAbioticProg.vars[v] << "' is not a substrate.\n"
-                          << "  [SYM-ABIOTIC] An abiotic law has no organism, so every variable in it\n"
-                          << "  [SYM-ABIOTIC] must be a substrate -- a biomass name here means this\n"
-                          << "  [SYM-ABIOTIC] file was meant for <expressions_file>, not this one.\n";
-                    return -1;
-                }
-            }
-            A.subsOfRate.assign(symAbioticProg.rates.size(), -1);
-            for (size_t r = 0; r < symAbioticProg.rates.size(); ++r) {
-                if (symAbioticProg.rates[r].name == "growth") {
-                    pcout << "  [SYM-ABIOTIC] this file has a 'growth' rate, and nothing on the\n"
-                          << "  [SYM-ABIOTIC] abiotic path grows. Dropping the line silently would\n"
-                          << "  [SYM-ABIOTIC] hide the mistake, so this is a stop.\n";
-                    return -1;
-                }
-                for (plint iS = 0; iS < num_of_substrates; ++iS)
-                    if (vec_subs_names[iS] == symAbioticProg.rates[r].name) { A.subsOfRate[r] = (int) iS; break; }
-                if (A.subsOfRate[r] < 0) {
-                    pcout << "  [SYM-ABIOTIC] rate '" << symAbioticProg.rates[r].name
-                          << "' does not name a substrate.\n";
-                    return -1;
-                }
-            }
-            haveSymAbiotic = true;
-        }
-
-        if (!gnnAbFile.empty()) {
-            std::string aerr;
-            if (!complab_gnn::load(gnnAbioticNet, gnnAbFile, &aerr)) {
-                pcout << "  [GNN-ABIOTIC] " << aerr << "\n";
-                return -1;
-            }
-            if (gnnAbioticNet.hasGrowth) {
-                pcout << "  [GNN-ABIOTIC] this network has a growth output, and nothing on the\n"
-                      << "  [GNN-ABIOTIC] abiotic path grows. Refit it without one, or bind it to an\n"
-                      << "  [GNN-ABIOTIC] organism through <network_file> instead.\n";
-                return -1;
-            }
-            pcout << "  [GNN-ABIOTIC] this network is swept over EVERY fluid voxel, biomass or not\n";
-            pcout << complab_gnn::describe(gnnAbioticNet, gnnAbFile);
-
-            complab_gnn::Binding &A = complab_gnn::runtime().abiotic;
-            A.net = &gnnAbioticNet;
-            A.growthSlot = -1;
-            A.subsOfSpecies.assign((size_t) gnnAbioticNet.nS, -1);
-            for (int sp = 0; sp < gnnAbioticNet.nS; ++sp) {
-                const std::string &nm = gnnAbioticNet.species[(size_t) sp];
-                for (plint iS = 0; iS < num_of_substrates; ++iS)
-                    if (vec_subs_names[iS] == nm) { A.subsOfSpecies[(size_t) sp] = (int) iS; break; }
-                if (A.subsOfSpecies[(size_t) sp] < 0) {
-                    pcout << "  [GNN-ABIOTIC] the network names species '" << nm
-                          << "', which is not a substrate here.\n";
-                    return -1;
-                }
-            }
-            haveGnnAbiotic = true;
-        }
-    }
-    /* ================================================================================== */
-
     pcout << "├────────────────────────────────────────────────────────────────────────┤\n";
     pcout << "│ SOLVERS ENABLED:\n";
     pcout << "│   [" << (kns_count > 0 ? "X" : " ") << "] Kinetics      - " << kns_count << " model(s)\n";
@@ -650,7 +604,6 @@ int main(int argc, char **argv) {
     pcout << "│   [" << (mmcfg.glpk_count > 0 ? "X" : " ") << "] FBA (GLPK)    - " << mmcfg.glpk_count << " microbe(s)\n";
     pcout << "│   [" << (mmcfg.cpy_count  > 0 ? "X" : " ") << "] FBA (COBRApy) - " << mmcfg.cpy_count  << " microbe(s)\n";
     pcout << "│   [" << (mmcfg.srg_count  > 0 ? "X" : " ") << "] Surrogate     - " << mmcfg.srg_count  << " microbe(s)\n";
-    pcout << "│   [" << (sym_count > 0 ? "X" : " ") << "] Symbolic      - " << sym_count << " microbe(s)\n";
     pcout << "├────────────────────────────────────────────────────────────────────────┤\n";
     pcout << "│ BIOMASS: Bmax=" << max_bMassRho << " kg/m3, threshold=" << thrd_bFilmFrac << "\n";
     pcout << "│ SIMULATION: max_iter=" << ade_maxiTer << ", VTI=" << ade_VTI_iTer << ", CHK=" << ade_CHK_iTer << "\n";
@@ -777,12 +730,250 @@ int main(int argc, char **argv) {
     //   FBA microbe (the XML that extractMM.py produces) and build the persistent
     //   solver state: one glp_prob* per GLPK microbe, or the cobra model objects.
     //   Both are created ONCE and reused at every voxel and every time step.
+    //   [NEW] Now that the output directory is known, point the summary CSV at it.
+    integ::setupDiagnostics(icfg, diag, global::mpi().isMainProcessor(), str_outputDir);
+
     char *pyFileName = (char*)"complab3d_cobrapy";
+
+    // ---- [NEW] <model_source>: find the genome-scale model before loading it -----
+    //   Bundled with the code, already in the cache, or downloaded -- in that order, and
+    //   only downloading if <allow_download> says so.  The file is checked against
+    //   models/manifest.txt and the run is told plainly if it is not the revision the
+    //   manifest describes.
+    //
+    //   Only rank 0 may write into the cache; the others wait at the barrier and then
+    //   find the file already there.
+    if (!icfg.modelSource.empty()) {
+        std::string mlog;
+        bool mfatal = false;
+        const std::string mpath = integ::resolveModel(icfg, "", global::mpi().isMainProcessor(),
+                                                      mlog, mfatal);
+        pcout << mlog;
+#ifdef PLB_MPI_PARALLEL
+        global::mpi().barrier();
+#endif
+        if (mfatal) return -1;
+
+        //   Give the resolved path to every FBA microbe that did not name its own file.
+        //   A microbe with an explicit <model_filename> keeps it, so a two-organism run
+        //   can mix a bundled model with a local one.
+        //   usesMetabolic, not usesFBA: a `surrogate` microbe is not an FBA microbe at run
+        //   time, but it still needs the model file if the surrogate is to be TRAINED from it.
+        plint adopted = 0;
+        for (plint iM = 0; iM < num_of_microbes; ++iM) {
+            if (!rxntype::usesMetabolic(reaction_type[iM])) continue;
+            if (!mmcfg.model_filename[iM].empty()) continue;
+            mmcfg.model_filename[iM] = mpath;
+            ++adopted;
+        }
+        if (adopted > 0)
+            pcout << "  [MODEL] " << adopted << " microbe(s) will use " << mpath << "\n";
+    }
+
     if (mmcfg.mm_count > 0) {
         if (load_metabolic_models3D(mmcfg, str_inputDir, reaction_type, num_of_microbes) != 0) return -1;
     }
     if (mmcfg.anyEnabled()) {
         if (setup_metabolic_solvers(mmcfg, reaction_type, num_of_microbes, pyFileName, src_path) != 0) return -1;
+    }
+
+    // ---- [NEW] <surrogate>: load the network, training it here if it is missing ----
+    //   srgNet must outlive the simulation, because complab_srg::registerNetwork() below
+    //   stores a pointer to it that defineSurrogateModel() follows at every voxel.  It is
+    //   declared in main()'s own scope for exactly that reason -- do not move it into the
+    //   block.
+    complab_srg::Network srgNet;
+#ifdef COMPLAB_ENABLE_GLPK
+    complab_srgtrain::GlpkContext srgCtx;
+    complab_srgtrain::StandaloneLp srgLp;      // released automatically after training
+#endif
+    if (icfg.srgEnabled) {
+        std::string slog;
+        complab_srg::FbaFn fba = 0;
+        void *fctx = 0;
+
+#ifdef COMPLAB_ENABLE_GLPK
+        //   Training needs a solver.  Two ways to get one:
+        //
+        //   a) the run already has a GLPK microbe.  Use ITS problem -- the same persistent
+        //      glp_prob the simulation will solve, so the network is fitted to exactly the
+        //      linear program that would otherwise run, <constraint_indices> and all.
+        //
+        //   b) it does not, which is the usual case for a surrogate-only run.  Build a
+        //      throwaway problem from the surrogate microbe's own model and release it as
+        //      soon as training is done.
+        //   Only go to the trouble of building an LP if there is nothing to load.
+        //   Without this test a run whose weights file already exists still parsed a
+        //   genome-scale model and built a linear program it then threw away.
+        bool haveWeights = false;
+        {
+            std::ifstream wf(icfg.srgWeights.c_str());
+            haveWeights = wf.good();
+        }
+
+        if (icfg.srgTrainIfMissing && !haveWeights) {
+            plint donor = -1;
+            for (plint iM = 0; iM < num_of_microbes; ++iM)
+                if (rxntype::usesGlpk(reaction_type[iM]) && mmcfg.vec_lp[iM] != 0) { donor = iM; break; }
+
+            if (donor >= 0) {
+                srgCtx.cfg = &mmcfg;
+                srgCtx.microbe = donor;
+                pcout << "  [SRG] training will sweep microbe" << donor
+                      << "'s metabolic model, the one this run already solves\n";
+            } else {
+                //   Which microbe are we training FOR?  <microbe> if the user said, otherwise
+                //   the first one whose reaction type is a surrogate type.
+                plint owner = icfg.srgMicrobe;
+                if (owner < 0)
+                    for (plint iM = 0; iM < num_of_microbes; ++iM)
+                        if (rxntype::usesSurrogate(reaction_type[iM])) { owner = iM; break; }
+
+                if (owner < 0 || owner >= num_of_microbes) {
+                    pcout << "  [SRG] <train_if_missing> is on but no microbe has "
+                          << "<reaction_type>surrogate</reaction_type>,\n"
+                          << "  [SRG] so there is nothing to train for. Set one, or name the microbe\n"
+                          << "  [SRG] with <surrogate><microbe>N</microbe>.\n";
+                    return -1;
+                }
+
+                pcout << "  [SRG] no GLPK microbe in this run; building a temporary linear program\n"
+                      << "  [SRG] from microbe" << owner << "'s own model, for training only.\n";
+                const std::string lerr = complab_srgtrain::buildTrainingLp(srgLp, mmcfg, owner,
+                                                                           str_inputDir,
+                                                                           num_of_substrates);
+                if (!lerr.empty()) { pcout << "  [SRG] " << lerr << "\n"; return -1; }
+                srgCtx.cfg = &srgLp.cfg;
+                srgCtx.microbe = 0;
+            }
+
+            const std::string berr = complab_srgtrain::bindInputs(srgCtx, icfg.srgTrain.inputs,
+                                                                  vec_subs_names);
+            if (!berr.empty()) { pcout << "  [SRG] " << berr << "\n"; return -1; }
+            fba  = &complab_srgtrain::solveWithUptake;
+            fctx = &srgCtx;
+        }
+#endif
+
+        const bool sok = integ::prepareSurrogate(icfg, srgNet, fba, fctx,
+                                                 global::mpi().isMainProcessor(), slog);
+        pcout << slog;
+        if (!sok) return -1;
+
+#ifdef PLB_MPI_PARALLEL
+        //   Only rank 0 trains, so every other rank now reads the file it wrote.  Training
+        //   on every rank would fit a different network per rank from a different random
+        //   start, and the domain would grow at a different rate in each subdomain.
+        global::mpi().barrier();
+
+        //   [FIX] THE FAILURE HAS TO BE COLLECTIVE.
+        //
+        //   The first version of this returned -1 from whichever rank could not read the
+        //   file. That is a deadlock: the failing ranks leave, the rest walk on into the
+        //   next MPI collective in the geometry setup and block there until the wall clock
+        //   kills the job. And because the message went through pcout, which prints on rank
+        //   0 only, a non-master failure said nothing at all. A job that hangs silently
+        //   after "written to output/..." is the worst possible way to report a missing file.
+        //
+        //   So: every rank reports, the answer is reduced, and either all of them continue
+        //   or all of them stop.
+        //
+        //   The retry is for a shared filesystem. A barrier synchronises PROCESSES, not
+        //   filesystem metadata: on Lustre or NFS a file another node closed a microsecond
+        //   ago may not be visible yet. Three tries over three seconds costs nothing on the
+        //   run that does not need it.
+        {
+            int rankOk = 1;
+            if (!global::mpi().isMainProcessor()) {
+                std::string serr;
+                rankOk = 0;
+                for (int attempt = 0; attempt < 3 && !rankOk; ++attempt) {
+                    if (attempt) sleep(1);
+                    if (complab_srg::load(srgNet, icfg.srgWeights, &serr)) rankOk = 1;
+                }
+                if (!rankOk)
+                    std::cerr << "  [SRG] rank " << global::mpi().getRank()
+                              << " could not read " << icfg.srgWeights << ": " << serr << std::endl;
+            }
+            int allOk = rankOk;
+            global::mpi().reduceAndBcast(allOk, MPI_MIN);
+            if (!allOk) {
+                pcout << "  [SRG] at least one rank could not read " << icfg.srgWeights << ".\n"
+                      << "  [SRG] See the .err file for which. Stopping on every rank.\n";
+                return -1;
+            }
+        }
+#endif
+#ifdef COMPLAB_ENABLE_GLPK
+        if (srgCtx.calls > 0)
+            pcout << "  [SRG] " << srgCtx.calls << " linear program(s) solved while training, "
+                  << srgCtx.infeasible << " infeasible\n";
+#endif
+
+        //   Work out which entry of the per-substrate flux vector feeds each network input.
+        //   The network records the substrate names it was trained on, so this is a name
+        //   match rather than an assumption about order -- see bindToSubstrates().
+        std::vector<int> srgSubs;
+        std::string sbwarn;
+        const std::string sberr = complab_srg::bindToSubstrates(srgNet, vec_subs_names,
+                                                                srgSubs, &sbwarn);
+        if (!sberr.empty()) {
+            pcout << "  [SRG] " << sberr << "\n";
+            return -1;
+        }
+        if (!sbwarn.empty()) pcout << sbwarn;
+
+        //   This is the line that makes <weights_file> do something: surrogateModel.hh asks
+        //   the registry for a network before it uses its own compiled-in weights.
+        complab_srg::registerNetwork((int) icfg.srgMicrobe, &srgNet, (int) num_of_microbes, srgSubs);
+    }
+
+    // ---- [NEW] <symbolic> and <graphnet>: load the learned rate laws ----------------------
+    //   Same lifetime rule as srgNet above, and for the same reason: complab_sym::runtime()
+    //   and complab_gnn::runtime() hold POINTERS into these four objects and follow them at
+    //   every voxel of every step, so they are declared in main()'s scope and never moved.
+    //
+    //   Everything else -- reading the files, matching their names against
+    //   <name_of_substrates>, refusing a mismatch -- is in integ::prepareLearned(), which
+    //   compiles without Palabos and is tested on its own.
+    complab_sym::Program symProg, symAbioticProg;
+    complab_gnn::Network gnnNet, gnnAbioticNet;
+    if (icfg.symEnabled || icfg.gnnEnabled) {
+        //   Which organisms asked for each path.  Bound per microbe rather than to all, so
+        //   that each organism's own biomass variable resolves to its own name.
+        std::vector<int> symUsers, gnnUsers;
+        for (plint iM = 0; iM < num_of_microbes; ++iM) {
+            if (rxntype::usesSymbolic(reaction_type[iM])) symUsers.push_back((int) iM);
+            if (rxntype::usesGraphnet(reaction_type[iM])) gnnUsers.push_back((int) iM);
+        }
+
+        std::string llog;
+        const bool lok = integ::prepareLearned(icfg, vec_subs_names, vec_microbes_names,
+                                               (int) num_of_microbes, symUsers, gnnUsers,
+                                               symProg, symAbioticProg, gnnNet, gnnAbioticNet,
+                                               llog);
+        pcout << llog;
+        if (!lok) return -1;
+    }
+
+    //   The thermodynamic gate.  Not a rate path of its own: it multiplies whichever rate path
+    //   each organism already uses, so it is prepared here, after every path is known, and read
+    //   from inside all six of them.  Everything except this call -- reading the file, matching
+    //   its species and organism names against <name_of_substrates> and <name_of_microbes>,
+    //   refusing a mismatch -- is in integ::prepareThermo(), which is tested standalone by
+    //   tests/test_thermo.cpp.
+    if (icfg.thmEnabled) {
+        //   The defineKinetics.hh path returns one combined rate vector per voxel, so it can
+        //   carry only one gate.  prepareThermo() needs to know whether anyone is on it.
+        bool kineticsInUse = false;
+        for (plint iM = 0; iM < num_of_microbes; ++iM)
+            if (rxntype::usesKinetics(reaction_type[iM])) kineticsInUse = true;
+
+        std::string tlog;
+        const bool tok = integ::prepareThermo(icfg, vec_subs_names, vec_microbes_names,
+                                              (int) num_of_microbes, kineticsInUse, tlog);
+        pcout << tlog;
+        if (!tok) return -1;
     }
 
     // ════════════════════════════════════════════════════════════════════════════
@@ -806,11 +997,76 @@ int main(int argc, char **argv) {
     T nsLatticeTau = tau;
     T nsLatticeOmega = 1 / nsLatticeTau;
     T nsLatticeNu = NSDES<T>::cs2*(nsLatticeTau-0.5);
-    char *ns_read_filename = strcat(strdup(str_inputDir.c_str()),ns_filename);
+    /* [v1.3] This used to be strcat(strdup(str_inputDir.c_str()), ns_filename), which appends
+     * ns_filename past the end of an allocation sized for str_inputDir alone, and then line
+     * ~1090 appends ".chk" past the end of that. Two heap overflows on every run, silent with
+     * short paths and a malloc abort somewhere unrelated with long ones. A std::string owns its
+     * own growth, so build the name here and hand the checkpoint reader a c_str(). */
+    const std::string ns_read_base = str_inputDir + std::string(ns_filename ? ns_filename : "");
+    const std::string ns_read_chk  = ns_read_base + ".chk";
+
+    // ---- [NEW] generate or import the pore space, if the XML asks for it ---------
+    //   <generate> builds a packing, a fracture or a layered medium in place; <import_raw>
+    //   thresholds a binary volume from imaging.  Either way a .dat is written next to the
+    //   other inputs, so the run is reproducible from its own output and the generated
+    //   geometry can be inspected with the same tools as any other.
+    //
+    //   With neither tag present provideGeometry() returns an empty string and the file
+    //   named by <filename> is read exactly as before.
+    {
+        std::string glog;
+        bool gfatal = false;
+
+        //   THE GEOMETRY FILE IS nx-2 SLICES WIDE, NOT nx.
+        //   complab_functions.hh does `nx += 2` when it reads <nx>, and readGeometry() below
+        //   reads x = 1 .. nx-2 from the file and DUPLICATES the first and last slice into the
+        //   two ghost columns.  So the file the generator writes must have the width the user
+        //   asked for in the XML, which is nx-2 here.
+        //
+        //   Getting this wrong does not fail: readGeometry() would simply stop after nx-2
+        //   slices and quietly ignore the rest of a too-wide file, leaving the run with a
+        //   truncated pore space that still looks plausible.  The first real build caught it
+        //   as a four-voxel disagreement between the porosity the generator reported and the
+        //   porosity the run counted.
+        const std::string gpath = integ::provideGeometry(icfg, (int) (nx - 2), (int) ny, (int) nz,
+                                                         str_inputDir, glog, gfatal);
+        pcout << glog;
+        if (gfatal) {
+            //   A sealed pore space is not a well-posed problem: a pressure drop across it has
+            //   no solution, and the flow solver would spend its whole iteration budget failing
+            //   to converge to one.  Better to say so now.
+            pcout << "  [GEOM] the geometry is unusable; stopping before the flow solver.\n";
+            return -1;
+        }
+        if (!gpath.empty() && gpath.size() > str_inputDir.size())
+            geom_filename = gpath.substr(str_inputDir.size());
+    }
 
     pcout << "  [GEOM] Reading " << geom_filename << "...\n";
     MultiScalarField3D<int> geometry(nx,ny,nz);
     readGeometry(str_inputDir+geom_filename, geometry);
+
+    // ════════════════════════════════════════════════════════════════════════════
+    // THE FOUR FACES NOBODY GAVE A BOUNDARY CONDITION
+    // ════════════════════════════════════════════════════════════════════════════
+    //   west and east get an inlet and an outlet.  y=0, y=ny-1, z=0 and z=nz-1 get
+    //   nothing at all -- so wherever the geometry leaves them open, the ADE lattices
+    //   stream off the block and read back an envelope nothing updates.  Every example
+    //   in this repository leaves at least one of them open, and nothing said so.
+    //   complab3d_outerfaces.hh has the measurement, the closure it offers, and the
+    //   reason the closure is not the default.  Done here, on the geometry field,
+    //   before any lattice is built from it, so that every lattice, the porosity
+    //   count and the mask see one consistent domain.
+    {
+        std::string faceMode = "open";
+        try {
+            XMLreader fdoc(complab_input::configPath());
+            fdoc["parameters"]["LB_numerics"]["domain"]["outer_faces"].read(faceMode);
+        } catch (PlbIOException &) { faceMode = "open"; }
+        if (!complab_faces::apply(geometry, nx, ny, nz, bounce_back, no_dynamics, faceMode))
+            return -1;
+    }
+
     saveGeometry("inputGeom", geometry);
     pcout << "  [GEOM] Geometry loaded\n";
 
@@ -843,7 +1099,7 @@ int main(int argc, char **argv) {
         pcout << "  [NS] tau=" << nsLatticeTau << ", omega=" << nsLatticeOmega << ", nu=" << nsLatticeNu << "\n";
         if (read_NS_file == 1 && track_performance == 0) {
             pcout << "  [NS] Loading checkpoint...\n";
-            try { loadBinaryBlock(nsLattice, strcat(ns_read_filename,".chk")); }
+            try { loadBinaryBlock(nsLattice, ns_read_chk); }
             catch (PlbIOException& exception) { pcout << "  [NS] ERROR: " << exception.what() << "\n"; return -1; }
             if (ns_rerun_iT0 > 0) {
                 iT = ns_rerun_iT0;
@@ -862,7 +1118,15 @@ int main(int argc, char **argv) {
                 if (ns_convg1.hasConverged()) break;
             }
         }
-        pcout << "  [NS] Converged at iter=" << iT << "\n";
+        /* [FIX] This line used to print "Converged" whether the loop had converged or run out
+         * of iterations, so the one thing a reader checks first in the log could not be
+         * believed.  A flow field that never settled is coupled into every solute below. */
+        if (iT >= ns_maxiTer_1)
+            pcout << "  [NS] WARNING: stopped at the iteration cap ns_max_iT1=" << ns_maxiTer_1
+                  << " WITHOUT converging. The velocity field below is not steady; raise the cap\n"
+                  << "       or loosen ns_converge_iT1 before believing anything downstream.\n";
+        else
+            pcout << "  [NS] Converged at iter=" << iT << "\n";
 
         // Calculate velocities
         if (bfilm_count > 0) {
@@ -956,6 +1220,20 @@ int main(int argc, char **argv) {
     }
     else { refTau = tau; refNu = RXNDES<T>::cs2 * (refTau - 0.5); }
     T refOmega = 1/refTau;
+    /* [FIX] Every solute's relaxation time is scaled against substrate 0's pore diffusivity, so
+     * a zero there divides the whole transport setup by zero.  It is an easy mistake to make:
+     * an immobile species is declared with <in_pore>0.</in_pore>, and putting one in
+     * <substrate0> rather than further down the list used to give ade_dt = inf, every
+     * rate * dt increment inf or NaN, and a silent all-NaN field -- the tau screen below tests
+     * `< TAU_REJECT` and `> 2.0`, both false for NaN, so nothing caught it. */
+    if (!(vec_solute_poreD[0] > 0)) {
+        pcout << "  [ADE] ERROR: substrate 0 has a pore diffusivity of " << vec_solute_poreD[0]
+              << ". Every other solute's relaxation time is scaled against it, so it must be\n"
+              << "        positive. If substrate 0 is meant to be immobile (a mineral, say),\n"
+              << "        move it further down <name_of_substrates> and put a mobile species\n"
+              << "        first. Terminating.\n";
+        return -1;
+    }
     T ade_dt = refNu * dx * dx / vec_solute_poreD[0];
 
     std::vector<T> substrNUinPore(num_of_substrates), substrTAUinPore(num_of_substrates), substrOMEGAinPore(num_of_substrates), substrOMEGAinbFilm(num_of_substrates);
@@ -978,13 +1256,121 @@ int main(int argc, char **argv) {
         }
         else { bioNUinPore[iM] = 0.; bioTAUinPore[iM] = 0.; bioOMEGAinPore[iM] = 0.; }
         if (vec_bMass_bFilmD[iM] > 0) {
-            bioOMEGAinbFilm[iM] = 1/(refNu*vec_bMass_bFilmD[iM]/vec_bMass_poreD[iM]*RXNDES<T>::invCs2+0.5);
+            /* [v1.3] The divisor was vec_bMass_poreD[iM], not vec_solute_poreD[0].
+             *
+             * The unit system is fixed once, four lines above the substrate loop:
+             * ade_dt = refNu * dx^2 / vec_solute_poreD[0], so dt/dx^2 = refNu/vec_solute_poreD[0]
+             * and the lattice viscosity of ANY physical D is refNu * D / vec_solute_poreD[0].
+             * That is what the substrate-in-biofilm line does, and what bioNUinPore does two
+             * lines up. Dividing by the microbe's own pore diffusivity instead applies the
+             * biomass-to-solute conversion a second time, as a ratio to itself, and is right
+             * only by accident when vec_bMass_poreD[iM] == vec_solute_poreD[0].
+             *
+             * Shipped example 07 (biomass 1e-10 both places, substrate0 5e-10) got
+             * tau_pore = 0.56 but tau_biofilm = 0.8: biomass diffusing five times too fast
+             * inside the biofilm, which is exactly where biofilm biomass lives. Example 08's
+             * LBM microbe had the same factor. The tau screen below could not catch it because
+             * it recomputes bioTAUinbFilm from this same expression. */
+            bioOMEGAinbFilm[iM] = 1/(refNu*vec_bMass_bFilmD[iM]/vec_solute_poreD[0]*RXNDES<T>::invCs2+0.5);
             bioTAUinbFilm[iM] = 1/bioOMEGAinbFilm[iM];
         }
         else { bioOMEGAinbFilm[iM] = 0.; bioTAUinbFilm[iM] = 0.; }
     }
 
     pcout << "  [ADE] dt=" << ade_dt << " s/iter, total=" << ade_maxiTer*ade_dt << " s\n";
+
+    // ════════════════════════════════════════════════════════════════════════════
+    // EVERY RELAXATION TIME THAT WILL ACTUALLY RELAX, CHECKED BEFORE IT RUNS
+    // ════════════════════════════════════════════════════════════════════════════
+    //   One diffusion coefficient in CompLaB.xml is the reference; every other one
+    //   is carried onto the lattice as a ratio to it, and each ratio becomes its own
+    //   relaxation time tau = D/D_ref * (tau_ref - 0.5) + 0.5. The check above tests
+    //   only tau_ref. A species a few thousand times less mobile than the reference
+    //   lands within a ten-thousandth of 0.5, and BGK there does not diffuse slowly:
+    //   it rings.
+    //
+    //   Measured on example 07 -- one biomass patch, every reaction switched off, a
+    //   fully walled box, so the only correct answer is that the patch spreads and
+    //   the total never changes:
+    //
+    //        tau        worst negative biomass, as a fraction of the peak
+    //        0.50018        25 %          <- what this example shipped with
+    //        0.510         1.6 %
+    //        0.520        0.33 %
+    //        0.550        0.02 %, and none at all by iteration 1000
+    //        0.800           0
+    //
+    //   Hence the two thresholds below. They are the measurement, not a convention.
+    //
+    //   Only lattices that actually collide and stream are checked. An immobile
+    //   species has D = 0 and tau exactly 0.5, and never streams, so its tau means
+    //   nothing; the same is true of a biomass field whose <solver_type> is CA or
+    //   FD, which is transported by its own solver and not by this lattice. Checking
+    //   those would reject examples 13, 14 and 15 for a number that is never used.
+    const T TAU_REJECT = 0.51;   // below this the ringing is a large part of the signal
+    const T TAU_WARN   = 0.55;   // below this it is visible but small
+    {
+        std::vector<std::string> label;
+        std::vector<T>           tauv;
+        for (plint iS = 0; iS < num_of_substrates; ++iS) {
+            if (vec_immobile[iS]) continue;               // never streams: tau is not used
+            label.push_back("substrate" + std::to_string(iS) + " in pore");
+            tauv .push_back(substrTAUinPore[iS]);
+            label.push_back("substrate" + std::to_string(iS) + " in biofilm");
+            tauv .push_back(1 / substrOMEGAinbFilm[iS]);
+        }
+        for (plint iM = 0; iM < num_of_microbes; ++iM) {
+            //   biofilm biomass relaxes only under <solver_type>LBM; free (planktonic)
+            //   biomass is collided and streamed whatever its solver says.
+            const bool streams = (solver_type[iM] == 3) || (bmass_type[iM] != 1);
+            if (!streams || bioTAUinPore[iM] <= 0) continue;
+            label.push_back("microbe" + std::to_string(iM) + " biomass in pore");
+            tauv .push_back(bioTAUinPore[iM]);
+            if (bioTAUinbFilm[iM] > 0) {
+                label.push_back("microbe" + std::to_string(iM) + " biomass in biofilm");
+                tauv .push_back(bioTAUinbFilm[iM]);
+            }
+        }
+
+        std::string tooSmall, marginal, tooLarge;
+        for (size_t k = 0; k < tauv.size(); ++k) {
+            std::ostringstream os;
+            os << "\n           " << label[k] << ": tau = " << tauv[k];
+            if      (tauv[k] <  TAU_REJECT) tooSmall += os.str();
+            else if (tauv[k] <  TAU_WARN)   marginal += os.str();
+            else if (tauv[k] >  2.0)        tooLarge += os.str();
+        }
+        if (!tooLarge.empty())
+            pcout << "  [ADE] WARNING: a relaxation time above 2 is over-diffusive and inaccurate:"
+                  << tooLarge << "\n         Lower <tau>, or raise the reference diffusion "
+                  << "coefficient this one is scaled against.\n";
+        if (!marginal.empty())
+            pcout << "  [ADE] NOTE: relaxation times close to 0.5 ring. These are inside the "
+                  << "usable range but not\n         comfortably so, and small negative values "
+                  << "may appear in the field:" << marginal << "\n";
+        if (!tooSmall.empty()) {
+            pcout << "  [ADE] ERROR: a lattice-Boltzmann relaxation time below 0.51"
+                  << " does not diffuse slowly, it\n         oscillates, and the field goes "
+                  << "negative by a large fraction of its own peak:" << tooSmall << "\n\n"
+                  << "         tau = (D / D_reference) * (tau_reference - 0.5) + 0.5, so a species "
+                  << "thousands of times\n"
+                  << "         less mobile than the reference cannot be carried on this lattice at "
+                  << "this time step.\n"
+                  << "         Three ways out, in the order they are usually right:\n"
+                  << "           1. transport that field with <solver_type>CA</solver_type> or "
+                  << "<solver_type>FD</solver_type>,\n"
+                  << "              which have no relaxation time -- this is the answer for slow "
+                  << "biomass;\n"
+                  << "           2. raise <tau> so every ratio lands further from 0.5 (this also "
+                  << "raises the time step);\n"
+                  << "           3. give the species a diffusion coefficient the lattice can "
+                  << "represent, and say in the\n"
+                  << "              case notes that the number was chosen for the lattice rather "
+                  << "than measured.\n"
+                  << "         Terminating.\n";
+            return -1;
+        }
+    }
 
     // Create substrate lattices
     pcout << "  [ADE] Creating " << num_of_substrates << " substrate lattices...\n";
@@ -995,8 +1381,7 @@ int main(int argc, char **argv) {
     for (plint iS = 0; iS < num_of_substrates; ++iS) {
         soluteDomainSetup(vec_substr_lattices[iS], createLocalAdvectionDiffusionBoundaryCondition3D<T,RXNDES>(), geometry,
                           substrOMEGAinbFilm[iS], substrOMEGAinPore[iS], pore_dynamics, bounce_back, no_dynamics, bio_dynamics,
-                          vec_c0[iS], vec_left_btype[iS], vec_right_btype[iS], vec_left_bcondition[iS], vec_right_bcondition[iS],
-                          vec_immobile[iS]);   /* [FIX] an immobile mineral must be readable on solid voxels */
+                          vec_c0[iS], vec_left_btype[iS], vec_right_btype[iS], vec_left_bcondition[iS], vec_right_bcondition[iS]);
         soluteDomainSetup(dC[iS], createLocalAdvectionDiffusionBoundaryCondition3D<T,RXNDES>(), geometry,
                           substrOMEGAinbFilm[iS], substrOMEGAinPore[iS], pore_dynamics, bounce_back, no_dynamics, bio_dynamics,
                           0., vec_left_btype[iS], vec_right_btype[iS], vec_left_bcondition[iS], vec_right_bcondition[iS]);
@@ -1072,6 +1457,188 @@ int main(int argc, char **argv) {
         pcout << "  [ADE] Initial max biomass: " << diag_initial_biomass << " kg/m3\n";
     }
 
+    // ════════════════════════════════════════════════════════════════════════════
+    // BOUNCE-BACK NODES START AT THE BACKGROUND CONCENTRATION, NOT AT ONE
+    // ════════════════════════════════════════════════════════════════════════════
+    //   Palabos stores an advection-diffusion population as a DEVIATION from
+    //   equilibrium at density one, so an all-zero cell reads back as C = 1, not
+    //   C = 0.  initializeAtEquilibrium() cannot fix that on a bounce-back node,
+    //   because BounceBack::computeEquilibrium returns zero whatever density it is
+    //   handed: every wall voxel therefore starts at C = 1 mol/L.
+    //
+    //   Bounce-back conserves mass -- it swaps opposite populations -- so nothing
+    //   ever removes that. Each wall voxel streams C = 1 fluid into its neighbours
+    //   from the first step, and in a case whose real concentrations are
+    //   millimolar that is a source three orders of magnitude larger than the
+    //   chemistry. It shows up as every field rising several-fold over the first
+    //   hundred steps and then relaxing, which looks like a transient and is not:
+    //   it is the walls filling the domain.
+    //
+    //   The existing 10000-step "stabilization" loop further down was written
+    //   against this symptom. It resets the FLUID to c0 afterwards but leaves the
+    //   walls alone, so the source is still there when the run proper starts.
+    //
+    //   Three lines, applied once, before anything streams: set every bounce-back
+    //   voxel to the same background its neighbours hold. From then on the swap
+    //   keeps it consistent and the wall is the zero-flux boundary it was meant
+    //   to be.
+    //
+    //   Diagnosed on examples/19_thermodynamic_gate: with bounce-back walls the
+    //   closed-domain methane total rose 10.75 -> 65.13 with no reaction running;
+    //   with the walls removed it held to five digits. This also explains the
+    //   field divergence noted in examples 17 and 18.
+    if (bounce_back >= 0 || no_dynamics >= 0) {
+        /* Both kinds of non-fluid voxel need this. The walls always did; the solid grains need it
+         * from the moment they became bounce-back a few lines below, for exactly the same reason. */
+        std::vector<plint> wallOnly;                 /* inert walls: every lattice */
+        if (bounce_back >= 0) wallOnly.push_back(bounce_back);
+        std::vector<plint> wallAndSolid = wallOnly;  /* walls AND grains: mobile species only */
+        if (no_dynamics  >= 0) wallAndSolid.push_back(no_dynamics);
+        std::vector< std::vector<plint> > noBio;
+        for (plint iS = 0; iS < num_of_substrates; ++iS) {
+            /* THE CONCENTRATION lattice, in every non-fluid voxel including the grains.
+             *
+             * Safe for an immobile species too, even though a grain is exactly where such a
+             * species keeps its inventory: the dissolution setup seeds that inventory further
+             * down this function, so it writes last and wins. Leaving the grains out instead --
+             * to protect an inventory that has not been written yet -- leaves them holding the
+             * all-zero populations initializeAtEquilibrium could not reach, which an
+             * advection-diffusion lattice reads back as 1 mol/L. Example 13's FeS starts at zero
+             * and reported a total of 72 before the first step, which is 1.0 in each of its 72
+             * grain voxels. */
+            if (!wallAndSolid.empty())
+                applyProcessingFunctional(new stabilizeADElattice3D<T,RXNDES,int>(vec_c0[iS], wallAndSolid, noBio),
+                                          vec_substr_lattices[iS].getBoundingBox(),
+                                          vec_substr_lattices[iS], geometry);
+
+            /* THE INCREMENT lattices, both of them, in EVERY non-fluid voxel including the grains
+             * -- immobile or not. An increment is not an inventory: it is zero at the start of
+             * every step by definition, and there is nothing to protect.
+             *
+             * This is not cosmetic. initializeAtEquilibrium() cannot reach a cell whose dynamics
+             * returns a zero equilibrium, and both NoDynamics and BounceBack do, so those cells
+             * were left holding all-zero populations -- which an advection-diffusion lattice reads
+             * back as density ONE, not zero. The increment applier then added +1 mol/L to every
+             * grain voxel on every step. Measured on example 14 before this line existed: the
+             * calcite inventory grew from 2023 to 131575 over 1800 steps, 72 per step, which is
+             * exactly the +1 times the 72 grain voxels in that geometry. A dissolving mineral was
+             * accumulating. */
+            if (!wallAndSolid.empty()) {
+                applyProcessingFunctional(new stabilizeADElattice3D<T,RXNDES,int>((T) 0., wallAndSolid, noBio),
+                                          dC[iS].getBoundingBox(), dC[iS], geometry);
+                applyProcessingFunctional(new stabilizeADElattice3D<T,RXNDES,int>((T) 0., wallAndSolid, noBio),
+                                          dC0[iS].getBoundingBox(), dC0[iS], geometry);
+            }
+        }
+        //   Biomass is zero outside its patches, so its walls belong at zero too.
+        for (size_t iM = 0; iM < vec_bFilm_lattices.size(); ++iM) {
+            applyProcessingFunctional(new stabilizeADElattice3D<T,RXNDES,int>((T) 0., wallOnly, noBio),
+                                      vec_bFilm_lattices[iM].getBoundingBox(), vec_bFilm_lattices[iM], geometry);
+            applyProcessingFunctional(new stabilizeADElattice3D<T,RXNDES,int>((T) 0., wallOnly, noBio),
+                                      dBf[iM].getBoundingBox(), dBf[iM], geometry);
+        }
+        for (size_t iM = 0; iM < vec_bFree_lattices.size(); ++iM) {
+            applyProcessingFunctional(new stabilizeADElattice3D<T,RXNDES,int>((T) 0., wallOnly, noBio),
+                                      vec_bFree_lattices[iM].getBoundingBox(), vec_bFree_lattices[iM], geometry);
+            applyProcessingFunctional(new stabilizeADElattice3D<T,RXNDES,int>((T) 0., wallOnly, noBio),
+                                      dBp[iM].getBoundingBox(), dBp[iM], geometry);
+        }
+        pcout << "  [ADE] Bounce-back voxels set to the background concentration.\n";
+    }
+
+    // ════════════════════════════════════════════════════════════════════════════
+    // AN IMMOBILE SPECIES INSIDE A SOLID VOXEL MUST REPORT WHAT IS IN IT
+    // ════════════════════════════════════════════════════════════════════════════
+    //   Solid voxels are given Palabos's NoDynamics, and NoDynamics::computeDensity
+    //   returns its own stored rho -- 1.0 by default -- whatever the populations
+    //   hold. That is the same mistake as the bounce-back one above, in a second
+    //   place, and here it is worse: an IMMOBILE species exists precisely to sit in
+    //   a solid voxel and hold an inventory there.
+    //
+    //   So every mineral inventory read back as 1.0 mol/L no matter what was seeded
+    //   into it. Measured on example 14: 27.1 mol/L of calcite is seeded, the
+    //   reopening test reads 1.0, finds it below 0.9 x 27.1, and converts every
+    //   grain to pore on iteration ZERO -- before a single molecule has dissolved.
+    //   The case then had no mineral left, dissolved nothing for the rest of the
+    //   run, and reported concentrations from voxels that had been solid a moment
+    //   earlier. The whole dissolution example was measuring nothing.
+    //
+    //   The fix is to give those voxels a dynamics whose computeDensity sums the
+    //   populations. Omega is irrelevant: an immobile species never collides and
+    //   never streams -- complab.cpp skips collideAndStream for it -- so the
+    //   dynamics object is consulted for nothing else.
+    //
+    //   Only immobile species are changed. A mobile species has no business holding
+    //   anything inside a solid voxel, and NoDynamics is the right choice there.
+    if (no_dynamics >= 0) {
+        plint nimm2 = 0, nmob2 = 0;
+        for (plint iS = 0; iS < num_of_substrates; ++iS) {
+            if (vec_immobile[iS]) {
+                ++nimm2;
+                defineDynamics(vec_substr_lattices[iS], geometry,
+                               new AdvectionDiffusionBGKdynamics<T,RXNDES>(0.), no_dynamics);
+                defineDynamics(dC[iS],  geometry, new AdvectionDiffusionBGKdynamics<T,RXNDES>(0.), no_dynamics);
+                defineDynamics(dC0[iS], geometry, new AdvectionDiffusionBGKdynamics<T,RXNDES>(0.), no_dynamics);
+                continue;
+            }
+
+            // ────────────────────────────────────────────────────────────────
+            // A SOLID GRAIN IS A NO-FLUX BOUNDARY, NOT A HOLE IN THE LATTICE
+            // ────────────────────────────────────────────────────────────────
+            //   Solid voxels were given Palabos's NoDynamics on every substrate
+            //   lattice. NoDynamics does not collide -- but collideAndStream
+            //   STREAMS the whole lattice regardless, so those cells hand their
+            //   populations to their fluid neighbours every step and never get
+            //   any back. They are a one-way drain.
+            //
+            //   Worse, of the wrong sign. Palabos stores an advection-diffusion
+            //   population as a deviation from equilibrium at density one, so a
+            //   cell holding concentration c stores populations summing to c-1
+            //   -- close to MINUS ONE for any millimolar chemistry. Every solid
+            //   voxel therefore poured a large negative deviation into the water
+            //   around it, step after step.
+            //
+            //   Measured on example 14, with every reaction switched off and the
+            //   only thing running being transport: Ca starts at 0 in a closed
+            //   domain, so it cannot physically change, and it reached
+            //   -1.00 mol/L. H, fed at 0.01, reached -1.38. Replacing the grains
+            //   with pore in the same geometry gives exactly 0.000000 for both,
+            //   which is what identified this.
+            //
+            //   A dissolved species meets a mineral grain at a no-flux boundary,
+            //   and the lattice-Boltzmann spelling of no-flux is bounce-back:
+            //   what arrives is reflected, nothing is created or destroyed. That
+            //   is already what the inert-wall material gets. Solid voxels now
+            //   get it too, and are seeded with the background concentration by
+            //   the block above for the same reason the walls are.
+            ++nmob2;
+            defineDynamics(vec_substr_lattices[iS], geometry, new BounceBack<T,RXNDES>(), no_dynamics);
+
+            /* The INCREMENT lattices keep a dynamics that reads its populations back.
+             *
+             * Bounce-back is the right answer for the concentration lattice, which streams: it
+             * makes a grain a no-flux boundary. The increment lattices never stream -- they are
+             * accumulators, zeroed at the start of every step and applied by
+             * update_*_rxnLattices -- so no-flux means nothing to them, and bounce-back would
+             * actively hurt: BounceBack::computeDensity returns its own stored density and
+             * ignores the populations, so anything written into a grain's increment slot would
+             * read back as zero.
+             *
+             * Something does write there. surfaceDissolutionKinetics3D parks each product share
+             * in the mineral voxel's own increment slot for dissolutionGather3D to collect, and
+             * with bounce-back on this lattice every one of 816000 parked shares read back as
+             * zero and the water collected nothing. */
+            defineDynamics(dC[iS],  geometry, new AdvectionDiffusionBGKdynamics<T,RXNDES>(0.), no_dynamics);
+            defineDynamics(dC0[iS], geometry, new AdvectionDiffusionBGKdynamics<T,RXNDES>(0.), no_dynamics);
+        }
+        if (nimm2 > 0)
+            pcout << "  [ADE] " << nimm2 << " immobile species: solid voxels now report their\n"
+                  << "  [ADE] own contents rather than a fixed 1.0 (see the note in complab.cpp).\n";
+        if (nmob2 > 0)
+            pcout << "  [ADE] " << nmob2 << " mobile species: solid voxels are now a no-flux\n"
+                  << "  [ADE] boundary rather than a one-way drain (see the note in complab.cpp).\n";
+    }
+
     // Mask and distance lattices
     MultiBlockLattice3D<T,RXNDES> maskLattice(nx, ny, nz, new AdvectionDiffusionBGKdynamics<T,RXNDES>(0.));
     MultiBlockLattice3D<T,RXNDES> ageLattice(nx, ny, nz, new AdvectionDiffusionBGKdynamics<T,RXNDES>(0.));
@@ -1112,37 +1679,6 @@ int main(int argc, char **argv) {
                                       vec_substr_lattices[ph.substrate], geometry);
             pcout << "  [DISSOL-VOP] seeded " << ph.initial_fill << " mol/L of \"" << ph.name
                   << "\" into substrate " << ph.substrate << " on material " << ph.material_number << "\n";
-            
-            /* [FIX] Read the seed back.  Two different mistakes used to pass silently here and then
-             * destroy the run on the first iteration.
-             *   1. If the phase substrate is not declared <immobile>, its solid voxels carry
-             *      NoDynamics, whose density reads back as zero whatever was written.
-             *   2. If initial_fill is below the reopen threshold, the phase is under-filled by
-             *      construction and every voxel of it is reopened as pore at iT = 0.
-             * Either way the declared grain pack vanishes on the first step, which looks like a
-             * physical result and is not one. */
-            {
-                const T seen = computeMax(*computeDensity(vec_substr_lattices[ph.substrate]));
-                if (!(seen > 0.5 * ph.initial_fill)) {
-                    pcout << "  [DISSOL-VOP] ERROR: \"" << ph.name << "\" was seeded with "
-                          << ph.initial_fill << " mol/L but reads back at most " << seen
-                          << ".\n  [DISSOL-VOP] Substrate " << ph.substrate << " is almost certainly"
-                          << " not declared <immobile>true</immobile>,\n"
-                          << "  [DISSOL-VOP] so its solid voxels cannot hold a value. The phase could"
-                          << " never dissolve, and every\n  [DISSOL-VOP] voxel of it would be"
-                          << " reopened as pore on the first step.\n";
-                    return -1;
-                }
-            }
-            if (!(ph.initial_fill >= dissolCfg.reopen_fraction * ph.full_density)) {
-                pcout << "  [DISSOL-VOP] ERROR: \"" << ph.name << "\" starts at " << ph.initial_fill
-                      << " mol/L, below its own reopen threshold of "
-                      << (dissolCfg.reopen_fraction * ph.full_density) << " mol/L.\n"
-                      << "  [DISSOL-VOP] Every voxel of this phase would be turned to pore at"
-                      << " iteration 0. Raise <initial_fill>,\n  [DISSOL-VOP] lower"
-                      << " <full_density>, or lower <reopen_fraction>.\n";
-                return -1;
-            }
         }
     }
 
@@ -1187,67 +1723,6 @@ int main(int argc, char **argv) {
     }
     ptr_kns_lattices.push_back(&maskLattice);
 
-    // ========================================================================
-    // [RATE-OUT] OPTIONAL REACTION RATE OUTPUT
-    //   Off unless CompLaB.xml carries <IO><save_reaction_rates>true</...>.
-    //   When it is off, nothing here allocates and nothing here runs, so an
-    //   input file written before this feature existed behaves exactly as it
-    //   did before.
-    // ========================================================================
-    bool        rate_enabled  = false;
-    plint       rate_interval = 0;
-    std::string rate_filename = "rateLattice", rate_unit;
-    readRateSettings(rate_enabled, rate_interval, rate_filename, rate_unit);
-
-    // The biomass vector handed to defineKinetics.hh is COMPACTED over the
-    // microbes that actually use kinetics, so the microbe channels must be
-    // named from the same compacted list or every label would be off by one.
-    std::vector<std::string> kns_microbe_names;
-    for (plint iM = 0; iM < num_of_microbes; ++iM) {
-        if (!rxntype::usesKinetics(reaction_type[iM])) continue;
-        kns_microbe_names.push_back(vec_microbes_names[iM]);
-    }
-
-    RateOutput rateOut = buildRateOutput(
-        rate_enabled, rate_interval, rate_filename, rate_unit,
-        (enable_kinetics && kns_count > 0),
-        (enable_abiotic_kinetics && num_of_substrates > 0),
-        (precip_enabled && precip_surfaceOnly) ? 1 : 0,
-        vec_subs_names, kns_microbe_names);
-    if (rateOut.interval <= 0) rateOut.interval = ade_VTI_iTer;
-
-    std::vector< MultiBlockLattice3D<T,RXNDES> >  rateLat;
-    std::vector< MultiBlockLattice3D<T,RXNDES>* > ptr_rate_lattices;
-    if (rateOut.enabled && rateOut.nch() > 0) {
-        double _rateMB = (double) rateOut.nch() * (double) nx * (double) ny * (double) nz
-                       * 7.0 * (double) sizeof(T) / 1048576.0;
-        pcout << "  [RATE] Reaction rate output ON: " << rateOut.nch() << " channels, every "
-              << rateOut.interval << " iterations, about " << (long) _rateMB << " MB held.\n";
-        if (ade_VTI_iTer > 0 && rateOut.interval % ade_VTI_iTer != 0) {
-            pcout << "  [RATE] WARNING <rate_interval> is not a multiple of <save_VTK_interval>. "
-                  << "Rates are sampled on VTK output steps only, so this will write less often "
-                  << "than asked, or not at all.\n";
-        }
-        // Plain copies of the substrate lattice: uniform advection-diffusion
-        // dynamics everywhere, so computeDensity() is the sum of the populations
-        // at every voxel including the solids, which is what we store into.
-        rateLat.assign((size_t) rateOut.nch(), substrLattice);
-        // Layout the sampler expects: [C.., B.., rate.., mask]
-        for (plint iS = 0; iS < num_of_substrates; ++iS) ptr_rate_lattices.push_back(&vec_substr_lattices[iS]);
-        for (plint iM = 0; iM < num_of_microbes; ++iM) {
-            if (!rxntype::usesKinetics(reaction_type[iM])) continue;
-            if (bmass_type[iM]==1) ptr_rate_lattices.push_back(&vec_bFilm_lattices[loctrack[iM]]);
-            else                   ptr_rate_lattices.push_back(&vec_bFree_lattices[loctrack[iM]]);
-        }
-        for (plint k = 0; k < rateOut.nch(); ++k) ptr_rate_lattices.push_back(&rateLat[(size_t) k]);
-        ptr_rate_lattices.push_back(&maskLattice);
-        writeRateChannelList(rateOut, str_outputDir);
-    }
-    else if (rate_enabled) {
-        pcout << "  [RATE] <save_reaction_rates> is on, but no reaction block is active. "
-              << "Nothing to write.\n";
-    }
-
     // [FIX] defineKinetics.hh receives the biomass vector COMPACTED over the microbes
     //   that use kinetics, not the full list.  That was already true before the
     //   metabolic layer existed, but it only became REACHABLE once a microbe could be
@@ -1264,29 +1739,57 @@ int main(int argc, char **argv) {
               << "           either adjust it or give every microbe a kinetics reaction_type.\n\n";
     }
 
-    // ---- OPTIONAL METABOLIC LAYER: its two lattice vectors --------------------
+    // ---- OPTIONAL METABOLIC LAYER: one lattice vector per solver ---------------
     //   Same layout as the kinetics vector, but each holds only the microbes that
-    //   use that particular solver.  mm_globalId / srg_globalId translate a
-    //   position in the compacted biomass block back to the microbe's number in
-    //   CompLaB.xml, so per-microbe parameters are never indexed by position.
-    std::vector< MultiBlockLattice3D<T, RXNDES>* > ptr_mm_lattices, ptr_srg_lattices,
-                                                  ptr_sym_lattices, ptr_gnn_lattices;
-    std::vector<plint> mm_globalId, srg_globalId, mm_modelSlot;
+    //   use that particular solver.  glpk_globalId / cpy_globalId / srg_globalId
+    //   translate a position in the compacted biomass block back to the microbe's
+    //   number in CompLaB.xml, so per-microbe parameters are never indexed by
+    //   position.
+    //
+    //   The two FBA back ends get SEPARATE lists, not one shared FBA list.  This is
+    //   what lets a GLPK organism and a COBRApy organism live in the same run.  The
+    //   older code built one list over usesFBA() and handed it to both processors,
+    //   so each would have tried to solve for the other's organisms -- for a COBRApy
+    //   microbe, cfg.vec_lp[gM] is null -- and that, not any flux-index convention,
+    //   is what the ban in complab3d_metabolic.hh was really protecting against.
+    //   With one list per back end each processor only ever sees its own organisms,
+    //   and the two dispatch into the shared dC/dB increments exactly the way the
+    //   surrogate, symbolic and graphnet paths already do alongside each other.
+    std::vector< MultiBlockLattice3D<T, RXNDES>* > ptr_glpk_lattices, ptr_cpy_lattices,
+                                                   ptr_srg_lattices,
+                                                   ptr_sym_lattices, ptr_gnn_lattices;
+    std::vector<plint> glpk_globalId, cpy_globalId, srg_globalId, sym_globalId,
+                       gnn_globalId, mm_modelSlot;
     {
-        for (plint iS = 0; iS < num_of_substrates; ++iS) ptr_mm_lattices.push_back(&vec_substr_lattices[iS]);
+        for (plint iS = 0; iS < num_of_substrates; ++iS) ptr_glpk_lattices.push_back(&vec_substr_lattices[iS]);
         for (plint iM = 0; iM < num_of_microbes; ++iM) {
-            if (!rxntype::usesFBA(reaction_type[iM])) continue;
-            mm_globalId.push_back(iM);
-            if (bmass_type[iM]==1) ptr_mm_lattices.push_back(&vec_bFilm_lattices[loctrack[iM]]);
-            else                   ptr_mm_lattices.push_back(&vec_bFree_lattices[loctrack[iM]]);
+            if (!rxntype::usesGlpk(reaction_type[iM])) continue;
+            glpk_globalId.push_back(iM);
+            if (bmass_type[iM]==1) ptr_glpk_lattices.push_back(&vec_bFilm_lattices[loctrack[iM]]);
+            else                   ptr_glpk_lattices.push_back(&vec_bFree_lattices[loctrack[iM]]);
         }
-        for (plint iS = 0; iS < num_of_substrates; ++iS) ptr_mm_lattices.push_back(&dC[iS]);
+        for (plint iS = 0; iS < num_of_substrates; ++iS) ptr_glpk_lattices.push_back(&dC[iS]);
         for (plint iM = 0; iM < num_of_microbes; ++iM) {
-            if (!rxntype::usesFBA(reaction_type[iM])) continue;
-            if (bmass_type[iM]==1) ptr_mm_lattices.push_back(&dBf[loctrack[iM]]);
-            else                   ptr_mm_lattices.push_back(&dBp[loctrack[iM]]);
+            if (!rxntype::usesGlpk(reaction_type[iM])) continue;
+            if (bmass_type[iM]==1) ptr_glpk_lattices.push_back(&dBf[loctrack[iM]]);
+            else                   ptr_glpk_lattices.push_back(&dBp[loctrack[iM]]);
         }
-        ptr_mm_lattices.push_back(&maskLattice);
+        ptr_glpk_lattices.push_back(&maskLattice);
+
+        for (plint iS = 0; iS < num_of_substrates; ++iS) ptr_cpy_lattices.push_back(&vec_substr_lattices[iS]);
+        for (plint iM = 0; iM < num_of_microbes; ++iM) {
+            if (!rxntype::usesCobrapy(reaction_type[iM])) continue;
+            cpy_globalId.push_back(iM);
+            if (bmass_type[iM]==1) ptr_cpy_lattices.push_back(&vec_bFilm_lattices[loctrack[iM]]);
+            else                   ptr_cpy_lattices.push_back(&vec_bFree_lattices[loctrack[iM]]);
+        }
+        for (plint iS = 0; iS < num_of_substrates; ++iS) ptr_cpy_lattices.push_back(&dC[iS]);
+        for (plint iM = 0; iM < num_of_microbes; ++iM) {
+            if (!rxntype::usesCobrapy(reaction_type[iM])) continue;
+            if (bmass_type[iM]==1) ptr_cpy_lattices.push_back(&dBf[loctrack[iM]]);
+            else                   ptr_cpy_lattices.push_back(&dBp[loctrack[iM]]);
+        }
+        ptr_cpy_lattices.push_back(&maskLattice);
 
         for (plint iS = 0; iS < num_of_substrates; ++iS) ptr_srg_lattices.push_back(&vec_substr_lattices[iS]);
         for (plint iM = 0; iM < num_of_microbes; ++iM) {
@@ -1303,8 +1806,12 @@ int main(int argc, char **argv) {
         }
         ptr_srg_lattices.push_back(&maskLattice);
 
-        /* [SYM] same layout as the surrogate list above: substrates, biomass of the organisms
-         * on this path, then dC, then dB, then the mask. */
+        // The two learned paths use the identical layout -- substrates, their biomass
+        // lattices, the dC increments, the dB increments, the mask -- because
+        // run_symbolic3D and run_graphnet3D are run_surrogate3D with the evaluator
+        // swapped.  Written out longhand rather than folded into a loop, so that these
+        // read the same as the two blocks above them: the layout IS the interface, and
+        // the place it is built should be the easiest thing in this file to check.
         for (plint iS = 0; iS < num_of_substrates; ++iS) ptr_sym_lattices.push_back(&vec_substr_lattices[iS]);
         for (plint iM = 0; iM < num_of_microbes; ++iM) {
             if (!rxntype::usesSymbolic(reaction_type[iM])) continue;
@@ -1320,8 +1827,6 @@ int main(int argc, char **argv) {
         }
         ptr_sym_lattices.push_back(&maskLattice);
 
-        /* [GNN] identical layout again: substrates, biomass of the organisms on this path,
-         * then dC, then dB, then the mask. */
         for (plint iS = 0; iS < num_of_substrates; ++iS) ptr_gnn_lattices.push_back(&vec_substr_lattices[iS]);
         for (plint iM = 0; iM < num_of_microbes; ++iM) {
             if (!rxntype::usesGraphnet(reaction_type[iM])) continue;
@@ -1353,7 +1858,8 @@ int main(int argc, char **argv) {
         // Length assertions.  The layout IS the interface here, so check it once
         // at start-up rather than discovering a mis-sized vector as garbage
         // physics a thousand iterations in.
-        if ((plint) ptr_mm_lattices.size()  != 2*(num_of_substrates + (plint) mm_globalId.size())  + 1 ||
+        if ((plint) ptr_glpk_lattices.size() != 2*(num_of_substrates + (plint) glpk_globalId.size()) + 1 ||
+            (plint) ptr_cpy_lattices.size()  != 2*(num_of_substrates + (plint) cpy_globalId.size())  + 1 ||
             (plint) ptr_srg_lattices.size() != 2*(num_of_substrates + (plint) srg_globalId.size()) + 1 ||
             (plint) ptr_sym_lattices.size() != 2*(num_of_substrates + (plint) sym_globalId.size()) + 1 ||
             (plint) ptr_gnn_lattices.size() != 2*(num_of_substrates + (plint) gnn_globalId.size()) + 1) {
@@ -1429,6 +1935,24 @@ int main(int argc, char **argv) {
     ptr_fd_mask.push_back(&ageLattice);
     plint fdMaskLen = ptr_fd_mask.size();
 
+    /* [FIX] updateLocalMaskNtotalLattices3D loops over the `bio` vector it is handed and reads
+     * lattices[iM] for each entry.  It used to be handed bio_dynamics, which has one row per
+     * BIOFILM microbe -- but ptr_ca_lattices and ptr_fd_mask carry only the microbes on THAT
+     * solver.  In a run where the two counts differ, and shipped example 08 is exactly such a
+     * run (microbe0 on the CA, microbe1 on the LBM, both biofilm), the loop walked past the
+     * biomass block into the copy lattices: in-transit biomass was counted twice, the second
+     * microbe's biomass was never summed into totalbFilmLattice at all, and with enough
+     * microbes it would have indexed past the end of the vector.
+     *
+     * These two vectors hold the material numbers of the microbes each list actually contains,
+     * in the same order the lattices were pushed, so the loop and the lattice list agree. */
+    std::vector< std::vector<plint> > bio_ca, bio_fd;
+    for (plint iM = 0; iM < num_of_microbes; ++iM) {
+        if (bmass_type[iM] != 1) continue;                    /* biofilm rows only, as before */
+        if (solver_type[iM] == 2) bio_ca.push_back(bio_dynamics[loctrack[iM]]);
+        else if (solver_type[iM] == 1) bio_fd.push_back(bio_dynamics[loctrack[iM]]);
+    }
+
     std::vector< MultiBlockLattice3D<T, RXNDES>* > ptr_eq_lattices;
     for (plint iS = 0; iS < num_of_substrates; ++iS) { ptr_eq_lattices.push_back(&vec_substr_lattices[iS]); }
     ptr_eq_lattices.push_back(&maskLattice);
@@ -1442,7 +1966,7 @@ int main(int argc, char **argv) {
     if (track_performance == 1) { global::timer("NS").restart(); }
     plint old_totMask = util::roundToInt(computeAverage(*computeDensity(maskLattice))*nx*ny*nz);
     if (bfilm_count > 0) {
-        applyProcessingFunctional(new updateLocalMaskNtotalLattices3D<T,RXNDES>(nx, ny, nz, caLlen, bounce_back, no_dynamics, bio_dynamics, pore_dynamics, thrd_bFilmFrac, max_bMassRho), vec_bFilm_lattices[0].getBoundingBox(), ptr_ca_lattices);
+        applyProcessingFunctional(new updateLocalMaskNtotalLattices3D<T,RXNDES>(nx, ny, nz, caLlen, bounce_back, no_dynamics, bio_ca, pore_dynamics, thrd_bFilmFrac, max_bMassRho), vec_bFilm_lattices[0].getBoundingBox(), ptr_ca_lattices);
     }
     plint new_totMask = util::roundToInt(computeAverage(*computeDensity(maskLattice))*nx*ny*nz);
     if (std::abs(old_totMask-new_totMask)>0) {
@@ -1473,12 +1997,22 @@ int main(int argc, char **argv) {
             if (vec_immobile[iS]) continue;   // [immobile] no advection coupling
             latticeToPassiveAdvDiff(nsLattice, vec_substr_lattices[iS], vec_substr_lattices[iS].getBoundingBox());
         }
-        tmpIT0=0;
+        // [FIX-3D] SEGFAULT.  This loop indexed vec_bFree_lattices with a counter that
+        //   advanced once per LBM microbe, but that vector is sized bfree_count and holds
+        //   only the PLANKTONIC microbes.  A run with a biofilm organism whose
+        //   <solver_type> is LBM -- example 08 is exactly that -- indexed past the end of an
+        //   often EMPTY vector and crashed here, after several minutes of flow solving.
+        //
+        //   Two things were wrong and both are fixed by walking the free microbes instead:
+        //   the index now matches how the vector was filled (the same tmpIT0/tmpIT1 pairing
+        //   used by the checkpoint loader below), and biofilm biomass is skipped, which is
+        //   correct on its own terms -- attached biomass does not advect with the flow.
+        tmpIT1=0;
         for (plint iM = 0; iM < num_of_microbes; ++iM) {
-            if (solver_type[iM] == 3) {
-                latticeToPassiveAdvDiff(nsLattice, vec_bFree_lattices[tmpIT0], vec_bFree_lattices[tmpIT0].getBoundingBox());
-                ++tmpIT0;
-            }
+            if (bmass_type[iM]==1) continue;              // biofilm: fixed in place, never advected
+            if (solver_type[iM] == 3)
+                latticeToPassiveAdvDiff(nsLattice, vec_bFree_lattices[tmpIT1], vec_bFree_lattices[tmpIT1].getBoundingBox());
+            ++tmpIT1;                                     // advances for every free microbe, coupled or not
         }
         pcout << "  [ADE] Stabilizing (10000 iter)...\n";
         for (plint iT=0; iT<10000; ++iT) {
@@ -1521,6 +2055,15 @@ int main(int argc, char **argv) {
     global::timer("ade").restart();
     util::ValueTracer<T> ns_convg2(1.0,1000.0,ns_converge_iT2);
     bool ns_saturate=0, percolationFlag=0;
+    bool ns_warned_unconverged=false;   /* [v1.3] the unconverged-re-solve warning, once per run */
+
+    /* The conserved biomass the run STARTS from, taken here rather than earlier because the
+     * per-microbe lattices are parked at their background between the two points, and a sum
+     * taken before that parking counts one unit of nothing for every wall voxel -- 2000 of
+     * them on example 07, against a real biomass of 126. Taken once, immediately before the
+     * first step, so the closing report compares like with like. */
+    if (bfilm_count > 0 || bfree_count > 0)
+        diag_initial_total_biomass = complab_total_biomass(vec_bFilm_lattices, vec_bFree_lattices);
 
     for (; iT < ade_maxiTer; ++iT) {
         /* [HEARTBEAT 2026-07-24] lightweight liveness line between the (every-VTI) ITERATION blocks,
@@ -1601,29 +2144,6 @@ int main(int argc, char **argv) {
                     else { writeAdvVTI(vec_bFree_lattices[tmpIT1], iT, vec_microbes_names[iM]+"_"); ++tmpIT1; }
                 }
                 if (Pe > thrd) writeNsVTI(nsLattice, iT, "nsLattice_");
-
-                // [RATE-OUT] Sample the reaction rates, then write them.
-                //   The sampler calls the SAME two kinetics functions the solver
-                //   is about to call further down this same iteration, on the
-                //   SAME concentrations (collision conserves density, so nothing
-                //   in between changes them). These are the rates the solver
-                //   used, not an estimate reconstructed from the output.
-                //   Calling them twice also counts them twice in KineticsStats,
-                //   so the counters are cleared again here. They were reset a few
-                //   lines above, so nothing real is thrown away.
-                if (rateOut.enabled && rateOut.nch() > 0 && iT % rateOut.interval == 0) {
-                    applyProcessingFunctional(
-                        new sample_reaction_rates<T,RXNDES>(
-                            nx, ny, nz, num_of_substrates, kns_count, rateOut.nch(),
-                            no_dynamics, bounce_back,
-                            rateOut.doBio, rateOut.doAbio, rateOut.surfaceOnly,
-                            rateOut.nrb, rateOut.nra,
-                            rateOut.offBioC(), rateOut.offBioM(), rateOut.offBioR(),
-                            rateOut.offAbioC(), rateOut.offAbioR()),
-                        vec_substr_lattices[0].getBoundingBox(), ptr_rate_lattices);
-                    KineticsStats::resetIteration();
-                    writeRateVTI(rateLat, rateOut, iT, nx, ny, nz);
-                }
             }
             adetime += global::timer("ade").getTime();
             pcout << "  Wall clock: " << global::timer("ade").getTime() << " s\n";
@@ -1656,12 +2176,33 @@ int main(int argc, char **argv) {
         }
         if (track_performance == 1) { cnstime += global::timer("cns").getTime(); global::timer("cns").stop(); }
 
+        // ════════════════════════════════════════════════════════════════════
+        // WHERE CHEMISTRY IS ALLOWED TO HAPPEN
+        // ════════════════════════════════════════════════════════════════════
+        //   Not the whole bounding box.  readGeometry() duplicates the first and
+        //   last slice of the geometry file into x = 0 and x = nx-1, and those two
+        //   planes are the boundary condition: Dirichlet overwrites them every
+        //   step, Neumann copies them from the layer inside, `closed` bounces off
+        //   them.  They are not part of the domain, and every reduction in this
+        //   program already excludes them.
+        //
+        //   Running reactions there is not harmless.  A grain in the duplicated
+        //   plane dissolves like any other: the mineral it loses is outside every
+        //   total, and the products it parks are collected by a voxel at x = 1,
+        //   which is inside.  Mass appears in the water with no matching loss
+        //   anywhere in the books.  On example 14 that manufactured about 0.7 of
+        //   5.4 mol/L of calcium and hid about 0.3 of the calcite loss -- the last
+        //   piece of a balance that was failing by 26%.
+        //
+        //   Same box as the diagnostics, the porosity count and saveGeometry().
+        const Box3D reactionBox(1, nx-2, 0, ny-1, 0, nz-1);
+
         // Kinetics (biotic - only if enable_kinetics is true and biotic_mode)
         dC=dC0; dBp=dBp0; dBf=dBf0;
         if (enable_kinetics && kns_count > 0) {
             if (track_performance == 1) global::timer("kns").restart();
             applyProcessingFunctional(new run_kinetics<T,RXNDES>(nx, num_of_substrates, kns_count, ade_dt, vec_Kc_kns, vec_mu_kns, no_dynamics, bounce_back),
-                                      vec_substr_lattices[0].getBoundingBox(), ptr_kns_lattices);
+                                      reactionBox, ptr_kns_lattices);
             if (track_performance == 1) { knstime+=global::timer("kns").getTime(); global::timer("kns").stop(); }
         }
         // ---- OPTIONAL METABOLIC LAYER -------------------------------------------
@@ -1672,18 +2213,18 @@ int main(int argc, char **argv) {
 #ifdef COMPLAB_ENABLE_GLPK
         if (mmcfg.enable_fba_glpk && mmcfg.glpk_count > 0) {
             if (track_performance == 1) global::timer("fba").restart();
-            applyProcessingFunctional(new runFBA_glpk3D<T,RXNDES>(nx, num_of_substrates, (plint) mm_globalId.size(),
-                                          ade_dt, mm_globalId, &mmcfg, vec_Kc, vec_mu, no_dynamics, bounce_back),
-                                      vec_substr_lattices[0].getBoundingBox(), ptr_mm_lattices);
+            applyProcessingFunctional(new runFBA_glpk3D<T,RXNDES>(nx, num_of_substrates, (plint) glpk_globalId.size(),
+                                          ade_dt, glpk_globalId, &mmcfg, vec_Kc, vec_mu, no_dynamics, bounce_back),
+                                      reactionBox, ptr_glpk_lattices);
             if (track_performance == 1) { fbatime += global::timer("fba").getTime(); global::timer("fba").stop(); }
         }
 #endif
 #ifdef COMPLAB_ENABLE_COBRAPY
         if (mmcfg.enable_fba_cobrapy && mmcfg.cpy_count > 0) {
             if (track_performance == 1) global::timer("fba").restart();
-            applyProcessingFunctional(new runFBA_cobrapy3D<T,RXNDES>(nx, num_of_substrates, (plint) mm_globalId.size(),
-                                          ade_dt, mm_globalId, &mmcfg, pyFileName, mm_modelSlot, vec_Kc, vec_mu, no_dynamics, bounce_back),
-                                      vec_substr_lattices[0].getBoundingBox(), ptr_mm_lattices);
+            applyProcessingFunctional(new runFBA_cobrapy3D<T,RXNDES>(nx, num_of_substrates, (plint) cpy_globalId.size(),
+                                          ade_dt, cpy_globalId, &mmcfg, pyFileName, mm_modelSlot, vec_Kc, vec_mu, no_dynamics, bounce_back),
+                                      reactionBox, ptr_cpy_lattices);
             if (track_performance == 1) { fbatime += global::timer("fba").getTime(); global::timer("fba").stop(); }
         }
 #endif
@@ -1692,25 +2233,28 @@ int main(int argc, char **argv) {
             applyProcessingFunctional(new run_surrogate3D<T,RXNDES>(nx, num_of_substrates, (plint) srg_globalId.size(),
                                           num_of_microbes, ade_dt, srg_globalId, &mmcfg, vec_Kc, vec_mu,
                                           no_dynamics, bounce_back),
-                                      vec_substr_lattices[0].getBoundingBox(), ptr_srg_lattices);
+                                      reactionBox, ptr_srg_lattices);
             if (track_performance == 1) { srgtime += global::timer("srg").getTime(); global::timer("srg").stop(); }
         }
-
-        if (sym_count > 0) {
+        //   The two learned paths.  Same slot, same dC/dB increment lattices, same shared
+        //   substrate budget, so a symbolic organism and a surrogate organism in one voxel
+        //   obey one rule rather than two.  Gated on the counts for the reason given below:
+        //   a switch that is on with no organism behind it would sweep the whole domain
+        //   applying identically zero increments.
+        if (mmcfg.enable_symbolic && mmcfg.sym_count > 0) {
             if (track_performance == 1) global::timer("sym").restart();
             applyProcessingFunctional(new run_symbolic3D<T,RXNDES>(nx, num_of_substrates,
                                           (plint) sym_globalId.size(), num_of_microbes, ade_dt,
                                           sym_globalId, &mmcfg, no_dynamics, bounce_back),
-                                      vec_substr_lattices[0].getBoundingBox(), ptr_sym_lattices);
+                                      reactionBox, ptr_sym_lattices);
             if (track_performance == 1) { symtime += global::timer("sym").getTime(); global::timer("sym").stop(); }
         }
-
-        if (gnn_count > 0) {
+        if (mmcfg.enable_graphnet && mmcfg.gnn_count > 0) {
             if (track_performance == 1) global::timer("gnn").restart();
             applyProcessingFunctional(new run_graphnet3D<T,RXNDES>(nx, num_of_substrates,
                                           (plint) gnn_globalId.size(), num_of_microbes, ade_dt,
                                           gnn_globalId, &mmcfg, no_dynamics, bounce_back),
-                                      vec_substr_lattices[0].getBoundingBox(), ptr_gnn_lattices);
+                                      reactionBox, ptr_gnn_lattices);
             if (track_performance == 1) { gnntime += global::timer("gnn").getTime(); global::timer("gnn").stop(); }
         }
 
@@ -1722,41 +2266,52 @@ int main(int argc, char **argv) {
             (mmcfg.enable_fba_glpk    && mmcfg.glpk_count > 0) ||
             (mmcfg.enable_fba_cobrapy && mmcfg.cpy_count  > 0) ||
             (mmcfg.enable_surrogate   && mmcfg.srg_count  > 0) ||
-            (sym_count > 0) || (gnn_count > 0)) {
+            (mmcfg.enable_symbolic    && mmcfg.sym_count  > 0) ||
+            (mmcfg.enable_graphnet    && mmcfg.gnn_count  > 0)) {
+            // ════════════════════════════════════════════════════════════════
+            // PORE SCALE OUT, CONTINUUM SCALE IN: SAMPLED HERE AND NOWHERE ELSE
+            // ════════════════════════════════════════════════════════════════
+            //   The effectiveness factor is the ratio of the rate the aggregate
+            //   actually achieves to the rate it would achieve if every point in
+            //   it saw the bulk.  The numerator is the per-voxel reaction rate,
+            //   and this is the only moment in the step when it exists: every
+            //   rate path has written its increment into dC, and
+            //   update_rxnLattices below is about to consume them.  Recomputing
+            //   the rate anywhere else would be averaging a different model from
+            //   the one that ran.
+            if (icfg.upsEnabled && diag.active()) {
+                const plint upsEvery = (icfg.diagInterval > 0) ? (plint) icfg.diagInterval
+                                                               : (ade_VTI_iTer > 0 ? ade_VTI_iTer : 0);
+                if (upsEvery > 0 && iT % upsEvery == 0)
+                    complab_upscale_sample(iT, icfg, ade_dt, dx, nx, ny, nz,
+                                           num_of_substrates, num_of_microbes,
+                                           vec_substr_lattices, dC, maskLattice,
+                                           vec_bFilm_lattices, vec_bFree_lattices,
+                                           bmass_type, loctrack, pore_dynamics,
+                                           vec_solute_bFilmD);
+            }
+
+            //   <upscaling><freeze_biomass>: throw the biomass increments away and keep the
+            //   substrate ones. The reaction still runs, still consumes and still produces;
+            //   only the catalyst is held while the concentration profile relaxes. Done here,
+            //   after the upscaling sample above, so the sample sees the rate the organisms
+            //   actually computed rather than a zeroed one.
+            if (icfg.upsEnabled && icfg.upsFreezeBiomass) { dBp = dBp0; dBf = dBf0; }
+
             if (track_performance == 1) global::timer("rxn").restart();
             applyProcessingFunctional(new update_rxnLattices<T,RXNDES>(nx, num_of_substrates, num_of_microbes, no_dynamics, bounce_back),
-                                      vec_substr_lattices[0].getBoundingBox(), ptr_update_rxnLattices);
+                                      reactionBox, ptr_update_rxnLattices);
             if (track_performance == 1) { T rxntime=global::timer("rxn").getTime(); global::timer("rxn").stop(); if (kns_count>0) knstime+=rxntime; }
         }
 
-        /* [SYM-ABIOTIC][GNN-ABIOTIC] The learned abiotic laws, on the same lattice vector the
-         * hand-written abiotic kinetics uses.  They accumulate into the same dC[], so
-         * update_abiotic_rxnLattices below applies all of it in one pass. */
-        if (haveSymAbiotic) {
-            if (track_performance == 1) global::timer("sym").restart();
-            applyProcessingFunctional(new run_symbolic_abiotic3D<T,RXNDES>(nx, num_of_substrates,
-                                          ade_dt, &mmcfg, no_dynamics, bounce_back),
-                                      vec_substr_lattices[0].getBoundingBox(), ptr_abiotic_kns_lattices);
-            if (track_performance == 1) { symtime += global::timer("sym").getTime(); global::timer("sym").stop(); }
-        }
-        if (haveGnnAbiotic) {
-            if (track_performance == 1) global::timer("gnn").restart();
-            applyProcessingFunctional(new run_graphnet_abiotic3D<T,RXNDES>(nx, num_of_substrates,
-                                          ade_dt, &mmcfg, no_dynamics, bounce_back),
-                                      vec_substr_lattices[0].getBoundingBox(), ptr_abiotic_kns_lattices);
-            if (track_performance == 1) { gnntime += global::timer("gnn").getTime(); global::timer("gnn").stop(); }
-        }
-        if ((haveSymAbiotic || haveGnnAbiotic) && !(enable_abiotic_kinetics && num_of_substrates > 0)
-            && !dissolCfg.enabled) {
-            /* Nothing else is going to apply dC[] on the abiotic path this step, so do it here.
-             * When the hand-written abiotic block or dissolution IS on, they already call this
-             * once and calling it twice would apply the increments twice. */
-            applyProcessingFunctional(new update_abiotic_rxnLattices<T,RXNDES>(nx, num_of_substrates, no_dynamics, bounce_back),
-                                      vec_substr_lattices[0].getBoundingBox(), ptr_abiotic_kns_lattices);
-        }
-
-        // Abiotic kinetics (substrate-only reactions without microbes)
-        if (enable_abiotic_kinetics && num_of_substrates > 0) {
+        // Abiotic kinetics (substrate-only reactions without microbes).
+        //   A learned abiotic law -- <symbolic><abiotic_file> or <graphnet><abiotic_file> --
+        //   belongs in this block and not the biotic one, because it fires in every fluid
+        //   voxel whether anything is alive there or not.  It therefore also has to be able
+        //   to open the block on its own: a run with an abiotic .sym file and no
+        //   <enable_abiotic_kinetics> is a perfectly reasonable configuration.
+        const bool learnedAbiotic = complab_sym::haveAbiotic() || complab_gnn::haveAbiotic();
+        if ((enable_abiotic_kinetics || learnedAbiotic) && num_of_substrates > 0) {
             if (track_performance == 1) global::timer("abiotic_kns").restart();
             // [FIX] The abiotic block accumulates into the SAME dC[] lattices the
             //   biotic block just used, and those were reset only once, above the
@@ -1769,48 +2324,80 @@ int main(int argc, char **argv) {
             dC = dC0;
             // Calculate abiotic reaction rates
             // [PRECIP-VOP] surface-gate the reaction so A->P fires only on interface (wall-adjacent) voxels
-            if (precip_enabled && precip_surfaceOnly) {
-                applyProcessingFunctional(new surfaceAbioticKinetics3D<T,RXNDES>(nx, ny, nz, num_of_substrates, ade_dt, no_dynamics, bounce_back, 1),
-                                          vec_substr_lattices[0].getBoundingBox(), ptr_abiotic_kns_lattices);
-            } else {
-                applyProcessingFunctional(new run_abiotic_kinetics<T,RXNDES>(nx, num_of_substrates, ade_dt, no_dynamics, bounce_back),
-                                          vec_substr_lattices[0].getBoundingBox(), ptr_abiotic_kns_lattices);
+            if (enable_abiotic_kinetics) {
+                if (precip_enabled && precip_surfaceOnly) {
+                    applyProcessingFunctional(new surfaceAbioticKinetics3D<T,RXNDES>(nx, ny, nz, num_of_substrates, ade_dt, no_dynamics, bounce_back, 1),
+                                              reactionBox, ptr_abiotic_kns_lattices);
+                } else {
+                    applyProcessingFunctional(new run_abiotic_kinetics<T,RXNDES>(nx, num_of_substrates, ade_dt, no_dynamics, bounce_back),
+                                              reactionBox, ptr_abiotic_kns_lattices);
+                }
+            }
+            //   The learned abiotic laws, into the SAME dC lattices, so a substrate touched
+            //   by both a hand-written abiotic reaction and a fitted one gets one combined
+            //   increment applied once.  Each has its own shared-budget clamp inside, so
+            //   neither can drive a concentration negative on its own; the combination is
+            //   bounded by update_abiotic_rxnLattices below.
+            if (complab_sym::haveAbiotic()) {
+                applyProcessingFunctional(new run_symbolic_abiotic3D<T,RXNDES>(
+                                              nx, num_of_substrates, ade_dt, &mmcfg,
+                                              no_dynamics, bounce_back),
+                                          reactionBox, ptr_abiotic_kns_lattices);
+            }
+            if (complab_gnn::haveAbiotic()) {
+                applyProcessingFunctional(new run_graphnet_abiotic3D<T,RXNDES>(
+                                              nx, num_of_substrates, ade_dt, &mmcfg,
+                                              no_dynamics, bounce_back),
+                                          reactionBox, ptr_abiotic_kns_lattices);
             }
             // [DISSOL-VOP] Mineral dissolution, into the SAME dC lattices, before they
             //   are applied.  It runs here rather than in its own block so that a
             //   substrate both produced by dissolution and consumed by an abiotic
             //   reaction gets one combined increment, applied once.
             if (dissolCfg.enabled) {
+                //   TWO passes, and the order matters. The first parks each product share in the
+                //   mineral voxel's own increment slot; the second lets the water collect them.
+                //   Between the two, Palabos refreshes the increment lattices' envelopes, which
+                //   is what makes a share parked on one rank visible to the next -- and is why
+                //   the result no longer depends on the processor count.
                 applyProcessingFunctional(new surfaceDissolutionKinetics3D<T,RXNDES>(
                                               nx, ny, nz, num_of_substrates, ade_dt,
                                               no_dynamics, bounce_back, pore_dynamics, &dissolCfg),
-                                          vec_substr_lattices[0].getBoundingBox(), ptr_dissol);
+                                          reactionBox, ptr_dissol);
+                applyProcessingFunctional(new dissolutionGather3D<T,RXNDES>(
+                                              nx, ny, nz, num_of_substrates,
+                                              no_dynamics, bounce_back, &dissolCfg),
+                                          reactionBox, ptr_dissol);
             }
 
             // Apply concentration changes
-            applyProcessingFunctional(new update_abiotic_rxnLattices<T,RXNDES>(nx, num_of_substrates, no_dynamics, bounce_back),
-                                      vec_substr_lattices[0].getBoundingBox(), ptr_abiotic_kns_lattices);
+            applyProcessingFunctional(new update_abiotic_rxnLattices<T,RXNDES>(nx, num_of_substrates, no_dynamics, bounce_back, vec_immobile),
+                                      reactionBox, ptr_abiotic_kns_lattices);
             if (track_performance == 1) { knstime += global::timer("abiotic_kns").getTime(); global::timer("abiotic_kns").stop(); }
         }
 
         // [DISSOL-VOP] If the abiotic block above is switched off, dissolution still
         //   has to run somewhere.  Give it its own reset/apply pair so it works
         //   independently of <enable_abiotic_kinetics>.
-        if (dissolCfg.enabled && !(enable_abiotic_kinetics && num_of_substrates > 0)) {
+        if (dissolCfg.enabled && !((enable_abiotic_kinetics || learnedAbiotic) && num_of_substrates > 0)) {
             dC = dC0;
             applyProcessingFunctional(new surfaceDissolutionKinetics3D<T,RXNDES>(
                                           nx, ny, nz, num_of_substrates, ade_dt,
                                           no_dynamics, bounce_back, pore_dynamics, &dissolCfg),
-                                      vec_substr_lattices[0].getBoundingBox(), ptr_dissol);
-            applyProcessingFunctional(new update_abiotic_rxnLattices<T,RXNDES>(nx, num_of_substrates, no_dynamics, bounce_back),
-                                      vec_substr_lattices[0].getBoundingBox(), ptr_abiotic_kns_lattices);
+                                      reactionBox, ptr_dissol);
+            applyProcessingFunctional(new dissolutionGather3D<T,RXNDES>(
+                                          nx, ny, nz, num_of_substrates,
+                                          no_dynamics, bounce_back, &dissolCfg),
+                                      reactionBox, ptr_dissol);
+            applyProcessingFunctional(new update_abiotic_rxnLattices<T,RXNDES>(nx, num_of_substrates, no_dynamics, bounce_back, vec_immobile),
+                                      reactionBox, ptr_abiotic_kns_lattices);
         }
 
         // Equilibrium chemistry (runs regardless of enable_kinetics - controlled separately)
         if (useEquilibrium) {
             if (track_performance == 1) global::timer("eq").restart();
             applyProcessingFunctional(new run_equilibrium_biotic<T, RXNDES>(nx, num_of_substrates, eqSolver, no_dynamics, bounce_back),
-                                      vec_substr_lattices[0].getBoundingBox(), ptr_eq_lattices);
+                                      reactionBox, ptr_eq_lattices);
             if (track_performance == 1) { eqtime += global::timer("eq").getTime(); global::timer("eq").stop(); }
         }
 
@@ -1883,16 +2470,161 @@ int main(int argc, char **argv) {
                 pcout << "│   " << vec_subs_names[iS] << " total: " << std::scientific << totalMass << std::fixed << "\n";
             }
             if (bfilm_count > 0) {
-                T totalBiomass = computeSum(*computeDensity(totalbFilmLattice));
-                pcout << "│   Total biomass: " << std::scientific << totalBiomass << std::fixed << "\n";
+                /* computeDensity() cannot see mass held at a bounce-back wall or inside a
+                 * grain, so a field that spreads out reports a FALLING total while it is in
+                 * fact growing.  Example 07 is the clearest case: with the biomass on a
+                 * lattice-Boltzmann solver the console line sat at 1.0800e+02 for the whole
+                 * run while the biomass actually rose from 126.000 to 126.208, because the
+                 * spreading patch moved 6 units of itself into wall-adjacent transit.  The
+                 * conserved quantity is what the lattice holds, so that is what is printed. */
+                T seen = T();
+                const T totalB = complab_total_biomass(vec_bFilm_lattices, vec_bFree_lattices, &seen);
+                const T held = totalB - seen;
+                pcout << "│   Total biomass: " << std::scientific << totalB << std::fixed;
+                if (std::fabs(held) > 1e-12 * std::fabs(totalB))
+                    pcout << "   (" << std::scientific << seen << std::fixed
+                          << " in open voxels, the rest held at walls)";
+                pcout << "\n";
             }
 
             pcout << "└─────────────────────────────────────────────────────────────────────────┘\n";
         }
 
+        // ════════════════════════════════════════════════════════════════════════
+        // [NEW] <diagnostics>: one row of the summary CSV, and the conservation checks.
+        //
+        //   computeSum/Min/Max are Palabos reductions and are already global, which is
+        //   what complab_diag::Diagnostics expects -- it knows nothing about MPI, which
+        //   is what lets it be tested against synthetic fields.
+        //
+        //   <interval> overrides the VTI interval; 0 means "follow the VTI interval",
+        //   because a scalar row is cheap and there is rarely a reason to want fewer of
+        //   them than there are volumes.
+        // ════════════════════════════════════════════════════════════════════════
+        if (diag.active()) {
+            const plint diagEvery = (icfg.diagInterval > 0) ? (plint) icfg.diagInterval
+                                                            : (ade_VTI_iTer > 0 ? ade_VTI_iTer : 0);
+            if (diagEvery > 0 && iT % diagEvery == 0) {
+                complab_diag::Row row;
+                row.iteration = (long) iT;
+
+                //   EVERYTHING IS MEASURED OVER x = 1 .. nx-2, NOT THE WHOLE FIELD.
+                //   readGeometry() duplicates the first and last slice of the file into the two
+                //   ghost columns 0 and nx-1, so a reduction over the full bounding box counts
+                //   the inlet and outlet slices twice.  For porosity that is a cosmetic error;
+                //   for a conserved sum it is not -- the total would jump whenever the inlet
+                //   concentration changed, and the mass-balance check would blame the chemistry.
+                //   This is the same box saveGeometry() and the permeability calculation use.
+                const Box3D physicalDomain(1, nx-2, 0, ny-1, 0, nz-1);
+
+                //   "Open" is every material a solute can occupy: the pore materials and the
+                //   biofilm materials.  Counting only the pore materials would make porosity
+                //   fall as biofilm grows and would divide the substrate totals by the wrong
+                //   volume, so the reported mean concentration would drift for a reason that
+                //   has nothing to do with chemistry.
+                //   The two lists can name the same material, so collect the distinct numbers
+                //   first -- counting the same material twice would report a porosity above 1.
+                std::vector<plint> openMat(pore_dynamics);
+                for (size_t iB = 0; iB < bio_dynamics.size(); ++iB)
+                    openMat.insert(openMat.end(), bio_dynamics[iB].begin(), bio_dynamics[iB].end());
+                std::sort(openMat.begin(), openMat.end());
+                openMat.erase(std::unique(openMat.begin(), openMat.end()), openMat.end());
+
+                //   COUNTED ON THE LIVE MASK, NOT ON THE GEOMETRY FILE.
+                //
+                //   `geometry` is the material map as it was READ. Precipitation and dissolution
+                //   change the pore space by writing the maskLattice, and neither touches
+                //   `geometry` -- so counting there reports the starting geometry for the whole
+                //   run, however much the pore space moves.
+                //
+                //   That made the headline number of the two cases the feature exists for a
+                //   constant. Example 13 is documented as clogging, and its summary reported
+                //   porosity 0.916667 at every interval from the first to the last. It was
+                //   sealing voxels the whole time -- the conversion fires, the mask changes, the
+                //   flow is re-solved -- and the CSV said nothing had happened.
+                std::unique_ptr<MultiScalarField3D<T> > liveMask = computeDensity(maskLattice);
+                plint openCount = 0;
+                for (size_t k = 0; k < openMat.size(); ++k)
+                    openCount += MaskedScalarCounts3D(physicalDomain, *liveMask, openMat[k]);
+                row.openVoxels = (long) openCount;
+
+                const double totalVoxels = (double) (nx - 2) * (double) ny * (double) nz;
+                row.porosity = (totalVoxels > 0) ? (double) row.openVoxels / totalVoxels : 0.0;
+
+                //   THE MASS THE DYNAMICS WILL NOT ADMIT TO.
+                //
+                //   computeDensity() asks each cell's dynamics.  BounceBack and NoDynamics both
+                //   answer from a stored number and ignore the populations they are holding, so
+                //   whatever is in flight at a wall, or resting inside a grain, is missing from
+                //   the sum above.  It is not lost -- it streams back out next step -- but a
+                //   conservation check written against `total` alone reads low by that share and
+                //   sends the reader looking for a leak in the chemistry.  On a spread-out biomass
+                //   patch it is about 9% of the field.
+                //
+                //   So it is measured, from the populations, and reported in its own column.
+                //   Wall and grain voxels are parked at the substrate's background concentration
+                //   at start-up (so a wall does not stream a spurious gradient into the water),
+                //   and that parked value is subtracted here: what is left is the excess, which is
+                //   the part that is genuinely in transit.
+                for (plint iS = 0; iS < num_of_substrates; ++iS) {
+                    complab_diag::FieldStat st;
+                    st.name  = vec_subs_names[iS];
+                    st.total = (double) computeSum(*computeDensity(vec_substr_lattices[iS]), physicalDomain);
+                    st.minv  = (double) computeMin(*computeDensity(vec_substr_lattices[iS]), physicalDomain);
+                    st.maxv  = (double) computeMax(*computeDensity(vec_substr_lattices[iS]), physicalDomain);
+                    st.mean  = (row.openVoxels > 0) ? st.total / (double) row.openVoxels : 0.0;
+                    //   Everything the lattice holds, read from the populations over the WHOLE
+                    //   block, minus what the reported total was able to see.  Taking the
+                    //   difference rather than masking a list of materials is what makes this
+                    //   complete: a cell counts here whatever dynamics is attached to it, so the
+                    //   correction cannot miss a category.  It picks up three at once --
+                    //
+                    //     mass in flight at a bounce-back wall, which BounceBack::computeDensity
+                    //     will not report;
+                    //     mass resting inside a grain, for the same reason;
+                    //     mass sitting in the x=0 and x=nx-1 planes, which every reduction in this
+                    //     program excludes because they are the boundary condition, and which for
+                    //     a CLOSED boundary are part of the system rather than outside it.
+                    //
+                    //   The third was the largest.  With every boundary closed and every reaction
+                    //   switched off -- a box in which nothing at all may change -- the reported
+                    //   proton total fell by 7%, all of it sitting in those two planes.
+                    //
+                    //   An immobile species never streams, so nothing of it is ever in flight; the
+                    //   difference is zero for it and the call is skipped.
+                    st.held  = vec_immobile[iS] ? 0.0
+                             : (PopulationSum3D(vec_substr_lattices[iS].getBoundingBox(),
+                                                vec_substr_lattices[iS]) - st.total);
+                    row.fields.push_back(st);
+                }
+                //   BIOMASS IS A CONSERVED FIELD TOO.
+                //
+                //   Until now the scalar record carried the substrates and nothing else, so the
+                //   one field with its own transport solver -- and the one that showed the wall
+                //   accounting most clearly, at about 9% of its total -- could not be checked
+                //   from the CSV at all. Every population is added here, under its own name, so
+                //   <conserve> can name a microbe beside a substrate.
+                for (plint iM = 0; iM < num_of_microbes; ++iM) {
+                    MultiBlockLattice3D<T,RXNDES> &bl = (bmass_type[iM] == 1)
+                        ? vec_bFilm_lattices[loctrack[iM]] : vec_bFree_lattices[loctrack[iM]];
+                    complab_diag::FieldStat st;
+                    st.name  = vec_microbes_names[iM];
+                    st.total = (double) computeSum(*computeDensity(bl), physicalDomain);
+                    st.minv  = (double) computeMin(*computeDensity(bl), physicalDomain);
+                    st.maxv  = (double) computeMax(*computeDensity(bl), physicalDomain);
+                    st.mean  = (row.openVoxels > 0) ? st.total / (double) row.openVoxels : 0.0;
+                    st.held  = PopulationSum3D(bl.getBoundingBox(), bl) - st.total;
+                    row.fields.push_back(st);
+                }
+
+                const std::string dmsg = diag.record(row);
+                if (!dmsg.empty()) pcout << dmsg;
+            }
+        }
+
         // CA biomass expansion
         if (ca_count > 0) {
-            applyProcessingFunctional(new updateLocalMaskNtotalLattices3D<T,RXNDES>(nx, ny, nz, caLlen, bounce_back, no_dynamics, bio_dynamics, pore_dynamics, thrd_bFilmFrac, max_bMassRho), vec_bFilm_lattices[0].getBoundingBox(), ptr_ca_lattices);
+            applyProcessingFunctional(new updateLocalMaskNtotalLattices3D<T,RXNDES>(nx, ny, nz, caLlen, bounce_back, no_dynamics, bio_ca, pore_dynamics, thrd_bFilmFrac, max_bMassRho), vec_bFilm_lattices[0].getBoundingBox(), ptr_ca_lattices);
             T globalBmax = computeMax(*computeDensity(totalbFilmLattice));
             if (std::isnan(globalBmax) || std::isinf(globalBmax)) { pcout << "\n  [CA] ERROR: non-finite biomass (NaN/Inf) at iter=" << iT << " -- stopping cleanly\n"; percolationFlag = 1; }
             // [CA-FAIL] 2D-style hard stop: on an unresolvable CA state, dump every field and terminate with an explicit reason report.
@@ -2128,7 +2860,7 @@ int main(int argc, char **argv) {
                     if (halfflag == 0) applyProcessingFunctional(new pushExcessBiomass3D<T,RXNDES>(max_bMassRho, nx, ny, nz, 1, caLlen, no_dynamics, bounce_back, pore_dynamics), vec_bFilm_lattices[0].getBoundingBox(), ptr_ca_lattices);
                     else applyProcessingFunctional(new halfPushExcessBiomass3D<T,RXNDES>(max_bMassRho, nx, ny, nz, 1, caLlen, no_dynamics, bounce_back, pore_dynamics), vec_bFilm_lattices[0].getBoundingBox(), ptr_ca_lattices);
                     applyProcessingFunctional(new pullExcessBiomass3D<T,RXNDES>(nx, ny, nz, 1, caLlen), vec_bFilm_lattices[0].getBoundingBox(), ptr_ca_lattices);
-                    applyProcessingFunctional(new updateLocalMaskNtotalLattices3D<T,RXNDES>(nx, ny, nz, caLlen, bounce_back, no_dynamics, bio_dynamics, pore_dynamics, thrd_bFilmFrac, max_bMassRho), vec_bFilm_lattices[0].getBoundingBox(), ptr_ca_lattices);
+                    applyProcessingFunctional(new updateLocalMaskNtotalLattices3D<T,RXNDES>(nx, ny, nz, caLlen, bounce_back, no_dynamics, bio_ca, pore_dynamics, thrd_bFilmFrac, max_bMassRho), vec_bFilm_lattices[0].getBoundingBox(), ptr_ca_lattices);
                     globalBmax = computeMax(*computeDensity(totalbFilmLattice));
                     diag_ca_redistributions++;
                     // [CA-ROBUST] if a sweep no longer lowers the biofilm max, the remaining excess is boxed in
@@ -2164,11 +2896,11 @@ int main(int argc, char **argv) {
             //   lattices and mis-classified the biofilm.  Use a correctly shaped
             //   vector instead; ptr_fd_lattices is still right for fdDiffusion3D,
             //   which expects mask at length-1.
-            applyProcessingFunctional(new updateLocalMaskNtotalLattices3D<T,RXNDES>(nx, ny, nz, fdMaskLen, bounce_back, no_dynamics, bio_dynamics, pore_dynamics, thrd_bFilmFrac, max_bMassRho), vec_bFilm_lattices[0].getBoundingBox(), ptr_fd_mask);
+            applyProcessingFunctional(new updateLocalMaskNtotalLattices3D<T,RXNDES>(nx, ny, nz, fdMaskLen, bounce_back, no_dynamics, bio_fd, pore_dynamics, thrd_bFilmFrac, max_bMassRho), vec_bFilm_lattices[0].getBoundingBox(), ptr_fd_mask);
             for (plint iM=0; iM<bfilm_count; ++iM) vec_bFcopy_lattices[iM]=vec_bFilm_lattices[iM];
             for (plint iP=0; iP<bfree_count; ++iP) vec_bPcopy_lattices[iP]=vec_bFree_lattices[iP];
             applyProcessingFunctional(new fdDiffusion3D<T,RXNDES>(nx, ny, nz, fdLlen, 1, bioNUinPore[0]), vec_bFilm_lattices[0].getBoundingBox(), ptr_fd_lattices);
-            applyProcessingFunctional(new updateLocalMaskNtotalLattices3D<T,RXNDES>(nx, ny, nz, fdMaskLen, bounce_back, no_dynamics, bio_dynamics, pore_dynamics, thrd_bFilmFrac, max_bMassRho), vec_bFilm_lattices[0].getBoundingBox(), ptr_fd_mask);
+            applyProcessingFunctional(new updateLocalMaskNtotalLattices3D<T,RXNDES>(nx, ny, nz, fdMaskLen, bounce_back, no_dynamics, bio_fd, pore_dynamics, thrd_bFilmFrac, max_bMassRho), vec_bFilm_lattices[0].getBoundingBox(), ptr_fd_mask);
         }
 
         // Update flow and dynamics
@@ -2194,7 +2926,23 @@ int main(int argc, char **argv) {
                     }
                     if (ns_saturate == 1) {
                         T outletvel = computeAverage(*computeVelocityComponent(nsLattice, Box3D(nx-2,nx-2, 0,ny-1, 0,nz-1), 0));
-                        if (outletvel > thrd) ns_saturate = 0;
+                        if (outletvel > thrd) {
+                            /* [v1.3] The loop ran out of iterations and the outlet is still
+                             * flowing, so the field coupled into every mobile solute below has
+                             * NOT reached steady state. This used to clear the flag and carry on
+                             * in silence -- the same failure the [FIX] at the initial NS solve was
+                             * written to eliminate, still present on the two in-loop paths. */
+                            ns_saturate = 0;
+                            if (!ns_warned_unconverged) {
+                                ns_warned_unconverged = true;
+                                pcout << "\n  [NS] WARNING: the flow re-solve hit <ns_max_iT2> ("
+                                      << ns_maxiTer_2 << ") without converging at iter=" << iT
+                                      << ",\n         and the outlet is still flowing. The velocity "
+                                      << "field advecting every solute from\n         here on is not "
+                                      << "a steady state. Raise <ns_max_iT2>, or loosen\n         "
+                                      << "<ns_convergence_iT2>. Reported once per run.\n";
+                            }
+                        }
                         else { pcout << "\n  [NS] Percolation limit reached at iter=" << iT << "\n"; percolationFlag = 1; }
                     }
                     // [NS-ROBUST] catch flow divergence (NaN/Inf energy) from near-complete clogging: stop cleanly
@@ -2228,7 +2976,7 @@ int main(int argc, char **argv) {
             ptr_precip_conv.push_back(&phaseLattice);   // [DISSOL-VOP] so a sealing voxel is stamped
             plint pre_totMask  = util::roundToInt(computeAverage(*computeDensity(maskLattice))*nx*ny*nz);
             applyProcessingFunctional(new precipNodeConversion3D<T,RXNDES>(nx, ny, nz, max_precipRho, no_dynamics, bounce_back, no_dynamics, precip_phase_id),
-                                      vec_substr_lattices[precip_solidSub].getBoundingBox(), ptr_precip_conv);
+                                      Box3D(1, nx-2, 0, ny-1, 0, nz-1), ptr_precip_conv);
             plint post_totMask = util::roundToInt(computeAverage(*computeDensity(maskLattice))*nx*ny*nz);
             if (std::abs(pre_totMask - post_totMask) > 0 && Pe > thrd && ns_saturate == 0) {
                 applyProcessingFunctional(new updateNsLatticesDynamics3D<T,NSDES,T,RXNDES>(nsLatticeOmega, precip_permRatio, pore_dynamics, no_dynamics, bounce_back),
@@ -2241,10 +2989,37 @@ int main(int argc, char **argv) {
                 }
                 if (ns_saturate == 1) {
                     T outletvel = computeAverage(*computeVelocityComponent(nsLattice, Box3D(nx-2,nx-2, 0,ny-1, 0,nz-1), 0));
-                    if (outletvel > thrd) ns_saturate = 0;
+                    if (outletvel > thrd) {
+                        /* [v1.3] The loop ran out of iterations and the outlet is still
+                         * flowing, so the field coupled into every mobile solute below has
+                         * NOT reached steady state. This used to clear the flag and carry on
+                         * in silence -- the same failure the [FIX] at the initial NS solve was
+                         * written to eliminate, still present on the two in-loop paths. */
+                        ns_saturate = 0;
+                        if (!ns_warned_unconverged) {
+                            ns_warned_unconverged = true;
+                            pcout << "\n  [NS] WARNING: the flow re-solve hit <ns_max_iT2> ("
+                                  << ns_maxiTer_2 << ") without converging at iter=" << iT
+                                  << ",\n         and the outlet is still flowing. The velocity "
+                                  << "field advecting every solute from\n         here on is not "
+                                  << "a steady state. Raise <ns_max_iT2>, or loosen\n         "
+                                  << "<ns_convergence_iT2>. Reported once per run.\n";
+                        }
+                    }
                     else { pcout << "\n  [PRECIP-VOP] Percolation limit reached (clogged) at iter=" << iT << "\n"; percolationFlag = 1; }
                 }
                 for (plint iS = 0; iS < num_of_substrates; ++iS) if (!vec_immobile[iS]) latticeToPassiveAdvDiff(nsLattice, vec_substr_lattices[iS], vec_substr_lattices[iS].getBoundingBox());
+            }
+            /* [FIX] A sealed voxel has to stop conducting solute, not just flow.  The substrate
+             * lattices took their dynamics at start-up from the static `geometry` field, which
+             * precipitation never touches, so without this line a fully clogged throat went on
+             * diffusing at the full pore diffusivity and the case measured a breakthrough the
+             * geometry no longer permits.  Cheap: it only walks the domain when the mask moved. */
+            if (std::abs(pre_totMask - post_totMask) > 0) {
+                applyProcessingFunctional(new updateSoluteSolidDynamics3D<T,RXNDES>(
+                                              num_of_substrates, bounce_back, no_dynamics, pore_dynamics,
+                                              substrOMEGAinbFilm, substrOMEGAinPore, vec_immobile),
+                                          vec_substr_lattices[0].getBoundingBox(), substrate_lattices);
             }
         }
 
@@ -2264,7 +3039,7 @@ int main(int argc, char **argv) {
                                           num_of_substrates,
                                           pore_dynamics.empty() ? (plint) 2 : pore_dynamics[0],
                                           no_dynamics, bounce_back, &dissolCfg),
-                                      vec_substr_lattices[0].getBoundingBox(), ptr_dissol_conv);
+                                      reactionBox, ptr_dissol_conv);
             const plint post_totMask = util::roundToInt(computeAverage(*computeDensity(maskLattice))*nx*ny*nz);
 
             if (std::abs(pre_totMask - post_totMask) > 0 && Pe > thrd) {
@@ -2274,14 +3049,33 @@ int main(int argc, char **argv) {
                 applyProcessingFunctional(new updateNsLatticesDynamics3D<T,NSDES,T,RXNDES>(nsLatticeOmega, vec_permRatio.empty() ? (T)1 : vec_permRatio[0], pore_dynamics, no_dynamics, bounce_back),
                                           nsLattice.getBoundingBox(), nsLattice, maskLattice);
                 ns_saturate = 0;                       // flow may percolate again
+                plint dissol_ns_converged = 0;
                 for (plint iT2 = 0; iT2 < ns_maxiTer_2; ++iT2) {
                     nsLattice.collideAndStream();
                     ns_convg2.takeValue(getStoredAverageEnergy(nsLattice),false);
-                    if (ns_convg2.hasConverged()) break;
+                    if (ns_convg2.hasConverged()) { dissol_ns_converged = 1; break; }
                 }
+                /* [FIX] The precipitation block above reports a flow solve that ran out of
+                 * iterations; this one used to exit silently and couple an unconverged velocity
+                 * field into every mobile solute.  Say so instead. */
+                if (dissol_ns_converged == 0)
+                    pcout << "  [DISSOL-VOP] WARNING: the reopened flow field did not converge in "
+                          << ns_maxiTer_2 << " iterations; the velocity coupled into the solutes "
+                          << "below is not a steady field.\n";
                 for (plint iS = 0; iS < num_of_substrates; ++iS)
                     if (!vec_immobile[iS]) latticeToPassiveAdvDiff(nsLattice, vec_substr_lattices[iS], vec_substr_lattices[iS].getBoundingBox());
                 percolationFlag = 0;                   // reopening can undo a clog
+            }
+            /* [FIX] The mirror of the precipitation case: a voxel the mineral has vacated is
+             * pore again, and a solute has to be able to enter it.  Without this the reopened
+             * voxel kept the BounceBack it was given at start-up, acid could never reach the
+             * fresh surface, and computeDensity there reported BounceBack's stored density
+             * rather than what the voxel held. */
+            if (std::abs(pre_totMask - post_totMask) > 0) {
+                applyProcessingFunctional(new updateSoluteSolidDynamics3D<T,RXNDES>(
+                                              num_of_substrates, bounce_back, no_dynamics, pore_dynamics,
+                                              substrOMEGAinbFilm, substrOMEGAinPore, vec_immobile),
+                                          vec_substr_lattices[0].getBoundingBox(), substrate_lattices);
             }
         }
 
@@ -2337,23 +3131,6 @@ int main(int argc, char **argv) {
             saveBinaryBlock(nsLattice, str_outputDir+ns_filename+".chk");
             pcout << "    [OK] Flow field saved\n";
         }
-
-        // [RATE-OUT] The same sample and write for the final state, so the last
-        //   snapshot has rates beside its concentrations.
-        if (rateOut.enabled && rateOut.nch() > 0) {
-            applyProcessingFunctional(
-                new sample_reaction_rates<T,RXNDES>(
-                    nx, ny, nz, num_of_substrates, kns_count, rateOut.nch(),
-                    no_dynamics, bounce_back,
-                    rateOut.doBio, rateOut.doAbio, rateOut.surfaceOnly,
-                    rateOut.nrb, rateOut.nra,
-                    rateOut.offBioC(), rateOut.offBioM(), rateOut.offBioR(),
-                    rateOut.offAbioC(), rateOut.offAbioR()),
-                vec_substr_lattices[0].getBoundingBox(), ptr_rate_lattices);
-            KineticsStats::resetIteration();
-            writeRateVTI(rateLat, rateOut, iT, nx, ny, nz);
-            pcout << "    [OK] Reaction rates saved (" << rateOut.nch() << " channels)\n";
-        }
     }
 
     // ════════════════════════════════════════════════════════════════════════════
@@ -2377,12 +3154,26 @@ int main(int argc, char **argv) {
     pcout << "║   Validation diag:  " << (enable_validation_diagnostics ? "ENABLED" : "DISABLED") << "\n";
     if (bfilm_count > 0) {
         T finalBmax = computeMax(*computeDensity(totalbFilmLattice));
-        T totalGrowth = (diag_initial_biomass > 0) ? ((finalBmax - diag_initial_biomass) / diag_initial_biomass * 100.0) : 0.0;
+        /* THE PEAK IS NOT THE TOTAL, AND IT IS NOT GROWTH.
+         *
+         * This line used to report (final peak - initial peak) / initial peak and call it
+         * "Growth". For a solver that does not move biomass, the peak is a fair proxy. For one
+         * that does, it is the opposite of the answer: example 06 spreads its patch from 108
+         * voxels to 876, so the PEAK falls 4.05% while the total RISES 0.23%, and the run
+         * reported -4.05% growth for a population that grew. Both are now printed, labelled
+         * for what they are. */
+        const T finalTotal = complab_total_biomass(vec_bFilm_lattices, vec_bFree_lattices);
+        const T peakChange = (diag_initial_biomass > 0)
+                           ? ((finalBmax - diag_initial_biomass) / diag_initial_biomass * 100.0) : 0.0;
+        const T totalChange = (diag_initial_total_biomass > 0)
+                           ? ((finalTotal - diag_initial_total_biomass) / diag_initial_total_biomass * 100.0) : 0.0;
         pcout << "╠══════════════════════════════════════════════════════════════════════════╣\n";
         pcout << "║ BIOMASS RESULTS:                                                         ║\n";
-        pcout << "║   Initial max:      " << std::scientific << diag_initial_biomass << " kg/m³\n";
-        pcout << "║   Final max:        " << finalBmax << " kg/m³\n" << std::fixed;
-        pcout << "║   Growth:           " << totalGrowth << "%\n";
+        pcout << "║   Peak density:     " << std::scientific << diag_initial_biomass
+              << " -> " << finalBmax << " kg/m³  (" << std::fixed << peakChange
+              << "%, falls when biomass spreads)\n" << std::scientific;
+        pcout << "║   Total biomass:    " << diag_initial_total_biomass << " -> " << finalTotal
+              << "  (" << std::fixed << totalChange << "%, this is the growth)\n";
         pcout << "║   CA triggers:      " << diag_ca_triggers << "\n";
         pcout << "║   Redistributions:  " << diag_ca_redistributions << "\n";
     }
@@ -2409,19 +3200,104 @@ int main(int argc, char **argv) {
         if (useEquilibrium) pcout << "│   Equilibrium:       " << eqtime << " s\n";
         if (mmcfg.mm_count  > 0) pcout << "│   FBA:               " << fbatime << " s\n";
         if (mmcfg.srg_count > 0) pcout << "│   Surrogate:         " << srgtime << " s\n";
-        if (sym_count > 0)       pcout << "│   Symbolic:          " << symtime << " s\n";
-        if (gnn_count > 0)       pcout << "│   Graph network:     " << gnntime << " s\n";
+        if (mmcfg.sym_count > 0) pcout << "│   Symbolic law:      " << symtime << " s\n";
+        if (mmcfg.gnn_count > 0) pcout << "│   Graph network:     " << gnntime << " s\n";
         pcout << "└────────────────────────────────────────────────────────────────────────┘\n";
     }
 
     if (useEquilibrium) eqSolver.printStatistics();
 
-    /* [SYM][GNN] How often a fitted rate law or network was asked for a number outside the box it
-     * was fitted over.  Neither one fails out there -- it returns a confident answer -- so this
-     * count is the only thing standing between an extrapolated run and a result.  It is printed
-     * unconditionally, next to the equilibrium statistics, and warns above 5%. */
+    // [NEW] The scalar record's closing report: where summary.csv is, and whether any of the
+    //   conserved sums drifted.  Then the surrogate's own account of how often it had to clamp
+    //   to its training box -- both print nothing at all when the feature was off.
+    if (diag.active()) pcout << diag.finalReport();
+    //   The two learned paths report the same way: how many evaluations, and how many of them
+    //   were outside the range the law or the network was fitted over.  A run that clamped a
+    //   lot is a run whose results have to be looked at again, so it says so out loud.
+    /* [v1.3] These four reports are built from counters incremented inside data processors, so
+     * every one of them is PER RANK. pcout prints rank 0's, and a decomposition where rank 0
+     * happens to hold little biomass understates the clamp fractions or -- since each report
+     * returns the empty string at zero evaluations -- makes the report vanish altogether. Worse,
+     * the thermodynamic gate's two verdicts ("closed everywhere, every time" / "never closed
+     * anywhere") are global claims drawn from one rank's min and max. The dissolution counters
+     * below have been reduced since v1.2 for exactly this reason; these were missed. */
+    {
+        double se = (double) complab_sym::runtime().evaluations, sc = (double) complab_sym::runtime().clamped;
+        double ge = (double) complab_gnn::runtime().evaluations, gc = (double) complab_gnn::runtime().clamped;
+        double re = (double) complab_srg::runtime().evaluations, rc = (double) complab_srg::runtime().clamped;
+        double ce = (double) complab_srg::runtime().compiledEvaluations, cc = (double) complab_srg::runtime().compiledClamped;
+        double te = (double) complab_thermo::runtime().evaluations, tb = (double) complab_thermo::runtime().blocked;
+        double ts = complab_thermo::runtime().sumF;
+        double tmin = complab_thermo::runtime().minF, tmax = complab_thermo::runtime().maxF;
+        global::mpi().reduceAndBcast(se, MPI_SUM);  global::mpi().reduceAndBcast(sc, MPI_SUM);
+        global::mpi().reduceAndBcast(ge, MPI_SUM);  global::mpi().reduceAndBcast(gc, MPI_SUM);
+        global::mpi().reduceAndBcast(re, MPI_SUM);  global::mpi().reduceAndBcast(rc, MPI_SUM);
+        global::mpi().reduceAndBcast(ce, MPI_SUM);  global::mpi().reduceAndBcast(cc, MPI_SUM);
+        global::mpi().reduceAndBcast(te, MPI_SUM);  global::mpi().reduceAndBcast(tb, MPI_SUM);
+        global::mpi().reduceAndBcast(ts, MPI_SUM);
+        global::mpi().reduceAndBcast(tmin, MPI_MIN); global::mpi().reduceAndBcast(tmax, MPI_MAX);
+        complab_sym::runtime().evaluations = (long) se;  complab_sym::runtime().clamped = (long) sc;
+        complab_gnn::runtime().evaluations = (long) ge;  complab_gnn::runtime().clamped = (long) gc;
+        complab_srg::runtime().evaluations = (long) re;  complab_srg::runtime().clamped = (long) rc;
+        complab_srg::runtime().compiledEvaluations = (long) ce;
+        complab_srg::runtime().compiledClamped     = (long) cc;
+        complab_thermo::runtime().evaluations = (long) te;
+        complab_thermo::runtime().blocked     = (long) tb;
+        complab_thermo::runtime().sumF        = ts;
+        /* A rank that evaluated the gate nowhere leaves minF at its 1.0 sentinel and maxF at 0.0,
+         * which would otherwise widen the reduced range to [0,1] on every parallel run. */
+        if (te > 0) { complab_thermo::runtime().minF = tmin; complab_thermo::runtime().maxF = tmax; }
+    }
     pcout << complab_sym::runtimeReport();
     pcout << complab_gnn::runtimeReport();
+    pcout << complab_srg::runtimeReport();
+    pcout << complab_thermo::runtimeReport();
+
+    /* The dissolution counters are PER RANK, and the loss this report exists to expose happens at
+     * block interfaces -- so it is concentrated on exactly the ranks that are not rank 0, and a
+     * report printed from rank 0 alone would understate it or miss it entirely. Reduce first. */
+    {
+        double rel = dissolutionRuntime().released, gat = dissolutionRuntime().gathered;
+        double np  = (double) dissolutionRuntime().parked;
+        double nc  = (double) dissolutionRuntime().collected;
+        double ncl = (double) dissolutionRuntime().clamped;
+        global::mpi().reduceAndBcast(rel, MPI_SUM);
+        global::mpi().reduceAndBcast(gat, MPI_SUM);
+        global::mpi().reduceAndBcast(np,  MPI_SUM);
+        global::mpi().reduceAndBcast(nc,  MPI_SUM);
+        global::mpi().reduceAndBcast(ncl, MPI_SUM);
+        dissolutionRuntime().released  = rel;
+        dissolutionRuntime().gathered  = gat;
+        dissolutionRuntime().parked    = (long) (np  + 0.5);
+        dissolutionRuntime().collected = (long) (nc  + 0.5);
+        dissolutionRuntime().clamped   = (long) (ncl + 0.5);
+
+        /* The per-substrate totals and the mineral removed need the same treatment, and the
+         * per-substrate vector must be the same length on every rank before it is summed --
+         * a rank whose blocks hold no mineral at all never calls note() and would otherwise
+         * reduce a shorter vector. */
+        double mrem = dissolutionRuntime().mineralRemoved;
+        global::mpi().reduceAndBcast(mrem, MPI_SUM);
+        dissolutionRuntime().mineralRemoved = mrem;
+
+        double nSp = (double) dissolutionRuntime().perSpecies.size();
+        global::mpi().reduceAndBcast(nSp, MPI_MAX);
+        dissolutionRuntime().perSpecies.resize((size_t) (nSp + 0.5), 0.0);
+        for (size_t k = 0; k < dissolutionRuntime().perSpecies.size(); ++k) {
+            double v = dissolutionRuntime().perSpecies[k];
+            global::mpi().reduceAndBcast(v, MPI_SUM);
+            dissolutionRuntime().perSpecies[k] = v;
+        }
+    }
+    pcout << dissolutionRuntimeReport();
+
+    /* The upscaling record, if this run asked for one. Written from rank 0; every number in it is
+     * already a Palabos reduction and therefore global. */
+    if (icfg.upsEnabled) {
+        const std::string upath = str_outputDir + icfg.upsCsv;
+        complab_upscale::writeCsv(upath, global::mpi().isMainProcessor());
+        pcout << complab_upscale::report(upath);
+    }
 
     // Free allocated memory
     // Optional metabolic layer: delete the GLPK problems / release the cobra

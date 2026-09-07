@@ -83,6 +83,7 @@
 #define COMPLAB3D_PROCESSORS_FBA_HH
 
 #include "complab3d_metabolic.hh"
+#include "complab3d_thermo.hh"      /* the F_T gate; a no-op unless <thermodynamics> is on */
 
 /* By default the FBA processors run on the bulk AND the envelope, exactly like
  * run_kinetics does, which is guaranteed consistent but solves a linear program
@@ -152,6 +153,9 @@ public:
         std::vector< std::vector<T> > flux(bioNum, std::vector<T>(subsNum, T()));
         std::vector<T>      grate(bioNum, T());
         std::vector< std::vector<bool> > shared(bioNum, std::vector<bool>(subsNum, false));
+
+        std::vector<double> tconc;                 /* the gate's view of the same chemistry */
+        const bool gated = complab_thermo::enabled();
 
         for (plint iX = domain.x0; iX <= domain.x1; ++iX) {
             const plint absX = iX + absoluteOffset.x;
@@ -267,21 +271,117 @@ public:
                             lambda.assign((size_t) cfg->vec_nmets[gM], 0.0);
                             redcosts.assign((size_t) cfg->vec_nrxns[gM], 0.0);
 
-                            const int glpkerr = run_glpk(
-                                cfg->vec_lp[gM], cfg->method[gM], cfg->isMIP[gM],
-                                cfg->vec_nmets[gM], cfg->vec_nrxns[gM], cfg->lpsolver,
-                                cfg->sParam[gM], cfg->iParam[gM],
-                                xmin, fmin, status, location, lpLb, lpUb,
-                                lambda, redcosts, tsec, tmem);
+                            /* ------------------------------------------------------------ *
+                             *  THE SOLVE.
+                             *
+                             *  Three arrangements share this one call site, and which one runs
+                             *  is decided by configuration alone:
+                             *
+                             *    plain          no <multi_step>, no <cybernetic>.  One LP.
+                             *    multi-step     <multi_step> only.  run_glpk_lex walks the
+                             *                   lexicographic chain and returns the growth rate
+                             *                   from the first stage and the fluxes from the
+                             *                   last.  See complab3d_lexicographic.hh.
+                             *    cybernetic     <cybernetic>.  The block below solves the whole
+                             *                   chain once per carbon source and blends the
+                             *                   answers; each of those solves comes back through
+                             *                   here.  See complab3d_cybernetic.hh.
+                             *
+                             *  Keeping them on one call site is deliberate: the bound
+                             *  construction above, the budget repair below and the infeasibility
+                             *  accounting are shared, so the three arrangements cannot drift
+                             *  apart in the parts that are not about the objective.
+                             * ------------------------------------------------------------ */
+                            /* ---- how many growth options are there, and how is each weighted?
+                             *
+                             *  Without <cybernetic> there is exactly one option, weighted 1, and
+                             *  everything below collapses to a single solve with the bounds built
+                             *  above -- the same call, the same arguments, the same answer.
+                             *
+                             *  With <cybernetic> there is one option per carbon source.  Each is
+                             *  solved with the OTHER carbon sources shut, so the model has to
+                             *  make a living on that source alone, and the results are averaged
+                             *  with the cybernetic weights.  Shutting a source means forbidding
+                             *  its UPTAKE, not its release: an organism growing on lactate must
+                             *  still be free to excrete pyruvate, and that excretion is the whole
+                             *  reason the switch has something to switch to later.           */
+                            const complab_cyb::CyberneticPlan &cyb = cfg->cybPlan[gM];
+                            const bool cybOn = cyb.active();
 
-                            /* [FIX-3D] `glpkerr >= 0` accepted almost every failure, since
-                             * run_glpk returns positive GLPK codes on failure and only the
-                             * setup errors are negative.  Success is exactly 0.  The
-                             * legacy `status == 180` (LPX_OPT) is unreachable with any
-                             * modern GLPK and has been dropped. */
-                            const bool ok = (glpkerr == 0) && (status == GLP_OPT);
+                            std::vector<double> uw;
+                            if (cybOn && !complab_cyb::weights(cyb, avail, uw)) {
+                                /* no carbon at all in this voxel: nothing to solve, nothing to
+                                 * blend.  Zero rates are the right answer, not an infeasibility. */
+                                grate[iB] = T();
+                                for (plint iS = 0; iS < subsNum; ++iS) flux[iB][iS] = T();
+                                continue;
+                            }
 
-                            if (!ok) {
+                            const size_t nOpt = cybOn ? cyb.size() : 1;
+                            T   accGrate = T();
+                            bool anyOk   = false, anyFail = false;
+                            std::vector<T> accFlux(subsNum, T());
+
+                            /* the bounds as built above, kept intact so each option starts from
+                             * the same place rather than from the previous option's closures */
+                            const std::vector<double> baseLb = lpLb;
+
+                            for (size_t opt = 0; opt < nOpt; ++opt) {
+
+                                const double w = cybOn ? uw[opt] : 1.0;
+                                if (cybOn && w <= cyb.weightFloor) continue;   /* see the header:
+                                                                                * a near-zero
+                                                                                * weight is not
+                                                                                * worth an LP */
+
+                                lpLb = baseLb;
+                                if (cybOn) {
+                                    /* shut every other carbon source's uptake for this option */
+                                    const std::vector<int> &excl = cyb.sources[opt].exclusive;
+                                    for (size_t e = 0; e < excl.size(); ++e) {
+                                        const plint col = cfg->subsLoc[gM][excl[e]];
+                                        if (col < 0) continue;
+                                        for (size_t sl = 0; sl < location.size(); ++sl)
+                                            if (location[sl] == (int) col) {
+                                                if (lpLb[sl] < 0.0) lpLb[sl] = 0.0;
+                                                break;
+                                            }
+                                    }
+                                }
+
+                                double fOpt = 0.0, tOpt = 0.0, mOpt = 0.0;
+                                int    sOpt = 0;
+
+                                const int glpkerr = run_glpk_lex(
+                                    cfg->vec_lp[gM], cfg->method[gM], cfg->isMIP[gM],
+                                    cfg->vec_nmets[gM], cfg->vec_nrxns[gM], cfg->lpsolver,
+                                    cfg->sParam[gM], cfg->iParam[gM],
+                                    xmin, fOpt, sOpt, location, lpLb, lpUb,
+                                    lambda, redcosts, tOpt, mOpt,
+                                    cfg->lexPlan[gM], cfg->vec_c[gM],
+                                    cfg->vec_lb[gM], cfg->vec_ub[gM],
+                                    (int) cfg->vec_objLoc[gM]);
+                                tsec += tOpt; tmem = mOpt; status = sOpt; fmin = fOpt;
+
+                                /* [FIX-3D] `glpkerr >= 0` accepted almost every failure, since
+                                 * run_glpk returns positive GLPK codes on failure and only the
+                                 * setup errors are negative.  Success is exactly 0.  The
+                                 * legacy `status == 180` (LPX_OPT) is unreachable with any
+                                 * modern GLPK and has been dropped. */
+                                if (glpkerr != 0 || sOpt != GLP_OPT) { anyFail = true; continue; }
+
+                                anyOk = true;
+                                accGrate += (T) (w * fOpt);
+                                for (plint iS = 0; iS < subsNum; ++iS) {
+                                    const plint col = cfg->subsLoc[gM][iS];
+                                    if (col >= 0 && col < (plint) xmin.size())
+                                        accFlux[iS] += (T) (w * xmin[col]);
+                                }
+                            }
+
+                            lpLb = baseLb;      /* leave the vectors as the repair pass expects */
+
+                            if (!anyOk) {
                                 /* [FIX-3D] CompLaB 2D printed a decoded GLPK error and set
                                  * everything to zero, which turns an infeasible LP into silent
                                  * decay.  We do the same numerically -- there is no better local
@@ -291,15 +391,14 @@ public:
                                 for (plint iS = 0; iS < subsNum; ++iS) flux[iB][iS] = T();
                                 noteInfeasible(gM);
                             } else {
-                                grate[iB] = (T) fmin;
-                                plint c = 0;
-                                for (plint iS = 0; iS < subsNum; ++iS) {
-                                    const plint col = cfg->subsLoc[gM][iS];
-                                    flux[iB][iS] = (col >= 0 && col < (plint) xmin.size())
-                                                 ? (T) xmin[col] : T();
-                                    if (col >= 0) ++c;
-                                }
-                                (void) c;
+                                /* One option out of several failing is not a failed voxel: the
+                                 * organism simply cannot live on that source here, which is a
+                                 * physical statement, not a solver problem.  It is still counted,
+                                 * because a run in which it happens everywhere is telling you the
+                                 * medium is wrong. */
+                                if (anyFail) noteInfeasible(gM);
+                                grate[iB] = accGrate;
+                                for (plint iS = 0; iS < subsNum; ++iS) flux[iB][iS] = accFlux[iS];
                             }
                         }
 
@@ -325,6 +424,25 @@ public:
                             }
                         }
                         ++pass;
+                    }
+
+                    /* ---- the thermodynamic gate -----------------------------------------
+                     * Applied to the SOLVED fluxes, not to the uptake bounds.  A linear program
+                     * asked for a smaller bound would redistribute its whole flux distribution
+                     * and could hand back a different byproduct pattern, which is a modelling
+                     * change; scaling the solution keeps the metabolic answer and asks only what
+                     * fraction of it the local energy balance permits.  The budget above was
+                     * computed on the ungated fluxes, so scaling here can only reduce the draw
+                     * and cannot break it.  A no-op when <thermodynamics> is off. */
+                    if (gated) {
+                        complab_thermo::fillConc(avail, (int) subsNum, tconc);
+                        for (size_t k = 0; k < bLoc.size(); ++k) {
+                            const plint iB = bLoc[k];
+                            const double ft = complab_thermo::gateFor((int) globalId[iB], tconc);
+                            if (ft >= 1.0) continue;
+                            grate[iB] *= (T) ft;
+                            for (plint iS = 0; iS < subsNum; ++iS) flux[iB][iS] *= (T) ft;
+                        }
                     }
 
                     /* ==================================================== *
@@ -484,6 +602,13 @@ public:
         std::vector<T> bmass(bioNum, T()), dB(bioNum, T());
         std::vector< std::vector<T> > flux(bioNum, std::vector<T>(subsNum, T()));
         std::vector<plint> bLoc;
+        /* One row per organism, one column per substrate: which substrates this organism has been
+         * told to share on the repair pass. The GLPK path has carried this since the port; the
+         * COBRApy path now runs the same loop and needs the same marking. */
+        std::vector< std::vector<bool> > shared(bioNum, std::vector<bool>(subsNum, false));
+
+        std::vector<double> tconc;                 /* the gate's view of the same chemistry */
+        const bool gated = complab_thermo::enabled();
 
         for (plint iX = domain.x0; iX <= domain.x1; ++iX) {
             const plint absX = iX + absoluteOffset.x;
@@ -513,6 +638,9 @@ public:
                     }
                     for (plint iS = 0; iS < subsNum; ++iS)
                         avail[iS] = cfg->useTotals ? cfg->totals.total(conc, iS) : conc[iS];
+
+                    /* The gate reads the same vector the bounds were built from. */
+                    if (gated) complab_thermo::fillConc(avail, (int) subsNum, tconc);
                     for (plint iB = 0; iB < bioNum; ++iB) dB[iB] = T();
 
                     /* ---- marshal the argument vector -------------------- *
@@ -527,6 +655,38 @@ public:
                     std::vector< std::vector<int> > locRow(M);
                     std::vector< std::vector<double> > lbRow(M), ubRow(M);
 
+                    /* [FIX] THE REPAIR LOOP, which this path did not have.
+                     *
+                     * Every organism present is given an uptake bound built from the FULL local
+                     * supply, because each is solved without knowing the others are there. Two
+                     * organisms competing for one substrate therefore each claim all of it, and
+                     * the joint budget below then scales both back. That keeps the concentration
+                     * positive -- nothing here could ever go negative -- but it splits the
+                     * substrate by clamping rather than by re-optimising, and a linear program
+                     * given a smaller bound does not return a scaled version of its previous
+                     * answer: it can pick a different flux distribution altogether.
+                     *
+                     * The GLPK path has solved this since the port: mark the substrates that were
+                     * over-drawn, rebuild those bounds against the POOLED biomass, and solve
+                     * again, up to three passes. This is that loop, over the batched call.
+                     *
+                     * The cost is one extra Python round trip in the voxels where it fires, and
+                     * none anywhere else. With a single organism -- which is every shipped COBRApy
+                     * case -- it never fires at all, because one organism cannot over-draw a
+                     * budget built from what it can actually reach. */
+                    for (plint k = 0; k < M; ++k)
+                        std::fill(shared[bLoc[k]].begin(), shared[bLoc[k]].end(), false);
+                    bool needRepair = true;
+                    int  pass = 0;
+                    std::vector<double> grate;
+                    std::vector< std::vector<double> > packed;
+                    std::vector<int> status;
+                    int erck = 0;
+
+                    while (needRepair && pass < 3) {
+                    needRepair = false;
+                    for (plint k = 0; k < M; ++k) { locRow[k].clear(); lbRow[k].clear(); ubRow[k].clear(); }
+
                     for (plint k = 0; k < M; ++k) {
                         const plint iB = bLoc[k];
                         const plint gM = globalId[iB];
@@ -537,7 +697,15 @@ public:
                             const T mm = (vec2_Kc[gM][iS] + avail[iS] > T())
                                        ? avail[iS] / (vec2_Kc[gM][iS] + avail[iS]) : T();
                             T lo;
-                            if (cfg->vmax[gM][iS] > thrd) {
+                            if (shared[iB][iS]) {
+                                /* repair pass: this substrate was over-drawn, so share the
+                                 * supply with every other organism that wanted it. Same rule
+                                 * as the GLPK path, same function. */
+                                T pooled = T();
+                                for (plint k2 = 0; k2 < M; ++k2)
+                                    if (shared[bLoc[k2]][iS]) pooled += bmass[bLoc[k2]];
+                                lo = cfg->exhaustionFlux(avail[iS], pooled, gM, dt);
+                            } else if (cfg->vmax[gM][iS] > thrd) {
                                 lo = -cfg->vmax[gM][iS] * mm;                  // enzyme-limited
                             } else {
                                 lo = cfg->exhaustionFlux(avail[iS], bmass[iB], gM, dt) * mm;
@@ -565,21 +733,163 @@ public:
                         }
                     }
 
-                    std::vector<double> args;
-                    args.push_back((double) M);
-                    for (plint k = 0; k < M; ++k) args.push_back((double) locRow[k].size());
-                    for (plint k = 0; k < M; ++k) for (size_t j = 0; j < locRow[k].size(); ++j) args.push_back((double) locRow[k][j]);
-                    for (plint k = 0; k < M; ++k) for (size_t j = 0; j < lbRow [k].size(); ++j) args.push_back(lbRow[k][j]);
-                    for (plint k = 0; k < M; ++k) for (size_t j = 0; j < ubRow [k].size(); ++j) args.push_back(ubRow[k][j]);
-
                     /* only the models of the microbes actually present */
                     std::vector<PyObject*> here;
                     for (plint k = 0; k < M; ++k) here.push_back(cfg->vec_model[modelSlot[globalId[bLoc[k]]]]);
 
-                    std::vector<double> grate;
-                    std::vector< std::vector<double> > packed;
-                    std::vector<int> status;
-                    const int erck = optimize_cobrapy(pyFileName, args, here, grate, packed, status);
+                    /* ---- growth options, and the weight of each --------------------------
+                     *
+                     *  Mirror of the GLPK path, with one structural difference forced by the
+                     *  bridge: COBRApy is called once for ALL microbes present in the voxel, not
+                     *  once per microbe, because the round trip through the interpreter costs far
+                     *  more than the solve. So the loop is over OPTION INDEX, and every microbe
+                     *  contributes its own option of that index -- or nothing, if it has fewer
+                     *  options than the microbe with the most. One Python call per option index,
+                     *  not one per (microbe, option) pair.
+                     *
+                     *  Without <cybernetic> anywhere in the voxel this runs exactly once with
+                     *  weight 1 and the bounds built above, which is the original single call. */
+                    std::vector< std::vector<double> > uwM((size_t) M);
+                    size_t nOptMax = 1;
+                    for (plint k = 0; k < M; ++k) {
+                        const plint gM = globalId[bLoc[k]];
+                        const complab_cyb::CyberneticPlan &cyb = cfg->cybPlan[gM];
+                        if (!cyb.active()) continue;
+                        if (!complab_cyb::weights(cyb, avail, uwM[(size_t) k])) {
+                            uwM[(size_t) k].assign(cyb.size(), 0.0);   /* no carbon: contributes
+                                                                        * nothing, and must not
+                                                                        * fall back to weight 1 */
+                        }
+                        if (cyb.size() > nOptMax) nOptMax = cyb.size();
+                    }
+
+                    std::vector<T>                gAcc((size_t) M, T());
+                    std::vector< std::vector<T> > pAcc((size_t) M);
+                    std::vector<int>              sAcc((size_t) M, 0);
+                    bool anyCall = false;
+
+                    for (size_t opt = 0; opt < nOptMax; ++opt) {
+
+                        /* which microbes take part in this option index, and with what weight */
+                        std::vector<double> wRow((size_t) M, 0.0);
+                        bool anyThisOpt = false;
+                        for (plint k = 0; k < M; ++k) {
+                            const plint gM = globalId[bLoc[k]];
+                            const complab_cyb::CyberneticPlan &cyb = cfg->cybPlan[gM];
+                            if (cyb.active()) {
+                                if (opt < uwM[(size_t) k].size() &&
+                                    uwM[(size_t) k][opt] > cyb.weightFloor) {
+                                    wRow[(size_t) k] = uwM[(size_t) k][opt];
+                                    anyThisOpt = true;
+                                }
+                            } else if (opt == 0) {
+                                wRow[(size_t) k] = 1.0;
+                                anyThisOpt = true;
+                            }
+                        }
+                        if (!anyThisOpt) continue;
+
+                        /* Bounds for this option: the row built above, with the OTHER carbon
+                         * sources' uptake shut for any microbe that is switching. Shutting means
+                         * lb -> 0: no uptake, but release is untouched, because an organism
+                         * growing on lactate must still be free to excrete the pyruvate that a
+                         * later option will consume. */
+                        std::vector< std::vector<double> > lbOpt = lbRow;
+                        for (plint k = 0; k < M; ++k) {
+                            if (wRow[(size_t) k] <= 0.0) continue;
+                            const plint gM = globalId[bLoc[k]];
+                            const complab_cyb::CyberneticPlan &cyb = cfg->cybPlan[gM];
+                            if (!cyb.active() || opt >= cyb.size()) continue;
+                            const std::vector<int> &excl = cyb.sources[opt].exclusive;
+                            for (size_t e = 0; e < excl.size(); ++e) {
+                                const plint col = cfg->subsLoc[gM][excl[e]];
+                                if (col < 0) continue;
+                                for (size_t sl = 0; sl < locRow[k].size(); ++sl)
+                                    if (locRow[k][sl] == (int) col) {
+                                        if (lbOpt[k][sl] < 0.0) lbOpt[k][sl] = 0.0;
+                                        break;
+                                    }
+                            }
+                        }
+
+                        std::vector<double> args;
+                        args.push_back((double) M);
+                        for (plint k = 0; k < M; ++k) args.push_back((double) locRow[k].size());
+                        for (plint k = 0; k < M; ++k) for (size_t j = 0; j < locRow[k].size(); ++j) args.push_back((double) locRow[k][j]);
+                        for (plint k = 0; k < M; ++k) for (size_t j = 0; j < lbOpt [k].size(); ++j) args.push_back(lbOpt[k][j]);
+                        for (plint k = 0; k < M; ++k) for (size_t j = 0; j < ubRow [k].size(); ++j) args.push_back(ubRow[k][j]);
+
+                        grate.clear(); packed.clear(); status.clear();
+                        const int e1 = optimize_cobrapy(pyFileName, args, here, grate, packed, status);
+                        if (!anyCall) { erck = e1; anyCall = true; }
+                        if (e1 != 0) { erck = e1; continue; }
+
+                        for (plint k = 0; k < M; ++k) {
+                            const double w = wRow[(size_t) k];
+                            if (w <= 0.0) continue;
+                            if (k >= (plint) status.size() || status[k] == 0) continue;   /* this
+                                                                * organism could not live on this
+                                                                * source here -- a physical
+                                                                * statement, not a solver failure */
+                            sAcc[(size_t) k] = status[k];
+                            if (k < (plint) grate.size()) gAcc[(size_t) k] += (T) (w * grate[k]);
+                            if (k < (plint) packed.size()) {
+                                if (pAcc[(size_t) k].size() < packed[k].size())
+                                    pAcc[(size_t) k].resize(packed[k].size(), T());
+                                for (size_t j = 0; j < packed[k].size(); ++j)
+                                    pAcc[(size_t) k][j] += (T) (w * packed[k][j]);
+                            }
+                        }
+                    }
+
+                    /* Hand the blended answer back under the names the rest of this function
+                     * already uses, so the budget check, the repair pass and the unpacking below
+                     * are untouched by any of the above. */
+                    grate.assign(gAcc.begin(), gAcc.end());
+                    packed = pAcc;
+                    status = sAcc;
+
+                    /* ---- budget check, and mark what to repair ----------------------------
+                     * Identical in rule to the GLPK path: work out what every organism together
+                     * would draw, and where that exceeds the supply, mark the substrate for every
+                     * organism that asked for it and solve again against the pooled biomass.
+                     *
+                     * The fluxes are unpacked twice as a result -- once here to test the budget,
+                     * once below to apply it -- which is a few multiplications against an 800 us
+                     * Python round trip, and keeps the repair decision beside the loop it
+                     * controls rather than threaded through the code that follows. */
+                    if (M > 1) {
+                        for (plint iS = 0; iS < subsNum; ++iS) {
+                            if (cfg->fix_concentration[iS] || cfg->fix_lower_bounds[iS]) continue;
+                            T draw = T();
+                            for (plint k = 0; k < M; ++k) {
+                                const plint iB = bLoc[k];
+                                const plint gM = globalId[iB];
+                                if (!(erck == 0 && k < (plint) status.size() && status[k] != 0)) continue;
+                                std::vector<int> row(subsNum);
+                                for (plint j = 0; j < subsNum; ++j) row[j] = (int) cfg->subsLoc[gM][j];
+                                std::vector<T> full(subsNum, T());
+                                expandFluxToSubstrates(packed[k], row, subsNum, full);
+                                draw += cfg->fluxToDeltaC(full[iS], bmass[iB], gM, dt);
+                            }
+                            if (draw + avail[iS] < -thrd) {
+                                bool any = false;
+                                for (plint k = 0; k < M; ++k) {
+                                    const plint iB = bLoc[k];
+                                    const plint gM = globalId[iB];
+                                    if (!(erck == 0 && k < (plint) status.size() && status[k] != 0)) continue;
+                                    std::vector<int> row(subsNum);
+                                    for (plint j = 0; j < subsNum; ++j) row[j] = (int) cfg->subsLoc[gM][j];
+                                    std::vector<T> full(subsNum, T());
+                                    expandFluxToSubstrates(packed[k], row, subsNum, full);
+                                    if (full[iS] < -thrd) { shared[iB][iS] = true; any = true; }
+                                }
+                                if (any) needRepair = true;
+                            }
+                        }
+                    }
+                    ++pass;
+                    }   /* while (needRepair && pass < 3) */
 
                     /* Unpack every microbe's answer FIRST, then apply the substrate
                      * budget across all of them together.
@@ -612,6 +922,22 @@ public:
                             noteInfeasible(gM);
                         }
 
+                        /* ---- the thermodynamic gate -------------------------------------
+                         * Applied to the SOLVED fluxes, not to the uptake bounds.  A linear
+                         * program asked for a smaller bound would redistribute its whole flux
+                         * distribution and could hand back a different byproduct pattern, which
+                         * is a modelling change; scaling the solution keeps the metabolic answer
+                         * and asks only what fraction of it the local energy balance permits.
+                         * The joint budget below therefore sees the gated fluxes.  A no-op when
+                         * <thermodynamics> is off. */
+                        if (gated) {
+                            const double ft = complab_thermo::gateFor((int) gM, tconc);
+                            if (ft < 1.0) {
+                                mu *= (T) ft;
+                                for (plint iS = 0; iS < subsNum; ++iS) flux[iB][iS] *= (T) ft;
+                            }
+                        }
+
                         dB[iB] = (std::fabs(mu) < thrd)
                                ? cfg->decayToDeltaB(vec1_mu[gM], bmass[iB], dt)   // [FIX-3D] per second
                                : cfg->growthToDeltaB(mu, bmass[iB], dt);
@@ -634,11 +960,31 @@ public:
                          * its own loop iteration, which knew nothing about the first.  A
                          * substrate could go negative even though every individual clamp was
                          * satisfied.  headroom sees the running dC. */
-                        const T headroom = avail[iS] + (cfg->useTotals ? T() : dC[iS]);
+                        /* [v1.3] The ternary was inverted: it added the running dC in the `free`
+                         * branch, where dC[iS] is provably still zero (dC is cleared per voxel and
+                         * each iS is visited once, so this loop is its only writer), and added
+                         * nothing in the `total` branch, which is the one the comment above is
+                         * about -- drawDown writes dC at CARRIER indices of an earlier component,
+                         * which is exactly the second debit described. As written the guard
+                         * reduced to the pristine avail[iS] it says it must not use. */
+                        const T headroom = avail[iS] + (cfg->useTotals ? dC[iS] : T());
                         if (draw + headroom < T()) draw = -headroom;
-                        if (draw > T()) draw = T();          // consumption only, never a spurious source
-                        if (cfg->useTotals) cfg->totals.drawDown(conc, iS, -draw, dC);
-                        else                dC[iS] += draw;
+                        /* [FIX] `if (draw > T()) draw = T();` used to stand here, and it was the
+                         * one substantive difference between this path and the GLPK one.
+                         *
+                         * It discards every net RELEASE, so a COBRApy organism could consume but
+                         * never excrete: an acetate-secreting E. coli produced no acetate, an AOM
+                         * organism produced no sulfide, and the two back ends disagreed on any
+                         * model that excretes -- while agreeing on uptake and growth, which is
+                         * exactly the pattern that makes a difference look like a rounding
+                         * question rather than a missing product.
+                         *
+                         * The GLPK path has no such line and never did. The line was a defence
+                         * against a spurious source that the positivity clamp above already
+                         * covers: a draw is limited by what the voxel holds, and a release is a
+                         * flux the linear program returned, from mass the model balanced. */
+                        if (cfg->useTotals && draw < T()) cfg->totals.drawDown(conc, iS, -draw, dC);
+                        else                             dC[iS] += draw;
                     }
 
                     for (plint iS = 0; iS < subsNum; ++iS) {

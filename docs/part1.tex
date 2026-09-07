@@ -235,7 +235,7 @@ takes about a second and should end with:
 Then run them:
 
 \begin{lstlisting}[style=sh]
-./examples/runAllExamples.sh .
+./scripts/setup_case.sh 01_flow_only run/mycase && cd run/mycase && ./pipeline.sh
 \end{lstlisting}
 
 \section{When the build fails}
@@ -279,7 +279,7 @@ mkdir -p run01 && cd run01
 cp ../examples/01_flow_only/CompLaB.xml .
 cp -r ../examples/01_flow_only/input .
 mkdir -p output
-../build/complab
+../complab
 \end{lstlisting}
 
 \warn{Why the two \file{.hh} files get copied.}{CompLaB compiles its rate laws

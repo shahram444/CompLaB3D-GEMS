@@ -16,7 +16,7 @@ two binaries.
 
 This is the single most surprising thing about the code, and it is why every
 example folder carries its own pair of headers and why
-\file{runAllExamples.sh} rebuilds between cases.
+each case's \file{pipeline.sh} rebuilds before it runs.
 \end{cbwarn}
 
 \section{The two hooks}
@@ -127,8 +127,17 @@ balance half is worth writing for your own chemistry, once.
 \label{ch:trainsurrogate}
 
 The network shipped in \file{surrogateModel.hh} encodes one organism, two
-substrates, one range. For anything else you fit your own. Everything for that
-is in \file{surrogate\_training/}.
+substrates, one range. For anything else you fit your own.
+
+\note{Read chapter \ref{ch:surrogateblock} first.}{Since the \tg{surrogate}
+block exists, the run can fit a network itself, from the XML, with no scripts
+and no rebuild. That is the shorter path and it is the one to try first. This
+chapter is the offline route, which is still the right one when you want to
+compare architectures, train on a different machine from the one you will run
+on, or keep the training data as a separate artefact. Everything for it is in
+\file{surrogate\_training/}, and the two routes produce interchangeable
+results: \file{trainSurrogate.py} can write a \file{.srg} file the solver
+loads, and \file{inspectSurrogate.py} reads networks from either.}
 
 \section{The three steps}
 
@@ -213,6 +222,12 @@ and checks them. It should report agreement to about $10^{-13}$ relative.
 \end{cbnote}
 
 \section{Installing it}
+
+\note{The short way.}{Write the fit as a \file{.srg} file and name it in
+\tg{weights\_file}. Nothing is compiled in, nothing is rebuilt, and the
+training range travels with the weights so the solver can refuse to
+extrapolate. The rest of this section is the older route, which bakes the
+weights into the executable.}
 
 The generated header is namespaced, so several organisms coexist:
 

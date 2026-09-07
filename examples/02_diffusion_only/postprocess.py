@@ -35,6 +35,26 @@ LOGDIR = "output"
 BOUNDARY = {'tracer': 'Dirichlet / Dirichlet'}
 
 
+
+def conserved(row, name):
+    """What the lattice actually holds, not just what the dynamics will admit to.
+
+    <name>_total is computed with Palabos's computeDensity(), which asks each cell's
+    dynamics. BounceBack and NoDynamics both answer from a stored number and ignore
+    the populations they are holding, and the reported box excludes the two boundary
+    planes at x = 0 and x = nx-1. So three kinds of mass are missing from _total:
+    whatever is in flight at a wall, whatever is resting inside a grain, and
+    whatever is sitting in a closed boundary plane.
+
+    <name>_held is exactly that difference, measured from the populations. Adding it
+    back gives the conserved quantity. In a fully closed box with no reaction the sum
+    below is constant to 4e-13; _total alone drifts by 7%.
+
+    Older summary files have no _held column; those fall back to _total.
+    """
+    return row.get(name + "_total", 0.0) + row.get(name + "_held", 0.0)
+
+
 def read_summary(path):
     """The CSV the <diagnostics> block writes. Comment lines start with #."""
     if not os.path.exists(path):
@@ -92,8 +112,8 @@ def main():
               % ("field", "first total", "last total", "change", "boundary"))
         print("-" * 78)
         for n in names:
-            a = rows[0].get(n + "_total", 0.0)
-            b = rows[-1].get(n + "_total", 0.0)
+            a = conserved(rows[0], n)
+            b = conserved(rows[-1], n)
             print("%-14s %14.6g %14.6g %14.6g   %s"
                   % (n, a, b, b - a, BOUNDARY.get(n, "biomass")))
         print()
@@ -101,8 +121,12 @@ def main():
     negative = [n for n in names if min(series(rows, n + "_min") or [0.0]) < 0.0]
     if negative:
         print("NEGATIVE VALUES in: %s" % ", ".join(negative))
-        print("The mass-budget clamp makes this impossible by construction, so this is")
-        print("a solver bug rather than a configuration problem. Worth reporting.")
+        print("[v1.3] The compiled kinetics paths apply each reaction increment as")
+        print("computed: there is no positivity clamp on them, so a time step or a rate")
+        print("constant large enough to consume more than a voxel holds will drive it")
+        print("negative. Earlier text here called this impossible by construction and a")
+        print("solver bug worth reporting; it is normally a configuration problem. Reduce")
+        print("<ade_dt> or the rate constant, then run again.")
         print()
 
     print("BALANCE CHECK -- none is possible for this case.")
@@ -131,7 +155,7 @@ def main():
                 print()
     else:
         print("No .log file in %s/. Capture it so the run stays reproducible:" % LOGDIR)
-        print("   ./build/complab CompLaB.xml 2>&1 | tee output/run.log")
+        print("   ./complab CompLaB.xml 2>&1 | tee output/run.log")
         print()
 
     print("-" * 78)

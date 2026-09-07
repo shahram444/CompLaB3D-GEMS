@@ -105,23 +105,58 @@ def read_case(folder):
     return info
 
 
-def scan(outdir):
-    """Group the snapshots by field and iteration.
+def scan(outdir, info=None):
+    """Group the snapshots by field name and iteration.
 
-    Filenames look like  subsLattice0_0000500.vti  --  a stem, an optional
-    field index, and a zero-padded iteration."""
-    pat = re.compile(r"^(?P<stem>[A-Za-z_]+?)(?P<idx>\d*)_(?P<it>\d+)\.vti$")
+    [v1.3] This used to split every filename into a stem and a trailing field
+    INDEX, on the belief that the solver writes subsLattice0_0000500.vti. It does
+    not, and never did: complab.cpp names each snapshot after the field itself,
+
+        writeAdvVTI(vec_substr_lattices[iS], iT, vec_subs_names[iS] + "_");
+
+    so a run of example 03 produces A_0000500.vti. The old regex parsed that as
+    stem "A", index 0, and label() then fell through every branch to "%s%d" and
+    returned "A0" -- so summary.csv carried A0_total where the docstring, the
+    --conserve help text and every case README all promise A_total. --conserve
+    "A+C" therefore looked up columns that did not exist and reported
+    SKIPPED: no column, with exit status 0: a mass-balance check that silently
+    checked nothing. Names ending in a digit were mangled differently again
+    (HCO3 round-tripped by luck, HS became HS0), so it was not even consistently
+    wrong.
+
+    The name is now taken whole from the filename and matched against the fields
+    CompLaB.xml declares. The index form is still recognised, so output written
+    by an older build still reads."""
+    known = set()
+    if info:
+        known = set(info["subs"]) | set(info["bio"])
+    pat_named = re.compile(r"^(?P<name>.+)_(?P<it>\d{4,})\.vti$")
+    pat_idx = re.compile(r"^(?P<stem>[A-Za-z_]+?)(?P<idx>\d*)_(?P<it>\d+)\.vti$")
     found = {}
     for fn in sorted(os.listdir(outdir)):
-        m = pat.match(fn)
+        m = pat_named.match(fn)
         if not m:
             continue
-        key = (m.group("stem"), int(m.group("idx") or 0))
-        found.setdefault(key, {})[int(m.group("it"))] = os.path.join(outdir, fn)
+        name, it = m.group("name"), int(m.group("it"))
+        if name in known or name in ("mask", "maskLattice", "ageLattice", "nsLattice"):
+            key = (name, -1)                     # -1: the name is already final
+        else:
+            mi = pat_idx.match(fn)
+            key = ((mi.group("stem"), int(mi.group("idx") or 0)) if mi
+                   else (name, -1))
+        found.setdefault(key, {})[it] = os.path.join(outdir, fn)
     return found
 
 
 def label(stem, idx, info):
+    if idx == -1:                                # already the field's own name
+        if stem in ("maskLattice", "mask"):
+            return "mask"
+        if stem == "nsLattice":
+            return "flow"
+        if stem == "ageLattice":
+            return "age"
+        return stem
     if stem.startswith("subs") and idx < len(info["subs"]):
         return info["subs"][idx]
     if stem.startswith("bio") and idx < len(info["bio"]):
@@ -158,7 +193,7 @@ def main():
                  "CompLaB.xml and output/." % outdir)
 
     info = read_case(folder)
-    groups = scan(outdir)
+    groups = scan(outdir, info)
     if not groups:
         sys.exit("ERROR: no .vti files in %s.\n"
                  "       Either the run wrote nothing (check "

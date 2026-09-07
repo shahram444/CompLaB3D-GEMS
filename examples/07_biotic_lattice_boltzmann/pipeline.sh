@@ -2,7 +2,14 @@
 #
 # 07_biotic_lattice_boltzmann  --  THE WHOLE PIPELINE
 #
-# The same case again, with the population planktonic.
+# The same case again, with the biomass moved by the lattice Boltzmann solver
+# instead of the cellular automaton of 05 or the finite difference of 06.
+#
+# [v1.3] Earlier text here said "with the population planktonic". That is wrong:
+# CompLaB.xml gives this microbe an entry in <material_numbers>, which makes it an
+# ATTACHED BIOFILM, meaning a population seeded on its own material number. What
+# changes between 05, 06 and 07 is the biomass solver, not whether the population
+# is attached.
 #
 # Everything this case needs is in this directory. Run it from an assembled
 # case:
@@ -45,7 +52,7 @@ echo "== running. READ THE START-UP LINES: the geometry, the enabled features"
 echo "   and each organism's rate path are echoed before the first step. If any"
 echo "   of it is not what you meant, stop now rather than in a fortnight."
 mkdir -p output
-./build/complab CompLaB.xml 2>&1 | tee output/run.log
+./complab CompLaB.xml 2>&1 | tee output/run.log
 
 # ---------------------------------------------------------------------------
 # 4. POST-PROCESS  ->  a verdict on the run

@@ -85,6 +85,37 @@ struct Network {
     int nS, nR, width, rounds;
     bool hasGrowth;
 
+    /* ---- HOW THE RATES ARE READ OFF THE NETWORK ------------------------------------------------
+     *
+     * SPECIES (the original, and what a file with no `readout` line means).  The readout is applied
+     * to each SPECIES node and gives that species its rate directly.  The stoichiometric matrix is
+     * used as the edge weights of the message passing, so it shapes the answer -- but nothing in
+     * the arithmetic forces the returned rates into stoichiometric ratio, and measured on the
+     * shipped AOM example they are not: HS produced over CH4 consumed ran between 0.76 and 1.11
+     * where the structure implies exactly 1.
+     *
+     * EXTENT.  The readout is applied to each REACTION node instead and gives one extent per
+     * reaction, and the species rates are then formed as
+     *
+     *     r_i  =  SUM_r  S(i,r) * xi_r
+     *
+     * which is stoichiometrically exact by construction, at every point of the input space
+     * including the ones nobody checked.  It also uses fewer numbers: nR extents rather than nS
+     * independently scaled outputs.
+     *
+     * What it costs is generality.  A rate vector that does NOT lie in the column space of S cannot
+     * be represented at all -- which is the point, since such a vector is not a set of reaction
+     * rates.  The trainer projects the training data onto that space and reports how much of it did
+     * not fit, so a data set that is inconsistent with the declared stoichiometry says so rather
+     * than being approximated. */
+    enum Readout { SPECIES = 0, EXTENT = 1 };
+    int readout;
+
+    /* EXTENT mode only: one scale per reaction, turning the network's O(1) output into an extent in
+     * the file's units.  A pure scale with no offset, because an offset does not commute with the
+     * sum above and would break the exactness this mode exists for. */
+    std::vector<double> xiScale;
+
     std::vector<std::string> species, reactions;
     Mat  S;                              /* nS x nR stoichiometry, also the edge weights */
     std::vector<double> da;              /* per reaction */
@@ -103,7 +134,7 @@ struct Network {
     double unitScale;
     std::string unitName, provenance;
 
-    Network() : nS(0), nR(0), width(0), rounds(0), hasGrowth(false),
+    Network() : nS(0), nR(0), width(0), rounds(0), hasGrowth(false), readout(SPECIES),
                 xYmin(-1.0), yYmin(-1.0), unitScale(1.0), unitName("per_second") {}
 
     /* How many numbers come back from eval(): one per species, plus growth if the file says so. */
@@ -116,6 +147,12 @@ struct Network {
      * touches, and would invite a reader to assume row i belongs to species i.  It does not. */
     int nHead() const { return hasGrowth ? 2 : 1; }
 
+    /* How many yoffset/ygain entries the file must carry.  In SPECIES mode the readout produces one
+     * independently scaled number per species, plus growth.  In EXTENT mode the species rates are
+     * not scaled at all -- xiScale does that job, per reaction -- so the only entry left is growth,
+     * and a file with no growth output needs none. */
+    int nYScale() const { return (readout == EXTENT) ? (hasGrowth ? 1 : 0) : nOut(); }
+
     bool valid() const {
         if (nS <= 0 || nR <= 0 || width <= 0 || rounds <= 0) return false;
         if ((int) layer.size() != rounds) return false;
@@ -126,7 +163,8 @@ struct Network {
         if (Wout.rows != nHead() || Wout.cols != width) return false;
         if ((int) bOut.size() != nHead()) return false;
         if ((int) xOffset.size() != nS || (int) xGain.size() != nS) return false;
-        if ((int) yOffset.size() != nOut() || (int) yGain.size() != nOut()) return false;
+        if ((int) yOffset.size() != nYScale() || (int) yGain.size() != nYScale()) return false;
+        if (readout == EXTENT && (int) xiScale.size() != nR) return false;
         if ((int) trainMin.size() != nS || (int) trainMax.size() != nS) return false;
         /* Every layer array must be fully present.  A keyword that never appeared leaves its
          * vector empty, and an empty bS[] would be read past the end in the first round. */
@@ -184,17 +222,22 @@ struct Network {
         std::vector<double> &hS = sc.hS;
         hS.assign((size_t) nS * W, 0.0);
 
-        /* encode: each species node starts from its own scaled concentration */
+        /* encode: each species node starts from its own scaled concentration.
+         * [FIX] One count per EVALUATION that clamped anything, not one per species:
+         * runtimeReport() divides this by the evaluation count, so counting species made a
+         * four-species network able to report 400% of its evaluations as out of range. */
+        bool anyClamped = false;
         for (int i = 0; i < nS; ++i) {
             double c = (i < (int) conc.size()) ? conc[(size_t) i] : 0.0;
             if (clamp) {
-                if (c < trainMin[(size_t) i]) { c = trainMin[(size_t) i]; if (clampCount) ++*clampCount; }
-                else if (c > trainMax[(size_t) i]) { c = trainMax[(size_t) i]; if (clampCount) ++*clampCount; }
+                if (c < trainMin[(size_t) i])      { c = trainMin[(size_t) i]; anyClamped = true; }
+                else if (c > trainMax[(size_t) i]) { c = trainMax[(size_t) i]; anyClamped = true; }
             }
             const double x = (c - xOffset[(size_t) i]) * xGain[(size_t) i] + xYmin;
             for (size_t h = 0; h < W; ++h)
                 hS[(size_t) i * W + h] = std::tanh(x * Wenc((int) h, 0) + bEnc[h]);
         }
+        if (anyClamped && clampCount) ++*clampCount;
 
         std::vector<double> &mR = sc.mR; std::vector<double> &hR = sc.hR;
         std::vector<double> &mS = sc.mS; std::vector<double> &hNew = sc.hNew;
@@ -241,24 +284,47 @@ struct Network {
             hS.swap(hNew);
         }
 
-        /* read out: row 0 of Wout gives every species its rate from its own node */
-        for (int i = 0; i < nS; ++i) {
-            double y = bOut[0];
-            for (size_t h = 0; h < W; ++h) y += Wout(0, (int) h) * hS[(size_t) i * W + h];
-            double v = (y - yYmin) / yGain[(size_t) i] + yOffset[(size_t) i];
-            if (v != v) v = 0.0;
-            out[(size_t) i] = v * unitScale;
+        if (readout == EXTENT) {
+            /* One extent per reaction, off that reaction's node, then the species rates as
+             * r_i = SUM_r S(i,r) xi_r.  hR still holds the last round's reaction states.
+             *
+             * The ratio between two species is therefore whatever S says it is, at every input,
+             * and not something the fit has to be trusted to have got approximately right. */
+            std::vector<double> &xi = sc.mR;         /* mR is finished with; reuse it */
+            for (int r = 0; r < nR; ++r) {
+                double y = bOut[0];
+                for (size_t h = 0; h < W; ++h) y += Wout(0, (int) h) * hR[(size_t) r * W + h];
+                if (y != y) y = 0.0;
+                xi[(size_t) r] = y * xiScale[(size_t) r];
+            }
+            for (int i = 0; i < nS; ++i) {
+                double v = 0.0;
+                for (int r = 0; r < nR; ++r) v += S(i, r) * xi[(size_t) r];
+                out[(size_t) i] = v * unitScale;
+            }
+        } else {
+            /* read out: row 0 of Wout gives every species its rate from its own node */
+            for (int i = 0; i < nS; ++i) {
+                double y = bOut[0];
+                for (size_t h = 0; h < W; ++h) y += Wout(0, (int) h) * hS[(size_t) i * W + h];
+                double v = (y - yYmin) / yGain[(size_t) i] + yOffset[(size_t) i];
+                if (v != v) v = 0.0;
+                out[(size_t) i] = v * unitScale;
+            }
         }
         if (hasGrowth) {
             /* growth reads the mean species node, so it sees the whole network rather than one
-             * species; this is what the trainer fits. */
+             * species; this is what the trainer fits.  It is not a species rate and no
+             * stoichiometry constrains it, so it keeps its own offset and gain in both modes --
+             * the last entry in SPECIES mode, the only one in EXTENT mode. */
+            const size_t gs = (readout == EXTENT) ? 0 : (size_t) nS;
             double y = bOut[1];
             for (size_t h = 0; h < W; ++h) {
                 double m = 0.0;
                 for (int i = 0; i < nS; ++i) m += hS[(size_t) i * W + h];
                 y += Wout(1, (int) h) * (m / (double) nS);
             }
-            double v = (y - yYmin) / yGain[(size_t) nS] + yOffset[(size_t) nS];
+            double v = (y - yYmin) / yGain[gs] + yOffset[gs];
             if (v != v) v = 0.0;
             out[(size_t) nS] = v * unitScale;
         }
@@ -362,6 +428,19 @@ inline bool load(Network &N, const std::string &path, std::string *err = 0)
         if (k == "rounds") { if (std::fscanf(f, "%d", &N.rounds) != 1) break; continue; }
         if (k == "width")  { if (std::fscanf(f, "%d", &N.width)  != 1) break; continue; }
         if (k == "growth") { int g; if (std::fscanf(f, "%d", &g) != 1) break; N.hasGrowth = (g != 0); continue; }
+        if (k == "readout") {
+            if (std::fscanf(f, "%127s", key) != 1) break;
+            std::string m(key);
+            for (size_t i = 0; i < m.size(); ++i) m[i] = (char) std::tolower((unsigned char) m[i]);
+            if      (m == "species") N.readout = Network::SPECIES;
+            else if (m == "extent")  N.readout = Network::EXTENT;
+            else {
+                std::fclose(f);
+                if (err) *err = "'readout' must be species or extent, not '" + m + "'";
+                return false;
+            }
+            continue;
+        }
         if (k == "stoich") {
             if (std::fscanf(f, "%d %d", &N.nS, &N.nR) != 2) break;
             if (!detail::readMat(f, N.S, N.nS, N.nR)) break;
@@ -378,8 +457,12 @@ inline bool load(Network &N, const std::string &path, std::string *err = 0)
         else if (k == "xoffset")  { if (!detail::readN(f, N.xOffset,  (size_t) N.nS)) break; }
         else if (k == "xgain")    { if (!detail::readN(f, N.xGain,    (size_t) N.nS)) break; }
         else if (k == "xymin")    { if (std::fscanf(f, "%lf", &N.xYmin) != 1) break; }
-        else if (k == "yoffset")  { if (!detail::readN(f, N.yOffset,  (size_t) N.nOut())) break; }
-        else if (k == "ygain")    { if (!detail::readN(f, N.yGain,    (size_t) N.nOut())) break; }
+        /* nYScale() is nOut() in SPECIES mode and just the growth entry in EXTENT mode, so a file
+         * written for one mode and labelled the other fails here rather than reading the wrong
+         * count of numbers and shifting every key after it. */
+        else if (k == "yoffset")  { if (!detail::readN(f, N.yOffset,  (size_t) N.nYScale())) break; }
+        else if (k == "ygain")    { if (!detail::readN(f, N.yGain,    (size_t) N.nYScale())) break; }
+        else if (k == "xiscale")  { if (!detail::readN(f, N.xiScale,  (size_t) N.nR)) break; }
         else if (k == "yymin")    { if (std::fscanf(f, "%lf", &N.yYmin) != 1) break; }
         else if (k == "trainmin") { if (!detail::readN(f, N.trainMin, (size_t) N.nS)) break; }
         else if (k == "trainmax") { if (!detail::readN(f, N.trainMax, (size_t) N.nS)) break; }
@@ -436,6 +519,16 @@ inline std::string describe(const Network &N, const std::string &path)
     s += "\n";
     s += "  [GNN]   outputs: a rate per species";
     s += N.hasGrowth ? ", plus growth\n" : "\n";
+    if (N.readout == Network::EXTENT)
+        s += "  [GNN]   readout: EXTENT -- one extent per reaction, species rates formed as\n"
+             "  [GNN]            r_i = SUM_r S(i,r) xi_r, so the stoichiometric ratio is exact\n"
+             "  [GNN]            at every input rather than approximately fitted.\n";
+    else
+        s += "  [GNN]   readout: SPECIES -- each species reads its own rate off its own node.\n"
+             "  [GNN]            The stoichiometry shapes the message passing but does NOT\n"
+             "  [GNN]            constrain the answer, so the returned rates are only\n"
+             "  [GNN]            approximately in ratio. Retrain with --readout extent to make\n"
+             "  [GNN]            them exact.\n";
     s += "  [GNN]   valid over:";
     for (int i = 0; i < N.nS; ++i) {
         std::sprintf(b, " %s %.6g..%.6g",
@@ -445,6 +538,77 @@ inline std::string describe(const Network &N, const std::string &path)
     }
     s += "\n";
     return s;
+}
+
+/* ================================================================================================
+ *  BINDING A NETWORK TO THIS RUN'S LATTICES
+ *
+ *  The .gnn file names the species it was fitted to.  This matches those names against
+ *  <name_of_substrates> and records the mapping, so a network fitted to CH4 SO4 HS HCO3 cannot be
+ *  applied to a simulation that calls them something else.  Returns "" on success, or the message
+ *  to print before terminating.
+ * ================================================================================================ */
+inline std::string bindToSubstrates(const Network &N,
+                                    const std::vector<std::string> &subsNames,
+                                    Binding &out,
+                                    bool abiotic = false)
+{
+    out = Binding();
+    out.net = &N;
+
+    if (!N.valid()) return "the network file did not load into a usable network.";
+    if ((int) N.species.size() != N.nS) {
+        char b[192];
+        std::sprintf(b, "the file names %d species but declares %d.",
+                     (int) N.species.size(), N.nS);
+        return std::string(b);
+    }
+
+    out.subsOfSpecies.assign((size_t) N.nS, -1);
+    for (int i = 0; i < N.nS; ++i) {
+        int hit = -1;
+        for (size_t s = 0; s < subsNames.size(); ++s)
+            if (subsNames[s] == N.species[(size_t) i]) { hit = (int) s; break; }
+        if (hit < 0) {
+            std::string m = "the network was trained on species '" + N.species[(size_t) i]
+                          + "', which is not in <name_of_substrates>. This run has:";
+            for (size_t s = 0; s < subsNames.size(); ++s) m += " " + subsNames[s];
+            m += ".";
+            return m;
+        }
+        out.subsOfSpecies[(size_t) i] = hit;
+    }
+
+    /* eval() returns one value per species, then growth if the file declares it. */
+    if (N.hasGrowth) {
+        if (abiotic)
+            return "the abiotic network declares a growth output. An abiotic network belongs to no "
+                   "organism, so there is no biomass for it to apply to. Retrain it without the "
+                   "growth column, or give it to a microbe through <network_file>.";
+        out.growthSlot = N.nS;
+    } else {
+        out.growthSlot = -1;
+    }
+    return std::string();
+}
+
+inline void registerNetwork(int microbe, const Binding &b, int nMicrobes)
+{
+    Runtime &R = runtime();
+    if ((int) R.byMicrobe.size() < nMicrobes) R.byMicrobe.resize((size_t) nMicrobes);
+    if (microbe < 0) {
+        for (size_t i = 0; i < R.byMicrobe.size(); ++i) R.byMicrobe[i] = b;
+    } else if (microbe < (int) R.byMicrobe.size()) {
+        R.byMicrobe[(size_t) microbe] = b;
+    }
+}
+
+inline void registerAbiotic(const Binding &b) { runtime().abiotic = b; }
+
+inline bool haveAbiotic()
+{
+    const Binding &b = runtime().abiotic;
+    return b.net != 0 && b.net->valid();
 }
 
 inline std::string runtimeReport()

@@ -85,8 +85,11 @@
          Do NOT name a substrate that enters at an inlet: glucose here is
          supplied from outside and its total is not conserved. Acetate is
          only ever produced inside the domain, so it is the honest thing to
-         watch; it is listed for the record rather than as a check that can
-         pass, and its Neumann ends make it closed.
+         watch, and its closed ends are bounce-back, which is exactly
+         no-flux. This case declares no <conserve> line: postprocess.py
+         does that balance on output/summary.csv instead. The tag exists
+         and is documented in config/CompLaB.everything.xml for anyone who
+         wants the solver to check it too.
          ================================================================ -->
     <diagnostics>
         <enabled>true</enabled>
@@ -98,8 +101,8 @@
     <LB_numerics>
         <domain>
             <nx>24</nx>
-            <ny>24</ny>
-            <nz>6</nz>
+            <ny>26</ny>
+            <nz>8</nz>
             <dx>10</dx>
             <unit>um</unit>
             <characteristic_length>24</characteristic_length>
@@ -167,9 +170,9 @@
                 <in_pore>5e-10</in_pore>
                 <in_biofilm>5e-10</in_biofilm>
             </substrate_diffusion_coefficients>
-            <left_boundary_type>Neumann</left_boundary_type>
+            <left_boundary_type>closed</left_boundary_type>
             <left_boundary_condition>0.</left_boundary_condition>
-            <right_boundary_type>Neumann</right_boundary_type>
+            <right_boundary_type>closed</right_boundary_type>
             <right_boundary_condition>0.</right_boundary_condition>
         </substrate2>
 
@@ -239,9 +242,9 @@
             <substrate_upper_bounds>1000. 1000. 1000.</substrate_upper_bounds>
             <objective_direction>maximize</objective_direction>
             <biomass_molar_mass>24.6</biomass_molar_mass>
-            <left_boundary_type>Neumann</left_boundary_type>
+            <left_boundary_type>closed</left_boundary_type>
             <left_boundary_condition>0.</left_boundary_condition>
-            <right_boundary_type>Neumann</right_boundary_type>
+            <right_boundary_type>closed</right_boundary_type>
             <right_boundary_condition>0.</right_boundary_condition>
         </microbe0>
     </microbiology>

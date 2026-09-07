@@ -73,17 +73,32 @@ SOLID, WALL, PORE = 0, 1, 2
 # reading and writing the .dat
 # ===========================================================================
 def write_dat(path, g):
-    """g is (nz, ny, nx). The file is x fastest, then y, then z.
+    """g is (nz, ny, nx). The file is ONE X-SLICE AT A TIME: z varies fastest,
+    then y, and x is the slowest axis.
 
     That order is the whole contract with the solver, and it is not recorded
-    anywhere in the file, so it is written in exactly one place: here."""
+    anywhere in the file, so it is written in exactly one place: here.
+
+    [v1.3] It used to be written the other way round -- z slowest and x fastest
+    -- which is the natural order for the (nz, ny, nx) array this module carries
+    internally, and which is wrong. readGeometry() in src/complab_functions.hh
+    reads one ny*nz slice per x:
+
+        for (plint iX=1; iX<nx-1; ++iX) { geometryFile >> *slice; ... }
+
+    and every one of the twenty shipped preprocess.py scripts writes
+    `for x: for y: for z:` with a comment saying so. So a geometry written here
+    came out transposed: the right number of values, no error anywhere, and the
+    flow running across what the user had drawn as depth. read_dat had the same
+    assumption, which is why inspect() on a correct file reported the wrong
+    porosity structure and scanned the wrong axis for percolation."""
     if os.path.dirname(path):
         os.makedirs(os.path.dirname(path), exist_ok=True)
     nz, ny, nx = g.shape
     with open(path, "w") as f:
-        for z in range(nz):
+        for x in range(nx):                 # x-slices, y then z inside each
             for y in range(ny):
-                f.write("\n".join(str(int(v)) for v in g[z, y, :]))
+                f.write("\n".join(str(int(v)) for v in g[:, y, x]))
                 f.write("\n")
     return nx * ny * nz
 
@@ -95,7 +110,9 @@ def read_dat(path, nx, ny, nz):
             "ERROR: %s has %d values but nx*ny*nz = %d.\n"
             "       Either the dimensions are wrong or the file is truncated."
             % (path, vals.size, nx * ny * nz))
-    return vals.reshape((nz, ny, nx))
+    # The file is x-slowest / z-fastest, so it reshapes naturally as (nx, ny, nz);
+    # transpose to the (nz, ny, nx) this module works in. See write_dat.
+    return vals.reshape((nx, ny, nz)).transpose(2, 1, 0)
 
 
 def add_walls(g, axis):

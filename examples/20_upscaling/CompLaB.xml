@@ -1,0 +1,276 @@
+<?xml version="1.0" ?>
+<!-- =========================================================================
+     CompLB3D EXAMPLE 20  |  PORE SCALE OUT: ONE AGGREGATE, ONE CONTINUUM RATE
+     =========================================================================
+
+     A pore-scale run resolves an aggregate. A column- or reservoir-scale model
+     cannot: it carries one concentration per grid block and needs one rate.
+     The bridge between them is the effectiveness factor,
+
+         eta  =  < r > inside the aggregate  /  r(C_bulk)
+
+     what the aggregate actually does, over what it would do if every point
+     inside it saw the bulk. This case measures it.
+
+     WHAT MAKES THIS A DIFFERENT CASE FROM 19, AND NOT JUST 19 WITH A SWITCH
+
+     Example 19 shows the thermodynamic gate acting. It is a transient: methane
+     is fed from one end and everything leaves at the other, so the water around
+     the aggregate is slowly drawn down and nothing settles. That is the right
+     design for showing a gate close, and the wrong one for measuring an
+     effectiveness factor, which is a STEADY property of a fixed bulk.
+
+     Three things are therefore different here, and each is necessary:
+
+       1. THE BULK IS HELD. Every species is Dirichlet at BOTH ends, at the same
+          value. "The aggregate sits in a bulk of composition C" is what every
+          effectiveness-factor definition assumes, and it is what makes C a
+          control rather than something the run drifts to.
+
+       2. THE CATALYST IS HELD. <freeze_biomass> discards the biomass increments
+          while applying the substrate ones: the reaction still consumes and
+          still produces, only the amount of catalyst stays put. Without it eta
+          never settles, because biomass grows faster at the rim than in the
+          core and keeps changing the answer for a reason that has nothing to do
+          with transport. Every run in the sweep reported NOT STEADY at five
+          diffusion times until this was switched on.
+
+       3. THE RUN IS LONG ENOUGH. The profile inside the aggregate relaxes on
+          R^2/D. At R = 60 um and D = 1.5e-10 m2/s that is 24 s, and the run is
+          five of them. The solver checks this itself and says NOT STEADY if the
+          last three intervals disagree by more than 1%.
+
+     WHAT COMES OUT
+
+     Two dimensionless groups and a measured eta:
+
+         phi        = R sqrt(k/D),  k = r(C_bulk)/C_bulk   the Thiele modulus
+         F_T(bulk)  the thermodynamic gate at the bulk composition
+         eta        measured, against the classical sphere result printed beside it
+
+     The classical result assumes first-order kinetics and no energy limit. This
+     case has neither, and the gap between measured and classical is the point:
+     it is what a continuum model gets wrong if it upscales the textbook way.
+
+     ONE RUN IS ONE POINT. offline/upscale.py sweeps radius and bulk sulfide and
+     fits the correction. See the README.
+     ========================================================================= -->
+<parameters>
+
+    <path>
+        <src_path>src</src_path>
+        <input_path>input</input_path>
+        <output_path>output</output_path>
+    </path>
+
+    <simulation_mode>
+        <biotic_mode>true</biotic_mode>
+        <enable_kinetics>true</enable_kinetics>
+        <enable_abiotic_kinetics>false</enable_abiotic_kinetics>
+        <enable_fba_glpk>false</enable_fba_glpk>
+        <enable_fba_cobrapy>false</enable_fba_cobrapy>
+        <enable_surrogate>false</enable_surrogate>
+        <enable_validation_diagnostics>true</enable_validation_diagnostics>
+    </simulation_mode>
+
+    <!-- The run's own scalar record. output/summary.csv gets one row every 1000
+         steps, the <interval> set below. [v1.3] That interval is not only a
+         reporting choice in this case: it also sets the row spacing of
+         output/upscaling.csv and the three intervals the steadiness test
+         compares. The sulfide maximum is the headline column of this case: it is
+         the product whose build-up closes the gate, so watch it there rather
+         than by eye in the log. -->
+    <diagnostics>
+        <enabled>true</enabled>
+        <summary_csv>summary.csv</summary_csv>
+        <interval>1000</interval>
+        <tolerance>1e-6</tolerance>
+    </diagnostics>
+
+    <LB_numerics>
+        <domain>
+            <nx>32</nx>
+            <ny>34</ny>
+            <nz>10</nz>
+            <dx>10</dx>
+            <unit>um</unit>
+            <characteristic_length>32</characteristic_length>
+            <filename>geometry.dat</filename>
+            <material_numbers>
+                <pore>2</pore>
+                <solid>0</solid>
+                <bounce_back>1</bounce_back>
+                <microbe0>3</microbe0>
+            </material_numbers>
+        </domain>
+
+        <delta_P>1e-6</delta_P>
+        <Peclet>0</Peclet>
+        <tau>0.8</tau>
+        <track_performance>false</track_performance>
+
+        <iteration>
+            <ns_max_iT1>20000</ns_max_iT1>
+            <ns_max_iT2>2000</ns_max_iT2>
+            <ns_converge_iT1>1e-6</ns_converge_iT1>
+            <ns_converge_iT2>1e-4</ns_converge_iT2>
+            <ns_update_interval>10</ns_update_interval>
+            <ade_update_interval>1</ade_update_interval>
+            <ade_max_iT>24000</ade_max_iT>
+            <ade_converge_iT>1e-10</ade_converge_iT>
+        </iteration>
+    </LB_numerics>
+
+    <!-- =====================================================================
+         THE ONLY NEW BLOCK.  Two lines: a switch, and where the energetics
+         live.  Everything else about the reaction is unchanged.
+         ===================================================================== -->
+    <thermodynamics>
+        <enabled>true</enabled>
+        <energetics_file>input/aom.thm</energetics_file>
+    </thermodynamics>
+
+    <chemistry>
+        <number_of_substrates>4</number_of_substrates>
+
+        <!-- ALL FOUR ARE HELD AT BOTH ENDS. That is what "the aggregate sits in
+             a bulk of composition C" means. Holding the PRODUCTS too does not
+             impose the answer: the gate closes because sulfide accumulates
+             INSIDE the aggregate relative to the bulk, and that gradient is
+             free to develop however it likes. What is fixed is only the
+             outside, which is the single number a continuum grid block has. -->
+        <substrate0>
+            <name_of_substrates>CH4</name_of_substrates>
+            <initial_concentration>1.0e-2</initial_concentration>
+            <substrate_diffusion_coefficients>
+                <in_pore>1.5e-9</in_pore>
+                <in_biofilm>1.5e-10</in_biofilm>
+            </substrate_diffusion_coefficients>
+            <left_boundary_type>Dirichlet</left_boundary_type>
+            <left_boundary_condition>1.0e-2</left_boundary_condition>
+            <right_boundary_type>Dirichlet</right_boundary_type>
+            <right_boundary_condition>1.0e-2</right_boundary_condition>
+        </substrate0>
+
+        <substrate1>
+            <name_of_substrates>SO4</name_of_substrates>
+            <initial_concentration>2.8e-2</initial_concentration>
+            <substrate_diffusion_coefficients>
+                <in_pore>1.0e-9</in_pore>
+                <in_biofilm>1.0e-10</in_biofilm>
+            </substrate_diffusion_coefficients>
+            <left_boundary_type>Dirichlet</left_boundary_type>
+            <left_boundary_condition>2.8e-2</left_boundary_condition>
+            <right_boundary_type>Dirichlet</right_boundary_type>
+            <right_boundary_condition>2.8e-2</right_boundary_condition>
+        </substrate1>
+
+        <!-- The two products. Sulfide is the one that shuts the gate, and its
+             bulk value is the second axis of the sweep: raise it and the whole
+             aggregate sits closer to the energy threshold. -->
+        <substrate2>
+            <name_of_substrates>HS</name_of_substrates>
+            <initial_concentration>1.0e-5</initial_concentration>
+            <substrate_diffusion_coefficients>
+                <in_pore>1.7e-9</in_pore>
+                <in_biofilm>1.7e-10</in_biofilm>
+            </substrate_diffusion_coefficients>
+            <left_boundary_type>Dirichlet</left_boundary_type>
+            <left_boundary_condition>1.0e-5</left_boundary_condition>
+            <right_boundary_type>Dirichlet</right_boundary_type>
+            <right_boundary_condition>1.0e-5</right_boundary_condition>
+        </substrate2>
+
+        <substrate3>
+            <name_of_substrates>HCO3</name_of_substrates>
+            <initial_concentration>2.3e-3</initial_concentration>
+            <substrate_diffusion_coefficients>
+                <in_pore>1.2e-9</in_pore>
+                <in_biofilm>1.2e-10</in_biofilm>
+            </substrate_diffusion_coefficients>
+            <left_boundary_type>Dirichlet</left_boundary_type>
+            <left_boundary_condition>2.3e-3</left_boundary_condition>
+            <right_boundary_type>Dirichlet</right_boundary_type>
+            <right_boundary_condition>2.3e-3</right_boundary_condition>
+        </substrate3>
+
+    </chemistry>
+
+    <microbiology>
+        <number_of_microbes>1</number_of_microbes>
+        <maximum_biomass_density>1.0e-2</maximum_biomass_density>
+        <thrd_biofilm_fraction>0.01</thrd_biofilm_fraction>
+        <CA_method>fraction</CA_method>
+
+        <microbe0>
+            <!-- This name is what input/aom.thm binds to. -->
+            <name_of_microbes>ANME</name_of_microbes>
+            <solver_type>CA</solver_type>
+            <reaction_type>kinetics</reaction_type>
+            <initial_densities>1.0e-3</initial_densities>
+            <decay_coefficient>0.0</decay_coefficient>
+            <viscosity_ratio_in_biofilm>0</viscosity_ratio_in_biofilm>
+            <!-- unused on the kinetics path: defineKinetics.hh carries its own -->
+            <half_saturation_constants>0 0 0 0</half_saturation_constants>
+            <maximum_uptake_flux>0 0 0 0</maximum_uptake_flux>
+            <left_boundary_type>closed</left_boundary_type>
+            <left_boundary_condition>0.</left_boundary_condition>
+            <right_boundary_type>closed</right_boundary_type>
+            <right_boundary_condition>0.</right_boundary_condition>
+        </microbe0>
+
+    </microbiology>
+
+    <equilibrium>
+        <enabled>false</enabled>
+    </equilibrium>
+
+    <precipitation>
+        <enabled>false</enabled>
+    </precipitation>
+
+    <dissolution>
+        <enabled>false</enabled>
+    </dissolution>
+
+    <!-- ONE AGGREGATE, REDUCED TO THE TWO NUMBERS A CONTINUUM MODEL NEEDS.
+         The aggregate is material 3, the biofilm. The bulk is the open water
+         around it, material 2. Methane is the reacting species whose rate
+         defines the effectiveness factor.
+           eta  = <r> inside the aggregate / r(C_bulk)
+           phi  = R sqrt(k/D), with k = r(C_bulk)/C_bulk
+         Radius and diffusivity are left at 0, so the solver takes the radius of
+         the sphere of the measured aggregate volume and the substrate's own
+         in-biofilm diffusivity. Declare them only if you want the numbers the
+         case claims rather than the ones it has. -->
+    <!-- WHAT TO MEASURE, AND OVER WHAT.
+           aggregate_materials  the aggregate is material 3
+           species              methane, substrate0: its rate defines eta
+           radius               0 = the sphere of the measured aggregate volume,
+                                which is the radius the volume actually supports
+                                rather than the one preprocess.py drew
+           diffusivity          0 = methane's own in_biofilm value
+           freeze_biomass       hold the catalyst while the profile relaxes -->
+    <upscaling>
+        <enabled>true</enabled>
+        <aggregate_materials>3</aggregate_materials>
+        <species>0</species>
+        <radius>0</radius>
+        <diffusivity>0</diffusivity>
+        <freeze_biomass>true</freeze_biomass>
+        <record_csv>upscaling.csv</record_csv>
+    </upscaling>
+
+    <IO>
+        <read_NS_file>false</read_NS_file>
+        <read_ADE_file>false</read_ADE_file>
+        <ns_filename>nsLattice</ns_filename>
+        <mask_filename>maskLattice</mask_filename>
+        <subs_filename>subsLattice</subs_filename>
+        <bio_filename>bioLattice</bio_filename>
+        <save_VTK_interval>4000</save_VTK_interval>
+        <save_CHK_interval>0</save_CHK_interval>
+        <debug_updRxn>0</debug_updRxn>
+    </IO>
+
+</parameters>

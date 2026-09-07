@@ -1,0 +1,7 @@
+build/
+run/
+output/
+*.o
+*.pyc
+__pycache__/
+tests/t[0-9]*

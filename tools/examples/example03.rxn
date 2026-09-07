@@ -1,4 +1,0 @@
-substrates: A B C
-abiotic R1:
-    equation: A + B -> C
-    k: 5.0e-2

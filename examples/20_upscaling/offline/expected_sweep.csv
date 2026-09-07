@@ -1,0 +1,32 @@
+# CompLB3D pore-to-aggregate sweep -- reference output
+# Produced by: python3 offline/upscale.py --radii 3,4 --bulk 1e-5,3e-4,1e-3 \
+#                                         --diffusion-times 5
+# on the shipped case, one core. Your numbers should match these to the
+# digits shown; if they do not, something in the chain has changed.
+#
+# [v1.3] --diffusion-times 5 was missing from the line above, and the default is
+# 4. That default stops the R=4 runs at 8534 iterations, so it cannot produce the
+# 10664 recorded here and a reader following the command got runs 20% shorter and
+# different numbers. At 5 diffusion times the two radii give 6000 and 10667
+# iterations with sampling intervals of 750 and 1333, whose last samples are
+# exactly the 5250 and 10664 in the `iteration` column.
+#
+# [v1.3] The bulk_voxels column below is a WHOLE-DOMAIN count. The sampler reads
+# over Box3D(1, nx-2, 0, ny-1, 0, nz-1) -- it excludes the inlet and outlet planes
+# -- so a fresh run prints 6944 at R=3 and 6784 at R=4, not 7424 and 7264. The
+# aggregate_voxels column is unaffected, the aggregate being interior. bulk_conc
+# is averaged over that same excluded-plane set, so expect it to move in the last
+# digits too; eta, thiele and the two rate columns are ratios and intensive
+# averages over the aggregate and are what this file is for.
+# eta_classical is the sphere with first-order kinetics, for comparison only,
+# evaluated at the SAME modulus as the thiele column: phi = R sqrt(k/D).
+# [v1.3] These values changed: classicalEta used to be written for the
+# generalized modulus (R/3)sqrt(k/D) and was being fed a radius-based phi, so
+# every eta_classical was eta(3 phi) and came out about 0.15 too low.
+F_T_bulk,aggregate_voxels,bulk_conc,bulk_setpoint,bulk_voxels,eta,eta_classical,iteration,radius_voxels,rate_at_bulk,rate_mean,steady,thiele
+0.9699838242180767,256.0,0.009910650014570865,0.0003,7424.0,0.9493415106184597,0.9767100464707785,5250.0,3.0,0.00034622278485243514,0.00032868366158234075,1,0.6011251640665294
+0.9154625425775877,256.0,0.009916810968053214,0.001,7424.0,0.9356393289949105,0.9779900160305931,5250.0,3.0,0.0003267824824568579,0.00030575054261322565,1,0.5838234327906854
+0.9926941904765181,256.0,0.009908031836293674,1e-05,7424.0,0.955192679206376,0.9761777739955501,5250.0,3.0,0.0003543195668020589,0.00033844345630890116,1,0.6081938541771721
+0.9653465589516166,416.0,0.00986025552550474,0.0003,7264.0,0.9130772068531576,0.9682179356733128,10664.0,4.0,0.00034438778123980433,0.0003144526333687968,1,0.7066467945608246
+0.9094830178457545,416.0,0.009871066422121558,0.001,7264.0,0.8939704171753166,0.9700068974191864,10664.0,4.0,0.0003244944598130439,0.00029008844761014587,1,0.6855580218327952
+0.988709982583356,416.0,0.009855590722146194,1e-05,7264.0,0.9213585592318442,0.967471113556232,10664.0,4.0,0.0003527057738441177,0.00032496848362176896,1,0.7152989136862085

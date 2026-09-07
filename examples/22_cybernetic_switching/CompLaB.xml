@@ -1,0 +1,287 @@
+<?xml version="1.0" ?>
+<!-- =========================================================================
+     CompLB3D EXAMPLE 22  |  METABOLIC SWITCHING BETWEEN CARBON SOURCES
+     =========================================================================
+
+     Example 21 fixes WHICH optimum the solver returns.  This one fixes a
+     different problem: WHICH SUBSTRATE the organism is living on, when
+     more than one will do.
+
+     E. coli offered glucose and acetate together does not eat both.  It
+     eats the glucose, excretes acetate while doing so, and only turns
+     round and consumes that acetate once the glucose is gone.  Flux
+     balance analysis on its own cannot produce this.  Hand the model
+     both carbon sources at once and it will simply take whichever
+     combination maximises growth, together, from the first step.
+
+     A Monod term cannot produce it either, and for a sharper reason:
+     acetate is a PRODUCT in the first regime and a SUBSTRATE in the
+     second, and a concentration alone does not say which.
+
+     <cybernetic> treats the organism as a competition between separate
+     growth options, one per carbon source:
+
+       1.  Solve the model ONCE PER SOURCE, each time with the other
+           sources shut.  Two sources, two flux vectors: two different
+           ways the cell could be making a living right now.
+
+       2.  Score each option by the carbon it would bring in,
+
+               r_k = k_k C_k / (K_k + C_k)          the kinetic rate
+               u_k = n_k r_k / SUM_j n_j r_j        the cybernetic weight
+
+           where n_k is the carbon count: glucose 6, acetate 2.
+
+       3.  Blend:   v = SUM_k u_k v_k
+
+     While glucose is plentiful u_glc is near one and the cell behaves as
+     the glucose solution says, which INCLUDES excreting acetate.  As
+     glucose runs out u_glc falls, u_ac rises, and the acetate solution
+     takes over.  The switch is continuous, needs no threshold, and adds
+     no parameter that the Monod rates did not already contain.
+
+     Shutting a source means forbidding its UPTAKE, never its release.
+     An organism growing on glucose must stay free to excrete the acetate
+     that the other option will later consume; closing the exchange
+     outright would remove the very thing being switched to.
+
+     WHAT SURVIVES THE BLEND.  Each v_k satisfies S v_k = 0, and a convex
+     combination of vectors in the null space of S is in the null space
+     of S.  So the blended vector conserves mass exactly, not
+     approximately.  Averaging model outputs is not usually safe; here it
+     is, and that is why.
+
+     COST.  Two sources is two linear programs per organism per voxel per
+     step.  They differ only in which bounds are open, so each warm
+     starts from the previous basis, and any source whose weight falls
+     below <weight_floor> is not solved at all.
+
+     Method: the cybernetic approach of Ramkrishna & Song, AIChE J 58,
+     986 (2012), in the form Song, H.-S. et al., Scientific Reports 15,
+     6042 (2025) used to couple it to reactive transport.  Carbon uptake
+     rate as the objective of the competition is theirs.
+
+     WHAT THIS DOES NOT DO.  The weights depend on concentration only.
+     No enzyme state is carried between steps, so there is no lag and no
+     diauxic plateau.  That is the same simplification Song et al. made,
+     and it is adequate exactly when the switch is fast compared with
+     transport, which is the pore-scale case.
+     ========================================================================= -->
+<parameters>
+
+    <path>
+        <src_path>src</src_path>
+        <input_path>input</input_path>
+        <output_path>output</output_path>
+    </path>
+
+    <simulation_mode>
+        <biotic_mode>true</biotic_mode>
+        <enable_kinetics>false</enable_kinetics>
+        <enable_abiotic_kinetics>false</enable_abiotic_kinetics>
+        <enable_fba_glpk>true</enable_fba_glpk>
+        <enable_fba_cobrapy>false</enable_fba_cobrapy>
+        <enable_surrogate>false</enable_surrogate>
+        <fba_concentration_basis>free</fba_concentration_basis>
+        <glpk_lpsolver>1</glpk_lpsolver>
+        <enable_validation_diagnostics>true</enable_validation_diagnostics>
+    </simulation_mode>
+
+    <LB_numerics>
+        <domain>
+            <nx>24</nx>
+            <ny>26</ny>
+            <nz>8</nz>
+            <dx>10</dx>
+            <unit>um</unit>
+            <characteristic_length>24</characteristic_length>
+            <filename>geometry.dat</filename>
+            <material_numbers>
+                <pore>2</pore>
+                <solid>0</solid>
+                <bounce_back>1</bounce_back>
+                <microbe0>3</microbe0>
+            </material_numbers>
+        </domain>
+
+        <delta_P>1e-6</delta_P>
+        <Peclet>0</Peclet>
+        <tau>0.8</tau>
+        <track_performance>true</track_performance>
+
+        <iteration>
+            <ns_max_iT1>20000</ns_max_iT1>
+            <ns_max_iT2>2000</ns_max_iT2>
+            <ns_converge_iT1>1e-6</ns_converge_iT1>
+            <ns_converge_iT2>1e-4</ns_converge_iT2>
+            <ns_update_interval>10</ns_update_interval>
+            <ade_update_interval>1</ade_update_interval>
+            <ade_max_iT>500</ade_max_iT>
+            <ade_converge_iT>1e-8</ade_converge_iT>
+        </iteration>
+    </LB_numerics>
+
+    <chemistry>
+        <number_of_substrates>3</number_of_substrates>
+        <fix_concentration>no no no</fix_concentration>
+        <fix_lower_bounds>no no no</fix_lower_bounds>
+
+        <substrate0>                                    <!-- donor, held up from the left -->
+            <name_of_substrates>glc</name_of_substrates>
+            <initial_concentration>1.0</initial_concentration>
+            <substrate_diffusion_coefficients>
+                <in_pore>5e-10</in_pore>
+                <in_biofilm>5e-10</in_biofilm>
+            </substrate_diffusion_coefficients>
+            <left_boundary_type>Dirichlet</left_boundary_type>
+            <left_boundary_condition>1.0</left_boundary_condition>
+            <right_boundary_type>Neumann</right_boundary_type>
+            <right_boundary_condition>0.</right_boundary_condition>
+        </substrate0>
+
+        <substrate1>                                    <!-- acceptor, held up from the left -->
+            <name_of_substrates>o2</name_of_substrates>
+            <initial_concentration>1.0</initial_concentration>
+            <substrate_diffusion_coefficients>
+                <in_pore>5e-10</in_pore>
+                <in_biofilm>5e-10</in_biofilm>
+            </substrate_diffusion_coefficients>
+            <left_boundary_type>Dirichlet</left_boundary_type>
+            <left_boundary_condition>1.0</left_boundary_condition>
+            <right_boundary_type>Neumann</right_boundary_type>
+            <right_boundary_condition>0.</right_boundary_condition>
+        </substrate1>
+
+        <substrate2>                                    <!-- product, excreted -->
+            <name_of_substrates>ac</name_of_substrates>
+            <initial_concentration>0.4</initial_concentration>
+            <substrate_diffusion_coefficients>
+                <in_pore>5e-10</in_pore>
+                <in_biofilm>5e-10</in_biofilm>
+            </substrate_diffusion_coefficients>
+            <left_boundary_type>closed</left_boundary_type>
+            <left_boundary_condition>0.</left_boundary_condition>
+            <right_boundary_type>Neumann</right_boundary_type>
+            <right_boundary_condition>0.</right_boundary_condition>
+        </substrate2>
+
+        
+
+    </chemistry>
+
+    <microbiology>
+        <number_of_microbes>1</number_of_microbes>
+        <maximum_biomass_density>50</maximum_biomass_density>
+        <thrd_biofilm_fraction>0.01</thrd_biofilm_fraction>
+        <CA_method>fraction</CA_method>
+
+        <microbe0>
+            <name_of_microbes>Ecoli</name_of_microbes>
+            <solver_type>FD</solver_type>
+            <reaction_type>glpk</reaction_type>
+            <initial_densities>1.0</initial_densities>
+            <decay_coefficient>0.01</decay_coefficient>
+            <viscosity_ratio_in_biofilm>0</viscosity_ratio_in_biofilm>
+            <biomass_diffusion_coefficients>
+                <in_pore>3e-13</in_pore>
+                <in_biofilm>3e-13</in_biofilm>
+            </biomass_diffusion_coefficients>
+            <half_saturation_constants>0.05 0.02 0.05</half_saturation_constants>
+            <model_filename>e_coli_core.xml</model_filename>
+
+            <!-- which reaction exchanges each substrate, BY NAME, in substrate
+                 order.  Names are resolved against the model at start-up, so a
+                 typo is caught there with a suggestion.  The SBML "R_" prefix
+                 is stripped by the reader, so it is not written here. -->
+            <exchange_reaction_names>
+                EX_glc__D_e  EX_o2_e  EX_ac_e
+            </exchange_reaction_names>
+
+            <!-- ==============================================================
+                 THE COMPETITION.  One entry per carbon source, in the same
+                 order throughout.
+
+                 <substrate_ids> index this simulation's substrate list, which
+                 is what ties each growth option to a concentration on the
+                 lattice.  <carbon_number> is what makes the competition about
+                 carbon rather than about molecules: glucose carries 6, acetate
+                 2.  <uptake_kmax> and <uptake_half_saturation> set the WEIGHTS
+                 only; the flux actually realised still comes from the model.
+
+                 Each source is solved with the others shut.  That exclusion is
+                 derived here rather than asked for: writing it by hand invites
+                 leaving one open, and an open second carbon source destroys
+                 the switching silently.
+
+                 <weight_floor> skips any option whose weight falls below it.
+                 0 solves every source every time and is the reference; 1e-3 is
+                 a production value and moves the answer in the fourth decimal.
+                 ============================================================== -->
+            <cybernetic>
+                <sources>                 glucose  acetate </sources>
+                <substrate_ids>              0        2    </substrate_ids>
+                <carbon_number>              6        2    </carbon_number>
+                <uptake_kmax>              10.0      4.4   </uptake_kmax>
+                <uptake_half_saturation>    0.05     0.05  </uptake_half_saturation>
+                <weight_floor>            1e-3            </weight_floor>
+            </cybernetic>
+
+            <!-- Michaelis Menten Vmax, mmol/gDW/h, one per substrate.
+                 Vs approaches 10 and 2 * Vo approaches 8, so the acceptor
+                 limits and growth settles near 8. -->
+            <fba_maximum_uptake_flux>10. 10. 4.4</fba_maximum_uptake_flux>
+
+            <!-- hard floor and ceiling on the exchange fluxes.  Exchange
+                 reactions are written "metabolite ->", so eating is negative. -->
+            <substrate_lower_bounds>-10. -10. -4.4</substrate_lower_bounds>
+            <substrate_upper_bounds>  0.   0. 50.</substrate_upper_bounds>
+
+            <objective_direction>maximize</objective_direction>
+
+            <!-- grams dry weight per mole of cells: converts CompLB3D's molar
+                 biomass into the gDW a metabolic model expects. -->
+            <biomass_molar_mass>24.6</biomass_molar_mass>
+            <left_boundary_type>closed</left_boundary_type>
+            <left_boundary_condition>0.</left_boundary_condition>
+            <right_boundary_type>closed</right_boundary_type>
+            <right_boundary_condition>0.</right_boundary_condition>
+        </microbe0>
+
+    </microbiology>
+
+    <equilibrium>
+        <enabled>false</enabled>
+    </equilibrium>
+
+    <precipitation>
+        <enabled>false</enabled>
+    </precipitation>
+
+    <dissolution>
+        <enabled>false</enabled>
+    </dissolution>
+
+    <!-- The run's own scalar record: one row per interval with the total,
+         mean, min and max of every field, plus the mass held where
+         computeDensity cannot see it. Without this the case runs but
+         nothing about it can be checked afterwards. -->
+    <diagnostics>
+        <enabled>true</enabled>
+        <summary_csv>summary.csv</summary_csv>
+        <interval>50</interval>
+        <tolerance>1e-6</tolerance>
+    </diagnostics>
+
+    <IO>
+        <read_NS_file>false</read_NS_file>
+        <read_ADE_file>false</read_ADE_file>
+        <ns_filename>nsLattice</ns_filename>
+        <mask_filename>maskLattice</mask_filename>
+        <subs_filename>subsLattice</subs_filename>
+        <bio_filename>bioLattice</bio_filename>
+        <save_VTK_interval>100</save_VTK_interval>
+        <save_CHK_interval>0</save_CHK_interval>
+        <debug_updRxn>0</debug_updRxn>
+    </IO>
+
+</parameters>

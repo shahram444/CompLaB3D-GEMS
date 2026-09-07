@@ -1,73 +1,135 @@
-# Contributing to CompLB3D
+# Contributing
 
-Bug reports, questions and patches are all welcome. This file says where things
-live and what a change needs to clear before it goes in.
+## The rule the tree is built on
 
-## Reporting a problem
+**Outside `examples/`, nothing exists twice.** One reference configuration, one
+copy of each shared kinetics header, one copy of each tool.
+`tests/check_repo.sh` fails on any two identical files over 200 bytes outside
+`examples/`.
 
-Open an issue with:
+**Inside `examples/`, duplication is deliberate.** A case folder holds
+everything that case needs — its pore space, its metabolic model, the training
+code that produced what it was trained on — so that the folder is the whole
+procedure rather than a set of pointers into the rest of the tree. Several cases
+therefore carry the same geometry, and three carry the same model exporter.
 
-- what you ran: the `CompLaB.xml`, the geometry dimensions, and the cmake line
-- what happened, including the terminal output. CompLaB is verbose at start-up
-  and that banner usually contains the answer
-- what you expected instead
+The cost of that is real and there is no way around it: **a fix to a shared tool
+has to be applied to every example that carries a copy.** `check_repo.sh`
+enforces this rather than hoping — it compares every copy under `examples/*/`
+against its original and fails if one has drifted. The list of pairs it checks
+is in the script; add a line to it whenever you copy a new tool into a case.
 
-If it is a crash, the smallest input that still reproduces it is worth more
-than a large one.
+So the order when you fix a tool is:
 
-## Before opening a pull request
+1. fix it in `tools/` (or `tests/`),
+2. copy it over every `examples/*/training/` that carries it,
+3. run `./tests/check_repo.sh` — the drift check tells you if you missed one.
 
-**Run the example suite.** `examples/` has fifteen cases, one per capability,
-each of which runs in seconds:
+## Before you add an XML tag
+
+Two files in `config/` document the configuration, and both have to gain a line:
+
+- `config/CompLaB.everything.xml` — one line for every ability, with its unit
+  and its default. This is the index, and `tests/check_repo.sh` fails if the
+  solver reads a tag this file does not list, so you will find out immediately.
+- `config/CompLaB.reference.xml` — the same tag with the reasoning: why it
+  exists, and what goes wrong if someone sets it wrong.
+
+A tag documented in neither is a feature nobody can find.
+
+## Before you change the chemistry interface
+
+If you change the signature of `defineKinetics` or `defineAbioticKinetics`, you
+have to update:
+
+- `config/kinetics/defineKinetics.default.hh`
+- `config/kinetics/defineAbioticKinetics.default.hh`
+- `config/kinetics/defineKinetics.biotic.hh` — shared by examples 05–08
+- the six files under `examples/*/kinetics/` that override them
+
+and nothing else. That is the point of the arrangement — before it, the same
+change meant editing thirty-two files, twenty-three of which were identical.
+
+## Adding an example
+
+An example carries its own `preprocess.py`, `postprocess.py` and `pipeline.sh`,
+plus an `offline.sh` if it needs offline work. Write those four **for that
+case** rather than copying a neighbour's — a generic script repeated twenty
+times teaches nothing, and the whole point is that reading one folder tells you
+what that case does. They use the standard library only, so the folder is
+readable without following an import.
+
+Shared *tools* are different: copy those in verbatim, into `training/`, and add
+the pair to the drift check in `check_repo.sh`.
+
+`check_repo.sh` also fails if an example reaches back into `../../tools` or
+`../../models`. If a case needs something, it gets its own copy.
+
+## The geometry an example runs on
+
+Each example draws its own, in its own `preprocess.py`, and that generator is the
+authority: `check_repo.sh` fails if a shipped `input/geometry.dat` is not what
+its generator writes. The four files in `config/geometry/` are unpadded starting
+points, not shared inputs — no example reads them. If you add one there, document
+it in `config/geometry/README.md` alongside the others.
+
+Whatever shape you draw, **add** the inert wall layer on the four faces the
+solver does not condition rather than converting pore into wall, so porosity and
+every voxel count stay what the case declares.
+
+## The README an example ships
+
+Every case README has the same shape, described in
+[`examples/README.md`](examples/README.md): what the case is for, a **What is
+simulated** table, the physics with every constant carrying its unit and its
+source, **What to check**, and what the case does not do. Generate the table from
+the case's own `CompLaB.xml` and `input/geometry.dat` rather than typing it —
+a hand-written one is wrong the first time a switch changes and nothing
+notices.
+
+## Before you change a configuration tag
+
+`config/CompLaB.reference.xml` is the only place a tag is documented. Add the
+tag there, with its units and its default, in the same style as its neighbours.
+Do not copy the documentation into an example: the examples are working subsets,
+not references.
+
+## Tests
 
 ```bash
-python3 examples/validateExamples.py .      # structural check, one second
-./examples/runAllExamples.sh .              # build and run all fifteen
+./tests/check_repo.sh     # the tree — fast, no dependencies
+./tests/run_tests.sh      # the solver
 ```
 
-A change that breaks a case needs either a fix or an explanation in the pull
-request of why the expected result changed.
+Run `check_repo.sh` after any change to the tree: it fails on a duplicated file,
+a `case.files` line pointing at nothing, an example that no longer assembles, a
+shell script that does not parse, or a dead link in a README.
 
-Four cases have answers that do not come from this code, and those are the ones
-worth watching: example 02 has an analytic steady state, examples 03 and 13 to
-15 must conserve mass, and examples 09 and 10 must agree with each other and
-with `min(Vs, 2*Vo)`.
+Everything must pass. New behaviour needs a test that fails without it. The
+suite runs against a Palabos stub rather than the real library, so it is fast
+and has no external dependency — keep it that way.
 
-## Where things live
+Two properties the suite exists to protect, which are easy to break and hard to
+notice:
 
-| | |
-|---|---|
-| `src/complab.cpp` | the driver: parse, set up lattices, time loop |
-| `src/complab_functions.hh` | XML parsing and lattice setup |
-| `src/complab3d_processors*.hh` | the data processors, one file per concern |
-| `src/complab3d_metabolic.hh` | the optional metabolic layer and its config |
-| `defineKinetics.hh` | **your** biotic rate laws, compiled in |
-| `defineAbioticKinetics.hh` | **your** abiotic rate laws and the dissolution hook |
-| `surrogateModel.hh` | the trained surrogate network |
-| `surrogate_training/` | how to fit a new one |
-| `examples/` | the test suite |
-
-## Things to know before changing the processors
-
-**The argument layout is the API.** Palabos data processors receive a flat
-vector of lattices, and the meaning of each slot is positional:
-`[C..., B..., dC..., dB..., mask]`. Adding a lattice means updating every
-offset that indexes past it. `dCloc`, `dBloc` and `maskLloc` in the processor
-headers are those offsets; keep them as named constants rather than open-coding
-the arithmetic.
-
-**Rate laws are per second.** A rate constant published per day must be divided
-by 86400. That single mistake causes more dead runs than anything else here.
-
-**Never call `exit()` inside a data processor.** Under MPI it leaves the other
-ranks hanging and destroys the run. Print a warning and return a safe value.
+- **the mass budget.** No species may be drawn below zero, at any step length.
+  A fitted rate law is free to be wrong; it is not free to create negative mass.
+- **trainer and solver agree.** A model is written by Python and evaluated by
+  C++, and nothing about a text file by itself stops the two drifting apart.
+  `tests/xval_gnn.py` compares them across the training box and outside it.
 
 ## Style
 
-Follow the file you are editing. New parsing should degrade the way the
-existing code does: an absent optional tag falls back to a documented default,
-and a present but malformed one stops the run with a message naming the tag.
+C++ follows the surrounding file. Python is PEP 8 with four-space indents.
+Comments explain why, not what.
 
-## Licence
+## Reporting a problem
 
-CompLB3D is AGPL-3.0-or-later. Contributions are accepted under the same terms.
+Open an issue with the `CompLaB.xml`, the geometry dimensions, the first twenty
+lines of the log, and what you expected. The start-up lines say what the solver
+decided, which is usually enough to see the problem.
+
+## Publishing
+
+[`docs/PUBLISHING.md`](docs/PUBLISHING.md) has the whole path from a folder on
+disk to a tagged, DOI-bearing release, and the day-to-day loop after that.

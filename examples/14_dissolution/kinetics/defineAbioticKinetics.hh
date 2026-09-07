@@ -24,8 +24,8 @@
  * grain must appear as a mole of Ca2+ in the water.
  *
  * WHAT TO EXPECT
- *   Acid enters from the left, eats into the upstream faces of the four
- *   grains, and Ca2+ leaves on the right. As each grain thins, its outer
+ *   Acid enters from the left, eats into the upstream faces of the twelve
+ *   grain blocks, and Ca2+ leaves on the right. As each grain thins, its outer
  *   voxels drop below <reopen_fraction> of full and reopen to flow, so the
  *   porosity in the log rises step by step. That is the mirror image of what
  *   example 13 does.

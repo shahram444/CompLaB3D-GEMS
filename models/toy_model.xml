@@ -1,0 +1,37 @@
+<?xml version="1.0" ?>
+<!-- Toy metabolic model for the CompLB3D examples.
+
+     Three metabolites, four reactions, solvable by hand:
+
+       rows      S_c   O_c   P_c
+       columns   0 EX_S    S_c ->            negative flux = import
+                 1 EX_O    O_c ->            negative flux = import
+                 2 EX_P    P_c ->            positive flux = export
+                 3 BIO     S_c + 0.5 O_c -> P_c        (the objective)
+
+     Steady state forces v0 = -v3 and v1 = -0.5 v3, so with uptake bounds
+     Vs and Vo the optimum is
+
+           growth = min( Vs, 2 * Vo )
+
+     Generated in the same format extractMM.py writes: S is flattened
+     row major, metabolite major, so S[i][j] is entry i * nrxn + j.
+-->
+<Metabolic_Model>
+    <nmet>3</nmet>
+    <nrxn>4</nrxn>
+    <objLoc>3</objLoc>
+
+    <!-- S, 3 rows of 4 -->
+    <S>
+        -1  0  0  -1
+         0 -1  0  -0.5
+         0  0 -1   1
+    </S>
+
+    <b>0 0 0</b>
+    <c>0 0 0 1</c>
+
+    <lb>-1000 -1000     0    0</lb>
+    <ub> 1000  1000  1000 1000</ub>
+</Metabolic_Model>

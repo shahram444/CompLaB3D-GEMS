@@ -124,6 +124,18 @@ const T thrd = 1e-12;
 #include "complab3d_processors_fba.hh"
 #include "complab3d_processors_surrogate.hh"
 
+// Part 6: the two LEARNED rate paths.  Both are always built -- they need no external
+//   library, only a text file at run time -- and neither runs unless an organism asks
+//   for it by <reaction_type> and the matching <enabled> switch is on.
+//
+//   - run_symbolic3D            an algebraic rate law from a .sym file
+//   - run_graphnet3D            a message-passing network from a .gnn file
+//   - run_symbolic_abiotic3D    the same law swept over every fluid voxel
+//   - run_graphnet_abiotic3D    the same network swept over every fluid voxel
+#include "complab3d_processors_symbolic.hh"
+#include "complab3d_processors_graphnet.hh"
+#include "complab3d_processors_abiotic_learned.hh"
+
 /* ===============================================================================================================
    ============================================= PROCESSOR SUMMARY ================================================
    ===============================================================================================================

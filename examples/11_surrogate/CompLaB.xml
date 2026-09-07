@@ -20,7 +20,8 @@
 
      so Vmax is set to 8 and 0.4, safely inside. Those bounds were
      recovered by inverting the mapminmax scaling; run
-     surrogate_training/inspectSurrogate.py on any network to get them.
+     training/inspectSurrogate.py on any network to get them (in the
+     repository root that script lives at tools/surrogate/).
 
      Raise <fba_maximum_uptake_flux> above 0.5 on the second substrate and
      the simulation leaves the training box. It will still produce
@@ -47,8 +48,8 @@
     <LB_numerics>
         <domain>
             <nx>24</nx>
-            <ny>24</ny>
-            <nz>6</nz>
+            <ny>26</ny>
+            <nz>8</nz>
             <dx>10</dx>
             <unit>um</unit>
             <characteristic_length>24</characteristic_length>
@@ -133,9 +134,9 @@
             <fba_maximum_uptake_flux>8. 0.4</fba_maximum_uptake_flux>
 
             <biomass_molar_mass>24.6</biomass_molar_mass>
-            <left_boundary_type>Neumann</left_boundary_type>
+            <left_boundary_type>closed</left_boundary_type>
             <left_boundary_condition>0.</left_boundary_condition>
-            <right_boundary_type>Neumann</right_boundary_type>
+            <right_boundary_type>closed</right_boundary_type>
             <right_boundary_condition>0.</right_boundary_condition>
         </microbe0>
 
@@ -152,6 +153,17 @@
     <dissolution>
         <enabled>false</enabled>
     </dissolution>
+
+    <!-- The run's own scalar record: one row per interval with the total,
+         mean, min and max of every field, plus the mass held where
+         computeDensity cannot see it. Without this the case runs but
+         nothing about it can be checked afterwards. -->
+    <diagnostics>
+        <enabled>true</enabled>
+        <summary_csv>summary.csv</summary_csv>
+        <interval>50</interval>
+        <tolerance>1e-6</tolerance>
+    </diagnostics>
 
     <IO>
         <read_NS_file>false</read_NS_file>

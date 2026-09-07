@@ -347,13 +347,14 @@ inline bool load(Program &P, const std::string &path, std::string *err = 0)
     while (std::fgets(line, sizeof line, f)) {
         ++lineNo;
         std::string L(line);
-        /* [FIX] A '#' line is now a plain comment and is dropped, matching
-         * complab3d_graphnet.hh.  It used to be swept into the provenance string, so a file
-         * with a normal explanatory header printed that whole header back as one run-on line
-         * in the log -- which buried the thing provenance is for.  Where a file came from now
-         * goes on its own 'provenance' line, read below. */
+        /* keep comment text as provenance, then strip it */
         const size_t h = L.find('#');
-        if (h != std::string::npos) L = L.substr(0, h);
+        if (h != std::string::npos) {
+            std::string c = L.substr(h + 1);
+            while (!c.empty() && (c[c.size() - 1] == '\n' || c[c.size() - 1] == '\r')) c.erase(c.size() - 1);
+            if (!c.empty()) { if (!P.provenance.empty()) P.provenance += " | "; P.provenance += c; }
+            L = L.substr(0, h);
+        }
         /* split off the leading keyword */
         size_t i = 0;
         while (i < L.size() && std::isspace((unsigned char) L[i])) ++i;
@@ -369,19 +370,7 @@ inline bool load(Program &P, const std::string &path, std::string *err = 0)
         if (key == "version") {
             continue;                                   /* accepted and ignored, as in .srg */
         }
-        else if (key == "provenance") {
-     /* Where this file came from: printed in the log so a result carries it. */
-     std::string c = L.substr(j);
-     size_t b = c.find_first_not_of(" \t");
-     while (!c.empty() && (c[c.size()-1]=='\n' || c[c.size()-1]=='\r')) c.erase(c.size()-1);
-     if (b != std::string::npos) {
-         c = c.substr(b);
-         if (!P.provenance.empty()) P.provenance += " | ";
-         P.provenance += c;
-     }
-     continue;
- }
- if (key == "units") {
+        else if (key == "units") {
             char u[64] = {0};
             if (std::sscanf(rest.c_str(), "%63s", u) != 1) {
                 std::fclose(f); if (err) *err = where + "'units' names nothing"; return false; }
@@ -465,14 +454,21 @@ inline void evaluate(const Program &P, const std::vector<double> &varValues,
     const size_t nv = P.vars.size();
     std::vector<double> v(nv + P.rates.size(), 0.0);
 
+    /* [FIX] The counter is compared against the number of EVALUATIONS in runtimeReport(),
+     * so it has to count evaluations, not variables.  Counting one per clamped variable
+     * made a two-variable law report up to 200% of its evaluations as out of range --
+     * which is not merely untidy: the number is the one a reader uses to decide whether
+     * a result is usable, and a percentage above 100 makes it unreadable. */
+    bool anyClamped = false;
     for (size_t i = 0; i < nv; ++i) {
         double x = (i < varValues.size()) ? varValues[i] : 0.0;
         if (clamp && P.hiRange[i] > P.loRange[i]) {          /* a range was given for this one */
-            if (x < P.loRange[i]) { x = P.loRange[i]; if (clampCount) ++*clampCount; }
-            else if (x > P.hiRange[i]) { x = P.hiRange[i]; if (clampCount) ++*clampCount; }
+            if (x < P.loRange[i])      { x = P.loRange[i]; anyClamped = true; }
+            else if (x > P.hiRange[i]) { x = P.hiRange[i]; anyClamped = true; }
         }
         v[i] = x;
     }
+    if (anyClamped && clampCount) ++*clampCount;
     out.assign(P.rates.size(), 0.0);
     for (size_t r = 0; r < P.rates.size(); ++r) {
         double y = evalNode(P.nodes, P.rates[r].root, v);
@@ -485,6 +481,98 @@ inline void evaluate(const Program &P, const std::vector<double> &varValues,
         v[nv + r] = y;
         out[r] = y * P.unitScale;
     }
+}
+
+/* ================================================================================================
+ *  BINDING A PROGRAM TO THIS RUN'S LATTICES
+ *
+ *  A .sym file names its variables and its rates as strings.  The solver addresses lattices by
+ *  index.  Everything between the two is here, and it is a NAME match rather than an assumption
+ *  about order: a file written against a different <name_of_substrates> ordering must be refused,
+ *  not silently bound to the wrong lattice.
+ *
+ *  Returns an empty string on success, or the message to print before terminating.
+ * ================================================================================================ */
+inline std::string bindToSubstrates(const Program &P,
+                                    const std::vector<std::string> &subsNames,
+                                    const std::string &microbeName,
+                                    Binding &out,
+                                    bool abiotic = false)
+{
+    out = Binding();
+    out.prog = &P;
+
+    if (!P.valid()) return "the file declares no rate lines.";
+
+    /* ---- variables ---------------------------------------------------------------------------
+     * A variable is a substrate, or -- on the biotic path only -- this organism's own biomass. */
+    out.subsOfVar.assign(P.vars.size(), -1);
+    for (size_t v = 0; v < P.vars.size(); ++v) {
+        int hit = -1;
+        for (size_t s = 0; s < subsNames.size(); ++s)
+            if (subsNames[s] == P.vars[v]) { hit = (int) s; break; }
+        if (hit >= 0) { out.subsOfVar[v] = hit; continue; }
+
+        if (!abiotic && !microbeName.empty() && P.vars[v] == microbeName) {
+            out.subsOfVar[v] = -1;                       /* the organism's own biomass */
+            continue;
+        }
+        std::string m = "the file uses variable '" + P.vars[v] + "', which is neither a substrate";
+        if (!abiotic && !microbeName.empty()) m += " nor the microbe '" + microbeName + "'";
+        m += ". This run has:";
+        for (size_t s = 0; s < subsNames.size(); ++s) m += " " + subsNames[s];
+        m += ".";
+        return m;
+    }
+
+    /* ---- rates -------------------------------------------------------------------------------
+     * "growth" is the specific growth rate and belongs to no substrate; everything else must name
+     * one.  An abiotic file with a growth line is a mistake worth stopping for: there is no
+     * biomass in an abiotic sweep for it to multiply. */
+    out.subsOfRate.assign(P.rates.size(), -1);
+    for (size_t r = 0; r < P.rates.size(); ++r) {
+        if (P.rates[r].name == "growth") {
+            if (abiotic)
+                return "the abiotic file declares a 'growth' rate. An abiotic law belongs to no "
+                       "organism, so there is no biomass for it to apply to. Remove the line, or "
+                       "give the law to a microbe through <expressions_file>.";
+            out.subsOfRate[r] = -1;
+            continue;
+        }
+        int hit = -1;
+        for (size_t s = 0; s < subsNames.size(); ++s)
+            if (subsNames[s] == P.rates[r].name) { hit = (int) s; break; }
+        if (hit < 0) {
+            std::string m = "the file defines a rate for '" + P.rates[r].name
+                          + "', which is not in <name_of_substrates>. This run has:";
+            for (size_t s = 0; s < subsNames.size(); ++s) m += " " + subsNames[s];
+            m += ".";
+            return m;
+        }
+        out.subsOfRate[r] = hit;
+    }
+    return std::string();
+}
+
+/* Register a bound program for one microbe, or for every microbe when microbe < 0.  `P` must
+ * outlive the run: in practice it is a local of main(), exactly as srgNet is. */
+inline void registerProgram(int microbe, const Binding &b, int nMicrobes)
+{
+    Runtime &R = runtime();
+    if ((int) R.byMicrobe.size() < nMicrobes) R.byMicrobe.resize((size_t) nMicrobes);
+    if (microbe < 0) {
+        for (size_t i = 0; i < R.byMicrobe.size(); ++i) R.byMicrobe[i] = b;
+    } else if (microbe < (int) R.byMicrobe.size()) {
+        R.byMicrobe[(size_t) microbe] = b;
+    }
+}
+
+inline void registerAbiotic(const Binding &b) { runtime().abiotic = b; }
+
+inline bool haveAbiotic()
+{
+    const Binding &b = runtime().abiotic;
+    return b.prog != 0 && b.prog->valid();
 }
 
 /* ------------------------------------------------------------------------------------------------

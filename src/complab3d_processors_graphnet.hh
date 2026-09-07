@@ -41,6 +41,7 @@
 
 #include "complab3d_metabolic.hh"   /* MetabolicConfig: useTotals and the equilibrium tableau */
 #include "complab3d_graphnet.hh"
+#include "complab3d_thermo.hh"      /* the F_T gate; a no-op unless <thermodynamics> is on */
 
 namespace plb {
 
@@ -90,6 +91,9 @@ public:
 
         complab_gnn::Runtime &RT = complab_gnn::runtime();
 
+        std::vector<double> tconc;                 /* the gate's view of the same chemistry */
+        const bool gated = complab_thermo::enabled();
+
         for (plint iX = domain.x0; iX <= domain.x1; ++iX) {
             const plint absX = iX + absoluteOffset.x;
             if (absX <= 0 || absX >= nx-1) continue;          /* the two ghost columns */
@@ -124,6 +128,10 @@ public:
                     for (plint iS = 0; iS < subsNum; ++iS)
                         avail[iS] = cfg->useTotals ? cfg->totals.total(conc, iS) : conc[iS];
 
+                    /* The gate reads the same vector the network reads, so the energy it computes
+                     * is the energy of the chemistry the network was handed. */
+                    if (gated) complab_thermo::fillConc(avail, (int) subsNum, tconc);
+
                     /* ---- one forward pass per organism present ------------------------------ */
                     for (size_t k = 0; k < bLoc.size(); ++k) {
                         const plint iB = bLoc[k];
@@ -144,13 +152,18 @@ public:
                         B.net->eval(in, out, scratch, true, &RT.clamped);
                         ++RT.evaluations;
 
+                        /* The thermodynamic gate.  One number in [0,1] for this organism at this
+                         * composition; 1 when <thermodynamics> is off or this organism has no
+                         * block, in which case the arithmetic below is unchanged. */
+                        const T ft = gated ? (T) complab_thermo::gateFor((int) gM, tconc) : (T) 1;
+
                         /* mol/L/s per species, and 1/s for growth, both already unit-scaled */
                         for (size_t s = 0; s < in.size() && s < out.size(); ++s) {
                             const int iS = B.subsOfSpecies[s];
-                            if (iS >= 0) req[iS] += (T) out[s] * dt;          /* signed increment */
+                            if (iS >= 0) req[iS] += (T) out[s] * ft * dt;     /* signed increment */
                         }
                         if (B.growthSlot >= 0 && B.growthSlot < (int) out.size())
-                            dB[iB] += (T) out[(size_t) B.growthSlot] * bmass[iB] * dt;
+                            dB[iB] += (T) out[(size_t) B.growthSlot] * ft * bmass[iB] * dt;
                     }
 
                     /* ---- one shared substrate budget ---------------------------------------

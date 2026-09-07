@@ -1,6 +1,9 @@
 #include <cstdio>
 #include <cmath>
 #include "complab3d_symbolic.hh"
+
+// the shipped Pareto pick from pipeline stage B3
+#define SYMFILE "../pipelines/B_offline_models/B3_symbolic_law/expected/ecoli.sym"
 using namespace complab_sym;
 int fails = 0;
 void ck(const char *w, double g, double t, double tol=1e-9){
@@ -9,8 +12,8 @@ void ck(const char *w, double g, double t, double tol=1e-9){
 
 int main(){
     Program P; std::string err;
-    if(!load(P,"../examples/16_learned_rate_laws/fitting/ecoli.sym",&err)){ std::printf("LOAD FAILED: %s\n",err.c_str()); return 1; }
-    std::printf("%s", describe(P,"../examples/16_learned_rate_laws/fitting/ecoli.sym").c_str());
+    if(!load(P,SYMFILE,&err)){ std::printf("LOAD FAILED: %s\n",err.c_str()); return 1; }
+    std::printf("%s", describe(P,SYMFILE).c_str());
 
     std::printf("\n--- structure\n");
     std::printf("  %-44s %d\n","variables",(int)P.vars.size());

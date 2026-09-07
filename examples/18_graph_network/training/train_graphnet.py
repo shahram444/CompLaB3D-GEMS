@@ -45,13 +45,35 @@ import numpy as np
 # the model
 # ------------------------------------------------------------------------------------------------
 class GraphNet(object):
-    def __init__(self, S, width, rounds, rng, n_out):
-        """S: (n_species, n_reactions) stoichiometric matrix."""
+    def __init__(self, S, width, rounds, rng, n_out, readout="species", growth=None):
+        """S: (n_species, n_reactions) stoichiometric matrix.
+
+        readout says where the rates are read off the network.
+
+          "species"  the original: the readout is applied to each SPECIES node and gives that
+                     species its rate directly. The stoichiometry shapes the message passing but
+                     does not constrain the answer, so the returned rates are only approximately
+                     in stoichiometric ratio -- measured on the shipped AOM example, HS produced
+                     over CH4 consumed ran between 0.76 and 1.11 where the structure implies 1.
+
+          "extent"   the readout is applied to each REACTION node and gives one extent per
+                     reaction; the species rates are then formed as r_i = sum_r S[i,r] xi_r, which
+                     is exact at every input rather than approximately fitted, and uses nR numbers
+                     instead of nS independently scaled ones.
+
+        A rate vector that does not lie in the column space of S cannot be represented in extent
+        mode. That is the point rather than a limitation -- such a vector is not a set of reaction
+        rates -- and main() reports how much of the training data failed to fit, so a data set
+        inconsistent with the declared stoichiometry says so instead of being approximated.
+        """
         self.S = np.asarray(S, dtype=np.float64)
         self.nS, self.nR = self.S.shape
         self.W = width
         self.L = rounds
         self.n_out = n_out
+        if readout not in ("species", "extent"):
+            raise ValueError("readout must be species or extent, not %r" % readout)
+        self.readout = readout
 
         def he(shape, fan_in):
             return rng.normal(0.0, np.sqrt(1.0 / max(fan_in, 1)), size=shape)
@@ -78,7 +100,13 @@ class GraphNet(object):
         # Testing n_out > 1 instead would add a growth head to any multi-species system that has
         # no growth column, and the forward pass would then return nS+1 columns for an nS-column
         # target.
-        self.has_growth = (n_out > self.nS)
+        # In species mode a growth column shows up as one more output than there are species. In
+        # extent mode the outputs are reactions, so that test says nothing -- nR bears no relation
+        # to nS -- and the caller passes the answer in.
+        if growth is None:
+            self.has_growth = (n_out > self.nS)
+        else:
+            self.has_growth = bool(growth)
         self.n_head = 2 if self.has_growth else 1
         self.Wout = he((self.n_head, width), width)
         self.bout = np.zeros(self.n_head)
@@ -91,10 +119,16 @@ class GraphNet(object):
         return p
 
     def forward(self, x, da):
-        """x: (batch, nS) scaled concentrations.  da: (nR,).  Returns (batch, n_out)."""
-        B = x.shape[0]
+        """x: (batch, nS) scaled concentrations.  da: (nR,).
+
+        Returns (batch, nS [+1]) in species mode, and (batch, nR [+1]) in extent mode -- the
+        extents themselves, NOT the species rates. Turning extents into species rates is one
+        matrix product (S @ xi) and it is done where the loss is formed and where the file is
+        evaluated, not here, so that the fit sees exactly the quantity the readout produces.
+        """
         # encode: every species node starts from its own scaled concentration
         hS = np.tanh(x[:, :, None] * self.Wenc[:, 0][None, None, :] + self.benc[None, None, :])
+        hR = None
         for l in range(self.L):
             # species -> reactions, weighted by stoichiometry
             mR = np.einsum('ir,bih->brh', self.S, hS)
@@ -104,8 +138,11 @@ class GraphNet(object):
             # reactions -> species, same weights
             mS = np.einsum('ir,brh->bih', self.S, hR)
             hS = np.tanh(hS @ self.Wss[l].T + mS @ self.Wrs[l].T + self.bS[l][None, None, :])
-        # read out: one value per species node, then the growth slot if there is one
-        y = (hS @ self.Wout[0]) + self.bout[0]
+
+        if self.readout == "extent":
+            y = (hR @ self.Wout[0]) + self.bout[0]          # (batch, nR)
+        else:
+            y = (hS @ self.Wout[0]) + self.bout[0]          # (batch, nS)
         if self.has_growth:
             g = (hS.mean(axis=1) @ self.Wout[1]) + self.bout[1]
             return np.concatenate([y, g[:, None]], axis=1)
@@ -178,7 +215,7 @@ def numerical_fit(net, X, Y, da, epochs, lr, rng, verbose=True):
 # the file
 # ------------------------------------------------------------------------------------------------
 def write_gnn(path, net, species, reactions, da, xoff, xgain, yoff, ygain,
-              trainmin, trainmax, units, growth, provenance):
+              trainmin, trainmax, units, growth, provenance, xiscale=None):
     def row(f, name, a):
         f.write(name + " " + " ".join("%.17g" % v for v in np.asarray(a).reshape(-1)) + "\n")
 
@@ -197,6 +234,9 @@ def write_gnn(path, net, species, reactions, da, xoff, xgain, yoff, ygain,
         f.write("rounds %d\n" % net.L)
         f.write("width %d\n" % net.W)
         f.write("growth %d\n" % (1 if growth else 0))
+        # Written BEFORE the stoich block and before yoffset/ygain, because the loader needs it to
+        # know how many numbers those two lines carry.
+        f.write("readout %s\n" % net.readout)
         f.write("stoich %d %d\n" % (net.nS, net.nR))
         for i in range(net.nS):
             f.write(" ".join("%.17g" % v for v in net.S[i]) + "\n")
@@ -204,8 +244,16 @@ def write_gnn(path, net, species, reactions, da, xoff, xgain, yoff, ygain,
         row(f, "xoffset", xoff)
         row(f, "xgain", xgain)
         f.write("xymin -1\n")
-        row(f, "yoffset", yoff)
-        row(f, "ygain", ygain)
+        if net.readout == "extent":
+            # One pure scale per reaction. No offset: an offset does not commute with
+            # r_i = sum_r S[i,r] xi_r and would break the exactness this mode exists for.
+            row(f, "xiscale", xiscale)
+            if growth:
+                row(f, "yoffset", yoff)
+                row(f, "ygain", ygain)
+        else:
+            row(f, "yoffset", yoff)
+            row(f, "ygain", ygain)
         f.write("yymin -1\n")
         row(f, "trainmin", trainmin)
         row(f, "trainmax", trainmax)
@@ -233,8 +281,15 @@ def read_gnn(path):
             continue
         toks += line.split()
 
-    M = {"units": "per_second"}
+    M = {"units": "per_second", "readout": "species"}
     S, layers = None, []
+
+    def nyscale(m):
+        """How many numbers yoffset/ygain carry. In extent mode the species rates are not scaled
+        at all -- xiscale does that, per reaction -- so only growth is left."""
+        if m.get("readout", "species") == "extent":
+            return 1 if m.get("growth", 0) else 0
+        return m["nS"] + m.get("growth", 0)
 
     def take(n):
         nonlocal i
@@ -256,6 +311,8 @@ def read_gnn(path):
             M[k] = names
         elif k in ("rounds", "width", "growth"):
             M[k] = int(toks[i]); i += 1
+        elif k == "readout":
+            M["readout"] = toks[i]; i += 1
         elif k == "stoich":
             M["nS"], M["nR"] = int(toks[i]), int(toks[i + 1]); i += 2
             S = take(M["nS"] * M["nR"]).reshape(M["nS"], M["nR"])
@@ -263,8 +320,9 @@ def read_gnn(path):
         elif k == "xoffset":  M["xoff"] = take(M["nS"])
         elif k == "xgain":    M["xgain"] = take(M["nS"])
         elif k == "xymin":    M["xymin"] = float(toks[i]); i += 1
-        elif k == "yoffset":  M["yoff"] = take(M["nS"] + M["growth"])
-        elif k == "ygain":    M["ygain"] = take(M["nS"] + M["growth"])
+        elif k == "yoffset":  M["yoff"] = take(nyscale(M))
+        elif k == "ygain":    M["ygain"] = take(nyscale(M))
+        elif k == "xiscale":  M["xiscale"] = take(M["nR"])
         elif k == "yymin":    M["yymin"] = float(toks[i]); i += 1
         elif k == "trainmin": M["trainmin"] = take(M["nS"])
         elif k == "trainmax": M["trainmax"] = take(M["nS"])
@@ -283,8 +341,9 @@ def read_gnn(path):
         else:
             raise ValueError("unknown keyword '%s' in %s" % (k, path))
 
+    nout = (M["nR"] if M["readout"] == "extent" else M["nS"]) + M["growth"]
     net = GraphNet(S, M["width"], M["rounds"], np.random.default_rng(0),
-                   M["nS"] + M["growth"])
+                   nout, readout=M["readout"], growth=bool(M["growth"]))
     net.Wenc, net.benc = M["Wenc"], M["benc"]
     for l, L in enumerate(layers):
         net.Wsr[l], net.Wda[l], net.bR[l] = L["Wsr"], L["Wda"], L["bR"]
@@ -296,10 +355,26 @@ def read_gnn(path):
 
 def predict(net, M, C):
     """Concentrations in, rates out, in real units -- the same path the C++ takes: clamp to the
-    training box, scale in, forward, scale out, apply the unit scale."""
+    training box, scale in, forward, scale out, apply the unit scale.
+
+    In extent mode the forward pass returns extents, so the species rates are formed here exactly
+    as complab3d_graphnet.hh forms them: xi scaled per reaction, then r = S @ xi. Keeping the two
+    implementations line for line is what makes tests/xval_gnn.py able to catch a drift between
+    them."""
     C = np.clip(np.atleast_2d(C), M["trainmin"], M["trainmax"])
     Xs = (C - M["xoff"]) * M["xgain"] + M["xymin"]
     Ys = net.forward(Xs, M["da"])
+
+    if M.get("readout", "species") == "extent":
+        nR = M["nR"]
+        xi = Ys[:, :nR] * M["xiscale"][None, :]
+        rates = xi @ net.S.T                                   # r_i = sum_r S[i,r] xi_r
+        out = rates * M["unitscale"]
+        if M["growth"]:
+            g = ((Ys[:, nR] - M["yymin"]) / M["ygain"][0] + M["yoff"][0]) * M["unitscale"]
+            out = np.concatenate([out, g[:, None]], axis=1)
+        return out
+
     return ((Ys - M["yymin"]) / M["ygain"] + M["yoff"]) * M["unitscale"]
 
 
@@ -319,6 +394,12 @@ def main():
     ap.add_argument("--seed", type=int, default=1)
     ap.add_argument("--units", default="per_hour", choices=["per_second", "per_hour"])
     ap.add_argument("--da", default="", help="comma-separated Damkohler number per reaction")
+    ap.add_argument("--readout", default="extent", choices=["extent", "species"],
+                    help="extent (default): fit one extent per reaction and form the species "
+                         "rates as r = S xi, which is stoichiometrically exact at every input. "
+                         "species: fit each species rate off its own node, which is what every "
+                         ".gnn written before this option means, and which holds the ratio only "
+                         "approximately.")
     args = ap.parse_args()
 
     rng = np.random.default_rng(args.seed)
@@ -348,28 +429,101 @@ def main():
     lo, hi = X.min(axis=0), X.max(axis=0)
     span = np.where(hi > lo, hi - lo, 1.0)
     xoff, xgain = lo, 2.0 / span
-    ylo, yhi = Y.min(axis=0), Y.max(axis=0)
-    yspan = np.where(yhi > ylo, yhi - ylo, 1.0)
-    yoff, ygain = ylo, 2.0 / yspan
-
     Xs = (X - xoff) * xgain - 1.0
-    Ys = (Y - yoff) * ygain - 1.0
 
-    net = GraphNet(S, args.width, args.rounds, rng, Y.shape[1])
-    print("fitting %d species, %d reactions, width %d, %d rounds, %d samples"
-          % (nS, nR, args.width, args.rounds, X.shape[0]))
-    mse = numerical_fit(net, Xs, Ys, da, args.epochs, args.lr, rng)
+    Yrate = Y[:, :nS]                      # the species rates, whatever the readout
+    Ygrow = Y[:, nS:] if growth else None
+
+    xiscale = None
+    proj_note = ""
+    if args.readout == "extent":
+        # ---- project the species rates onto the reactions -----------------------------------
+        #
+        # The network is asked for one extent per reaction, but the data gives species rates. The
+        # extent that best explains a row is the least-squares solution of S xi = y, i.e. the
+        # pseudo-inverse. Fitting the projection rather than the raw rates is not a loss of
+        # information: whatever does NOT lie in the column space of S is, by definition, not a set
+        # of reaction rates for this stoichiometry, and no readout that respects the stoichiometry
+        # could reproduce it.
+        #
+        # It is however information about the DATA, so it is measured and reported. A large
+        # residual means the training set and the declared stoichiometry disagree, and the right
+        # response is to fix one of them rather than to accept a fit that quietly splits the
+        # difference.
+        Sp = np.linalg.pinv(S)                       # (nR, nS)
+        Xi = Yrate @ Sp.T                            # (samples, nR)
+        recon = Xi @ S.T
+        num = float(np.sum((recon - Yrate) ** 2))
+        den = float(np.sum(Yrate ** 2))
+        frac = np.sqrt(num / den) if den > 0 else 0.0
+        proj_note = ("stoichiometric residual %.3g of the rate norm" % frac)
+        print("projection onto the %d reaction(s): %s" % (nR, proj_note))
+        if frac > 0.05:
+            print("  WARNING: more than 5%% of the training rates do not lie in the column space")
+            print("  of the stoichiometry, so they are not reaction rates for this S. Check the")
+            print("  matrix and the data before trusting anything fitted to them. --readout")
+            print("  species will fit them, and will not be stoichiometrically exact either.")
+
+        # one pure scale per reaction, so the network's linear head works on O(1) numbers
+        xiscale = np.max(np.abs(Xi), axis=0)
+        xiscale = np.where(xiscale > 0, xiscale, 1.0)
+        T = Xi / xiscale[None, :]                    # the fitting target, per reaction
+        yoff = np.zeros(0)
+        ygain = np.zeros(0)
+        if growth:
+            glo, ghi = Ygrow.min(axis=0), Ygrow.max(axis=0)
+            gspan = np.where(ghi > glo, ghi - glo, 1.0)
+            yoff, ygain = glo, 2.0 / gspan
+            T = np.concatenate([T, (Ygrow - yoff) * ygain - 1.0], axis=1)
+        n_out = nR + (1 if growth else 0)
+    else:
+        ylo, yhi = Y.min(axis=0), Y.max(axis=0)
+        yspan = np.where(yhi > ylo, yhi - ylo, 1.0)
+        yoff, ygain = ylo, 2.0 / yspan
+        T = (Y - yoff) * ygain - 1.0
+        n_out = Y.shape[1]
+
+    net = GraphNet(S, args.width, args.rounds, rng, n_out,
+                   readout=args.readout, growth=growth)
+    print("fitting %d species, %d reactions, width %d, %d rounds, %d samples, readout %s"
+          % (nS, nR, args.width, args.rounds, X.shape[0], args.readout))
+    mse = numerical_fit(net, Xs, T, da, args.epochs, args.lr, rng)
 
     pred = net.forward(Xs, da)
-    r = np.corrcoef(pred.reshape(-1), Ys.reshape(-1))[0, 1]
+    r = np.corrcoef(pred.reshape(-1), T.reshape(-1))[0, 1]
     print("final scaled mse %.6e   R %.6f" % (mse, r))
+
+    prov = ["fitted %s from %s" % (datetime.date.today().isoformat(), args.data),
+            "samples %d, readout %s, scaled mse %.4e, R %.5f"
+            % (X.shape[0], args.readout, mse, r)]
+    if proj_note:
+        prov.append(proj_note)
 
     write_gnn(args.out, net, species,
               ["R%d" % (i + 1) for i in range(nR)], da,
               xoff, xgain, yoff, ygain, lo, hi, args.units, growth,
-              ["fitted %s from %s" % (datetime.date.today().isoformat(), args.data),
-               "samples %d, scaled mse %.4e, R %.5f" % (X.shape[0], mse, r)])
+              prov, xiscale=xiscale)
     print("wrote %s" % args.out)
+
+    # ---- the claim, measured on the file that was just written ------------------------------
+    #
+    # Reloading rather than reusing the in-memory network is deliberate: it exercises the writer
+    # and the reader, so a file that cannot be read back fails here rather than in a simulation.
+    net2, M = read_gnn(args.out)
+    P = predict(net2, M, X)[:, :nS] / M["unitscale"]
+
+    # How far the PREDICTED rate vectors lie from the column space of S. Zero means every
+    # prediction is S times something, which is what "stoichiometrically exact" means and which
+    # holds for any number of reactions, not only for the one-reaction case where it reduces to a
+    # fixed ratio between two species.
+    Sp = np.linalg.pinv(S)
+    off = P - (P @ Sp.T) @ S.T
+    den = float(np.sum(P ** 2))
+    dev = float(np.sqrt(np.sum(off ** 2) / den)) if den > 0 else 0.0
+    print("predictions off the stoichiometric subspace: %.3g of the rate norm" % dev)
+    if args.readout == "extent" and dev > 1e-10:
+        print("  This should be at machine precision in extent mode. It is not, which means the")
+        print("  writer and the reader disagree about this file. Do not use it.")
 
 
 if __name__ == "__main__":

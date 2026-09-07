@@ -1,5 +1,5 @@
 cff-version: 1.2.0
-title: "CompLB3D: a 3D pore-scale reactive transport model with microbial metabolism"
+title: "CompLaB3D-GEMS: geometry evolution, genome-scale metabolism and learned rate laws for pore-scale reactive transport"
 message: "If you use this software, please cite it using these metadata."
 type: software
 
@@ -25,11 +25,11 @@ abstract: >-
   and adds an equilibrium chemistry solver, an abiotic kinetics path, and
   mineral dissolution.
 
-repository-code: "https://github.com/shahram444/CompLB3D-lattice-Boltzmann-FBA-surrogate-COBRApy-GLPK"
+repository-code: "https://github.com/shahram444/CompLaB3D-GEMS"
 license: AGPL-3.0-or-later
 
-version: 1.0.0
-date-released: 2026-08-13
+version: 1.3.0
+date-released: 2026-09-07
 
 # Add the Zenodo DOI here once you have cut the release. JOSS asks for it, and
 # it is what makes this file cite a fixed version rather than a moving branch.

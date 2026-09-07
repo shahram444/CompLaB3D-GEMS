@@ -1,0 +1,232 @@
+<?xml version="1.0" ?>
+<!-- =========================================================================
+     CompLB3D EXAMPLE 19  |  A THERMODYNAMICALLY GATED REACTION
+     =========================================================================
+
+     An ANME-SRB aggregate oxidising methane with sulfate:
+
+         CH4 + SO4(2-)  ->  HS(-) + HCO3(-) + H2O
+
+     The rate law in defineKinetics.hh is an ordinary dual Monod on
+     methane and sulfate. It never looks at the two products, so left
+     to itself it keeps the reaction running at the centre of the
+     aggregate, where sulfide and bicarbonate have accumulated to the
+     point that no organism could conserve energy from the reaction.
+
+     <thermodynamics> supplies the factor that law is missing. At every
+     voxel the solver computes
+
+         dG  = dG0 + RT ln Q                          Craig (2024) Eq. 3.6
+         F_T = max(0, 1 - exp((dG + m dG_ATP)/(chi RT)))   Eq. 3.3
+
+     and multiplies the rate by F_T. The energetics are in
+     input/aom.thm, not here and not in a header: one switch and one
+     file name, so the numbers that produced a result can be read,
+     diffed and cited.
+
+     TO SEE WHAT THE GATE DOES, run this case twice: once as shipped,
+     and once with <enabled> below set to false. Nothing else changes.
+     postprocess.py compares the two logs for you.
+     ========================================================================= -->
+<parameters>
+
+    <path>
+        <src_path>src</src_path>
+        <input_path>input</input_path>
+        <output_path>output</output_path>
+    </path>
+
+    <simulation_mode>
+        <biotic_mode>true</biotic_mode>
+        <enable_kinetics>true</enable_kinetics>
+        <enable_abiotic_kinetics>false</enable_abiotic_kinetics>
+        <enable_fba_glpk>false</enable_fba_glpk>
+        <enable_fba_cobrapy>false</enable_fba_cobrapy>
+        <enable_surrogate>false</enable_surrogate>
+        <enable_validation_diagnostics>true</enable_validation_diagnostics>
+    </simulation_mode>
+
+    <!-- The run's own scalar record. output/summary.csv gets one row every 500
+         steps, the <interval> set below. The sulfide maximum is the headline column of this case: it is
+         the product whose build-up closes the gate, so watch it there rather
+         than by eye in the log. -->
+    <diagnostics>
+        <enabled>true</enabled>
+        <summary_csv>summary.csv</summary_csv>
+        <interval>500</interval>
+        <tolerance>1e-6</tolerance>
+    </diagnostics>
+
+    <LB_numerics>
+        <domain>
+            <nx>32</nx>
+            <ny>32</ny>
+            <nz>10</nz>
+            <dx>10</dx>
+            <unit>um</unit>
+            <characteristic_length>32</characteristic_length>
+            <filename>geometry.dat</filename>
+            <material_numbers>
+                <pore>2</pore>
+                <solid>0</solid>
+                <bounce_back>1</bounce_back>
+                <microbe0>3</microbe0>
+            </material_numbers>
+        </domain>
+
+        <delta_P>1e-6</delta_P>
+        <Peclet>0</Peclet>
+        <tau>0.8</tau>
+        <track_performance>false</track_performance>
+
+        <iteration>
+            <ns_max_iT1>20000</ns_max_iT1>
+            <ns_max_iT2>2000</ns_max_iT2>
+            <ns_converge_iT1>1e-6</ns_converge_iT1>
+            <ns_converge_iT2>1e-4</ns_converge_iT2>
+            <ns_update_interval>10</ns_update_interval>
+            <ade_update_interval>1</ade_update_interval>
+            <ade_max_iT>12000</ade_max_iT>
+            <ade_converge_iT>1e-10</ade_converge_iT>
+        </iteration>
+    </LB_numerics>
+
+    <!-- =====================================================================
+         THE ONLY NEW BLOCK.  Two lines: a switch, and where the energetics
+         live.  Everything else about the reaction is unchanged.
+         ===================================================================== -->
+    <thermodynamics>
+        <enabled>true</enabled>
+        <energetics_file>input/aom.thm</energetics_file>
+    </thermodynamics>
+
+    <chemistry>
+        <number_of_substrates>4</number_of_substrates>
+
+        <!-- The two reactants, delivered from the left boundary. -->
+        <substrate0>
+            <name_of_substrates>CH4</name_of_substrates>
+            <initial_concentration>1.0e-2</initial_concentration>
+            <substrate_diffusion_coefficients>
+                <in_pore>1.5e-9</in_pore>
+                <in_biofilm>1.5e-10</in_biofilm>
+            </substrate_diffusion_coefficients>
+            <left_boundary_type>Dirichlet</left_boundary_type>
+            <left_boundary_condition>1.0e-2</left_boundary_condition>
+            <right_boundary_type>Neumann</right_boundary_type>
+            <right_boundary_condition>0.</right_boundary_condition>
+        </substrate0>
+
+        <substrate1>
+            <name_of_substrates>SO4</name_of_substrates>
+            <initial_concentration>2.8e-2</initial_concentration>
+            <substrate_diffusion_coefficients>
+                <in_pore>1.0e-9</in_pore>
+                <in_biofilm>1.0e-10</in_biofilm>
+            </substrate_diffusion_coefficients>
+            <left_boundary_type>Dirichlet</left_boundary_type>
+            <left_boundary_condition>2.8e-2</left_boundary_condition>
+            <right_boundary_type>Neumann</right_boundary_type>
+            <right_boundary_condition>0.</right_boundary_condition>
+        </substrate1>
+
+        <!-- The two products.  They leave only by diffusion, which is what
+             lets them build up inside the aggregate and close the gate. -->
+        <substrate2>
+            <name_of_substrates>HS</name_of_substrates>
+            <initial_concentration>1.0e-5</initial_concentration>
+            <substrate_diffusion_coefficients>
+                <in_pore>1.7e-9</in_pore>
+                <in_biofilm>1.7e-10</in_biofilm>
+            </substrate_diffusion_coefficients>
+            <left_boundary_type>Dirichlet</left_boundary_type>
+            <left_boundary_condition>1.0e-5</left_boundary_condition>
+            <right_boundary_type>Neumann</right_boundary_type>
+            <right_boundary_condition>0.</right_boundary_condition>
+        </substrate2>
+
+        <substrate3>
+            <name_of_substrates>HCO3</name_of_substrates>
+            <initial_concentration>2.3e-3</initial_concentration>
+            <substrate_diffusion_coefficients>
+                <in_pore>1.2e-9</in_pore>
+                <in_biofilm>1.2e-10</in_biofilm>
+            </substrate_diffusion_coefficients>
+            <left_boundary_type>Dirichlet</left_boundary_type>
+            <left_boundary_condition>2.3e-3</left_boundary_condition>
+            <right_boundary_type>Neumann</right_boundary_type>
+            <right_boundary_condition>0.</right_boundary_condition>
+        </substrate3>
+
+    </chemistry>
+
+    <microbiology>
+        <number_of_microbes>1</number_of_microbes>
+        <maximum_biomass_density>1.0e-2</maximum_biomass_density>
+        <thrd_biofilm_fraction>0.01</thrd_biofilm_fraction>
+        <CA_method>fraction</CA_method>
+
+        <microbe0>
+            <!-- This name is what input/aom.thm binds to. -->
+            <name_of_microbes>ANME</name_of_microbes>
+            <solver_type>CA</solver_type>
+            <reaction_type>kinetics</reaction_type>
+            <initial_densities>1.0e-3</initial_densities>
+            <decay_coefficient>0.0</decay_coefficient>
+            <viscosity_ratio_in_biofilm>0</viscosity_ratio_in_biofilm>
+            <!-- unused on the kinetics path: defineKinetics.hh carries its own -->
+            <half_saturation_constants>0 0 0 0</half_saturation_constants>
+            <maximum_uptake_flux>0 0 0 0</maximum_uptake_flux>
+            <left_boundary_type>closed</left_boundary_type>
+            <left_boundary_condition>0.</left_boundary_condition>
+            <right_boundary_type>closed</right_boundary_type>
+            <right_boundary_condition>0.</right_boundary_condition>
+        </microbe0>
+
+    </microbiology>
+
+    <equilibrium>
+        <enabled>false</enabled>
+    </equilibrium>
+
+    <precipitation>
+        <enabled>false</enabled>
+    </precipitation>
+
+    <dissolution>
+        <enabled>false</enabled>
+    </dissolution>
+
+    <!-- ONE AGGREGATE, REDUCED TO THE TWO NUMBERS A CONTINUUM MODEL NEEDS.
+         The aggregate is material 3, the biofilm. The bulk is the open water
+         around it, material 2. Methane is the reacting species whose rate
+         defines the effectiveness factor.
+           eta  = <r> inside the aggregate / r(C_bulk)
+           phi  = R sqrt(k/D), with k = r(C_bulk)/C_bulk
+         Radius and diffusivity are left at 0, so the solver takes the radius of
+         the sphere of the measured aggregate volume and the substrate's own
+         in-biofilm diffusivity. Declare them only if you want the numbers the
+         case claims rather than the ones it has. -->
+    <upscaling>
+        <enabled>true</enabled>
+        <aggregate_materials>3</aggregate_materials>
+        <species>0</species>
+        <radius>0</radius>
+        <diffusivity>0</diffusivity>
+        <freeze_biomass>false</freeze_biomass>
+        <record_csv>upscaling.csv</record_csv>
+    </upscaling>
+
+    <IO>
+        <read_NS_file>false</read_NS_file>
+        <read_ADE_file>false</read_ADE_file>
+        <ns_filename>nsLattice</ns_filename>
+        <mask_filename>maskLattice</mask_filename>
+        <subs_filename>subsLattice</subs_filename>
+        <bio_filename>bioLattice</bio_filename>
+        <save_VTK_interval>500</save_VTK_interval>
+        <save_CHK_interval>0</save_CHK_interval>
+        <debug_updRxn>0</debug_updRxn>
+    </IO>
+
+</parameters>

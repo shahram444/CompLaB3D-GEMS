@@ -3,7 +3,7 @@
 smoke_fit.py -- check that fit_symbolic.py runs and writes a .sym the C++ side will accept.
 
 Deliberately tiny: a real search takes minutes, and what is being checked here is the plumbing,
-not the quality of the fit.  The quality claim is in the README and rests on examples/ecoli_sweep.csv,
+not the quality of the fit.  The quality claim is in the README and rests on pipelines/B_offline_models/B2_surrogate_network/expected/ecoli_sweep.csv,
 where the search recovers the dual-Monod law it was never told about to within 0.03%.
 """
 import os, subprocess, sys, tempfile

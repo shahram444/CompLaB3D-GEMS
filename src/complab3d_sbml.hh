@@ -81,7 +81,26 @@
 #include <cmath>
 #include <cstdio>
 
-#include "tinyxml.h"
+/* TinyXML.
+ *
+ * Palabos vendors it at externalLibraries/tinyxml/ and its own header includes it as
+ * "tinyxml/tinyxml.h", because the include path CMake sets is externalLibraries, not
+ * externalLibraries/tinyxml. A bare #include "tinyxml.h" therefore does NOT resolve in a
+ * normal Palabos build -- it only appeared to during development because that machine also
+ * had a system-wide libtinyxml-dev, and the system copy was picked up instead.
+ *
+ * Both spellings are accepted here: the Palabos-relative one first, so a real build uses the
+ * vendored copy that is already compiled into libpalabos, and the bare one as a fallback for
+ * standalone compilation against a system tinyxml. */
+#if defined(__has_include)
+#  if __has_include("tinyxml/tinyxml.h")
+#    include "tinyxml/tinyxml.h"
+#  else
+#    include "tinyxml.h"
+#  endif
+#else
+#  include "tinyxml/tinyxml.h"
+#endif
 
 namespace complab_sbml {
 

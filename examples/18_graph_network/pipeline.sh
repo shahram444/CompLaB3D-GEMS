@@ -53,7 +53,7 @@ echo "== running. READ THE START-UP LINES: the geometry, the enabled features"
 echo "   and each organism's rate path are echoed before the first step. If any"
 echo "   of it is not what you meant, stop now rather than in a fortnight."
 mkdir -p output
-./build/complab CompLaB.xml 2>&1 | tee output/run.log
+./complab CompLaB.xml 2>&1 | tee output/run.log
 
 # ---------------------------------------------------------------------------
 # 5. POST-PROCESS  ->  a verdict on the run

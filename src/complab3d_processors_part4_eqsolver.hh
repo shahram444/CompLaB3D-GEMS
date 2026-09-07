@@ -281,13 +281,21 @@ public:
      * Example: {"H2CO3", "HCO3-", "H+", "CO3--"}
      * We skip "H2O" because water is the solvent, not a variable.
      */
+    /* [FIX] This used to DROP "H2O" from the list.  The caller passes the full substrate list
+     * and reads the answer back by substrate index -- `eq_conc[iS]` for iS in 0..subsNum-1 --
+     * while the stoichiometry matrix and the logK vector keep all subsNum rows straight from
+     * the XML.  So a run that named a substrate H2O read one past the end of the returned
+     * vector and matched every species after it against the wrong row.  The list is kept whole
+     * and water is skipped where it actually matters, in the activity product, so the indices
+     * of the caller, the matrix and the answer all stay the same length. */
     void setSpeciesNames(const std::vector<std::string>& names) {
-        species_names.clear();     /* Empty the current list */
-        for (const auto& name : names) {   /* Loop through each name */
-            if (name != "H2O" && name != "h2o") {
-                species_names.push_back(name);   /* Add it to our list */
-            }
-        }
+        species_names = names;     /* one entry per substrate, in the caller's order */
+    }
+
+    /* True where the named species is the solvent, whose activity is taken as one and which
+     * therefore contributes nothing to a mass-action product. */
+    static bool isSolvent(const std::string& name) {
+        return name == "H2O" || name == "h2o";
     }
 
     /* setComponentNames: Provide the list of "master" components.
@@ -1269,6 +1277,36 @@ private:
     T conditionTol;        /* Max allowed condition number (default 1e10)       */
     T beta;                /* Mixing/damping parameter (default 1.0 = no damping) */
 };
+
+/* ============================================================================
+ * [FIX-3D] OUT-OF-CLASS DEFINITIONS FOR THE CONSTANTS ABOVE
+ *
+ *   Found by the first real link against Palabos:
+ *       undefined reference to `EquilibriumChemistry<double>::MIN_CONC'
+ *
+ *   `static constexpr T MIN_CONC = 1e-30;` inside the class is a DECLARATION with
+ *   an initialiser, not a definition.  Reading its value in an expression is fine,
+ *   but passing it to std::min or std::max is not: those take their arguments by
+ *   const reference, which needs an address, which needs a definition.  Every use
+ *   below line 450 is exactly that:
+ *
+ *       conc[i] = std::max(std::min(conc[i], MAX_CONC), MIN_CONC);
+ *
+ *   The program therefore compiled cleanly and failed at the link step -- which is
+ *   why this was never caught by any header-level check.
+ *
+ *   C++17 made static constexpr members implicitly inline, so a build at -std=c++17
+ *   links without these lines.  CompLaB's CMakeLists sets -std=c++11, so they are
+ *   required.  They are harmless under C++17 (the definitions are simply redundant),
+ *   which is why fixing it here rather than by raising the standard is the safer
+ *   change: it works either way.
+ * ============================================================================ */
+template<typename T> constexpr T EquilibriumChemistry<T>::MIN_CONC;
+template<typename T> constexpr T EquilibriumChemistry<T>::MAX_CONC;
+template<typename T> constexpr T EquilibriumChemistry<T>::MIN_LOG_C;
+template<typename T> constexpr T EquilibriumChemistry<T>::MAX_LOG_C;
+template<typename T> constexpr T EquilibriumChemistry<T>::DEFAULT_CONDITION_TOL;
+template<typename T> constexpr T EquilibriumChemistry<T>::DEFAULT_BETA;
 
 
 /* ╔════════════════════════════════════════════════════════════════════════════╗

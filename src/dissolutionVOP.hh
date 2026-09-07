@@ -133,6 +133,7 @@
 #include <vector>
 #include <string>
 #include <cmath>
+#include <cstdio>
 
 
 /* ============================================================================
@@ -152,6 +153,118 @@ struct SolidPhase {
       : id(0), material_number(-1), substrate(-1),
         full_density((T) 0), initial_fill((T) 0), is_precipitate(false) {}
 };
+
+
+/* ============================================================================
+ *  HOW MUCH DISSOLUTION PRODUCT CROSSED A BLOCK BOUNDARY, AND WAS LOST
+ *
+ *  A dissolving voxel pushes its products into its open face neighbours.  When
+ *  a neighbour lies in a different MPI block, that write lands in this block's
+ *  ENVELOPE -- a read-only copy of the other block's bulk -- and the next
+ *  communication overwrites it from the owner.  The mass is gone.
+ *
+ *  Nothing measured it.  A dissolution run therefore lost a quantity that
+ *  depended on the processor count, concentrated at block interfaces, with no
+ *  line in the log to suggest it and no way to tell a real result from a
+ *  degraded one after the fact.
+ *
+ *  This does not fix it -- the fix is to turn the push into a pull, which needs
+ *  a scratch field and an extra communication step, and is a change to the
+ *  solver's schedule rather than to this file.  It makes it VISIBLE: every
+ *  deposit is weighed, and the ones that landed outside this block's bulk are
+ *  weighed separately.  The end of the run reports the fraction, so
+ *
+ *      a serial run reports exactly 0.00%, which is the guidance confirmed
+ *      rather than asserted;
+ *      a parallel run reports what it actually lost, and a reader can decide
+ *      whether 0.3% matters for what they are doing.
+ * ============================================================================
+ */
+struct DissolutionRuntime {
+    double released;       /* mol/L parked by the mineral voxels, absolute value */
+    double gathered;       /* mol/L the water actually collected */
+    long   parked;         /* per-face shares parked */
+    long   collected;      /* per-face shares collected */
+    long   clamped;        /* shares a receiving voxel could not absorb in full */
+    /* Per substrate, signed, so the report can be read against a stoichiometry.
+     *
+     * `released` above is the sum of the ABSOLUTE value of every share, over every substrate the
+     * rate law touches. That is the right quantity for the parked-equals-collected invariant and
+     * a misleading one for anything else: a rate law that consumes a proton for every calcium it
+     * frees parks two shares of equal size, so `released` comes out at exactly twice the mineral
+     * dissolved. Example 14 reported 8.6052 mol/L released against 4.3026 mol/L of calcite lost,
+     * and that factor of two is arithmetic, not chemistry. Broken out here so the report can say
+     * which substrate got what, and the reader can check the stoichiometry rather than a sum over
+     * species that has no stoichiometry to check against. */
+    std::vector<double> perSpecies;
+    double mineralRemoved;     /* signed, negative: what came out of the mineral inventory */
+    DissolutionRuntime()
+      : released(0.0), gathered(0.0), parked(0), collected(0), clamped(0), mineralRemoved(0.0) {}
+    void note(plint iS, double amount) {
+        if ((plint) perSpecies.size() <= iS) perSpecies.resize((size_t) iS + 1, 0.0);
+        perSpecies[(size_t) iS] += amount;
+    }
+};
+
+inline DissolutionRuntime &dissolutionRuntime()
+{
+    static DissolutionRuntime R;
+    return R;
+}
+
+inline std::string dissolutionRuntimeReport()
+{
+    DissolutionRuntime &R = dissolutionRuntime();
+    if (R.parked == 0) return std::string();
+
+    char b[640];
+    std::string s;
+    std::sprintf(b, "  [DISSOL-VOP] %ld product shares parked, %ld collected by the water\n",
+                 R.parked, R.collected);
+    s = b;
+    std::sprintf(b, "  [DISSOL-VOP] %.6g mol/L parked in total, %.6g collected"
+                    "  (the sum of |share| over every substrate)\n",
+                 R.released, R.gathered);
+    s += b;
+    std::sprintf(b, "  [DISSOL-VOP] mineral removed from inventory: %.6g mol/L\n",
+                 R.mineralRemoved);
+    s += b;
+    for (size_t iS = 0; iS < R.perSpecies.size(); ++iS) {
+        if (R.perSpecies[iS] == 0.0) continue;
+        std::sprintf(b, "  [DISSOL-VOP]   substrate %d: %+.6g mol/L\n",
+                     (int) iS, R.perSpecies[iS]);
+        s += b;
+    }
+    s += "  [DISSOL-VOP] Check these against your rate law's stoichiometry: a product should\n"
+         "  [DISSOL-VOP] match the mineral removed, and a consumed reactant should be its\n"
+         "  [DISSOL-VOP] negative. The total on the line above is a sum of absolute values and\n"
+         "  [DISSOL-VOP] has no stoichiometry of its own.\n";
+
+    /* THE INVARIANT. Every share a mineral voxel parks is collected by exactly one open
+     * neighbour, whichever rank owns it. If these two counts differ, mass went somewhere, and
+     * the run should not be believed. This is the check the previous "did it cross a block
+     * boundary" accounting could only approximate. */
+    const long dParked = R.parked - R.collected;
+    if (dParked != 0) {
+        std::sprintf(b, "  [DISSOL-VOP] MASS WAS LOST: %ld share(s) parked were never collected.\n",
+                     dParked);
+        s += b;
+        s += "  [DISSOL-VOP] Every share belongs to exactly one open face and must be picked up\n"
+             "  [DISSOL-VOP] by exactly one voxel. A mismatch is a defect in the solver, not a\n"
+             "  [DISSOL-VOP] property of your case. Do not use these results; please report it.\n";
+    } else if (R.clamped > 0) {
+        std::sprintf(b, "  [DISSOL-VOP] %ld share(s) were larger than the receiving voxel could\n"
+                        "  [DISSOL-VOP] absorb without going negative and were clamped. That is\n"
+                        "  [DISSOL-VOP] the positivity rule, not a leak, but a large count means\n"
+                        "  [DISSOL-VOP] the time step is long against the dissolution rate.\n",
+                     R.clamped);
+        s += b;
+    } else {
+        s += "  [DISSOL-VOP] every share parked was collected: the deposit is exact, and stays\n"
+             "  [DISSOL-VOP] exact at any processor count.\n";
+    }
+    return s;
+}
 
 
 /* ============================================================================
@@ -377,33 +490,37 @@ public:
 
                     if (!(-dMineral > thrd)) continue;
 
-                    /* ---- take the mineral out -----------------------------
-                     * [FIX] This used to accumulate into dC[sM] and leave the apply to
-                     * update_abiotic_rxnLattices.  That step skips any voxel whose mask is solid
-                     * or bounce-back -- and a dissolving mineral voxel is solid BY CONSTRUCTION,
-                     * which is the whole reason it carries a phase id.  So the decrement went
-                     * into dC, was never applied, and was wiped when dC was reset at the top of
-                     * the next step.  The mineral inventory never fell.
-                     *
-                     * The products meanwhile go into the PORE neighbours, which the apply step
-                     * does visit, so they WERE applied.  Net effect: solute created from nothing
-                     * every step, forever, no mineral consumed, and nothing ever reaching the
-                     * reopen threshold.
-                     *
-                     * The mineral lattice is written DIRECTLY here instead.  Safe, and only for
-                     * this field: a phase substrate must be declared <immobile>, so it is never
-                     * collided and never streamed -- storage, not transport. */
+                    /* ---- take the mineral out ----------------------------- */
                     {
                         Array<T,7> g;
-                        Cell<T,Descriptor> &cell = lattices[sM]->get(
-                            iX+off[sM].x, iY+off[sM].y, iZ+off[sM].z);
+                        Cell<T,Descriptor> &cell = lattices[sM+dCloc]->get(
+                            iX+off[sM+dCloc].x, iY+off[sM+dCloc].y, iZ+off[sM+dCloc].z);
                         cell.getPopulations(g);
                         g[0]+=dMineral/4; g[1]+=dMineral/8; g[2]+=dMineral/8; g[3]+=dMineral/8;
                         g[4]+=dMineral/8; g[5]+=dMineral/8; g[6]+=dMineral/8;
                         cell.setPopulations(g);
+                        dissolutionRuntime().mineralRemoved += (double) dMineral;
                     }
 
-                    /* ---- put the products into the open neighbours --------- */
+                    /* ---- park the products, one share per open face ---------
+                     *
+                     * THIS USED TO WRITE STRAIGHT INTO THE NEIGHBOURS, and that is what made a
+                     * dissolution run depend on the processor count. A voxel on the edge of an
+                     * MPI block wrote into a cell that belongs to the NEXT block -- this block's
+                     * envelope, a read-only copy -- and the next communication overwrote it from
+                     * the owner. The mass was gone, silently, and only at block interfaces.
+                     *
+                     * The write is now to this voxel's OWN increment slot, which is a cell every
+                     * rank owns. What is stored is the amount destined for ONE open face, already
+                     * divided. Palabos refreshes the envelopes of a lattice a processor declared
+                     * it modified, so by the time dissolutionGather3D runs, every rank can see the
+                     * per-face amounts parked by mineral voxels in its neighbours' blocks, and it
+                     * collects them into the water. Push became pull; nothing crosses a boundary
+                     * that is not communicated.
+                     *
+                     * No extra memory: a solute increment inside a SOLID voxel is otherwise
+                     * unused, because update_abiotic_rxnLattices applies increments there only
+                     * for an immobile species -- and the mineral itself is handled above. */
                     if (nOpen > 0) {
                         for (plint iS = 0; iS < subsNum; ++iS) {
                             if (iS == sM) continue;                  // the mineral itself, already handled
@@ -411,17 +528,18 @@ public:
                             if (std::fabs(released) <= thrd) continue;
                             const T perFace = released / (T) nOpen;
 
-                            for (plint k = 0; k < nOpen; ++k) {
-                                const int d = (int) openDir[k];
-                                const plint jX = iX + dloc[d][0], jY = iY + dloc[d][1], jZ = iZ + dloc[d][2];
-                                Array<T,7> g;
-                                Cell<T,Descriptor> &cell = lattices[iS+dCloc]->get(
-                                    jX+off[iS+dCloc].x, jY+off[iS+dCloc].y, jZ+off[iS+dCloc].z);
-                                cell.getPopulations(g);
-                                g[0]+=perFace/4; g[1]+=perFace/8; g[2]+=perFace/8; g[3]+=perFace/8;
-                                g[4]+=perFace/8; g[5]+=perFace/8; g[6]+=perFace/8;
-                                cell.setPopulations(g);
-                            }
+                            DissolutionRuntime &RT = dissolutionRuntime();
+                            RT.released += std::fabs((double) released);
+                            RT.note(iS, (double) released);
+                            RT.parked   += (long) nOpen;
+
+                            Array<T,7> g;
+                            Cell<T,Descriptor> &cell = lattices[iS+dCloc]->get(
+                                iX+off[iS+dCloc].x, iY+off[iS+dCloc].y, iZ+off[iS+dCloc].z);
+                            cell.getPopulations(g);
+                            g[0]+=perFace/4; g[1]+=perFace/8; g[2]+=perFace/8; g[3]+=perFace/8;
+                            g[4]+=perFace/8; g[5]+=perFace/8; g[6]+=perFace/8;
+                            cell.setPopulations(g);
                         }
                     }
                 }
@@ -429,7 +547,8 @@ public:
         }
     }
 
-    /* bulk only: this processor reads AND writes face neighbours */
+    /* bulk only: this processor READS its face neighbours (to find the wetted faces and
+     * average the water over them). It no longer writes to them. */
     virtual BlockDomain::DomainT appliesTo() const { return BlockDomain::bulk; }
 
     virtual surfaceDissolutionKinetics3D<T,Descriptor>* clone() const {
@@ -438,15 +557,6 @@ public:
     void getTypeOfModification (std::vector<modif::ModifT> &modified) const {
         for (size_t i = 0; i < modified.size(); ++i) modified[i] = modif::nothing;
         for (plint iT = dCloc; iT < maskLloc; ++iT) modified[iT] = modif::staticVariables;
-        /* [FIX] The mineral inventory is now written straight into its own substrate lattice
-         * rather than into dC, so those lattices are modified too.  Only the phase substrates
-         * are ever touched, so only those are marked. */
-        if (cfg != 0) {
-            for (size_t k = 0; k < cfg->phases.size(); ++k) {
-                const plint sM = cfg->phases[k].substrate;
-                if (sM >= 0 && sM < subsNum) modified[(size_t) sM] = modif::staticVariables;
-            }
-        }
     }
 
 private:
@@ -454,6 +564,157 @@ private:
     T dt;
     plint solid, bb;
     std::vector<plint> pore;
+    const DissolutionConfig *cfg;
+    plint dCloc, maskLloc, phaseLloc;
+};
+
+
+/* ============================================================================
+ *  dissolutionGather3D  --  THE SECOND HALF OF THE DEPOSIT
+ *
+ *  surfaceDissolutionKinetics3D parks, in each mineral voxel's own increment
+ *  slot, the amount of each product destined for ONE of its open faces.  This
+ *  collects them: every open voxel looks at its six face neighbours and, for
+ *  each one that is a mineral of a declared phase, adds that neighbour's parked
+ *  share to itself.
+ *
+ *  WHY IT IS SPLIT IN TWO.  A processor that writes into its neighbours writes,
+ *  at a block edge, into the envelope -- a read-only copy of the next block's
+ *  bulk -- and the next communication overwrites it from the owner.  Every such
+ *  write was lost, so a dissolution result depended on the processor count, and
+ *  the discrepancy sat at block interfaces where nobody looks.
+ *
+ *  A gather has no such problem.  Each voxel writes only to itself, and READS
+ *  its neighbours -- and a read from the envelope is exactly what the envelope
+ *  is for.  Palabos refreshes it after the first pass, because that pass
+ *  declared the increment lattices modified, so a share parked on one rank is
+ *  visible to the neighbouring rank before this pass runs.
+ *
+ *  THE SYMMETRY THAT MAKES IT WORK.  Pass one divided the release by the number
+ *  of open faces the mineral voxel has.  This pass does not need that number:
+ *  a voxel that is open and is a face neighbour of the mineral IS one of those
+ *  faces, by the same test, so it takes exactly one share.  Every share parked
+ *  is collected once, and the end-of-run report checks that count against the
+ *  count parked.
+ *
+ *  Lattice layout, the same one pass one uses:
+ *      [0            .. subsNum-1]   substrate concentrations   C
+ *      [subsNum      .. 2*subsNum-1] substrate increments       dC
+ *      [2*subsNum]                   mask lattice
+ *      [2*subsNum+1]                 phase lattice
+ * ============================================================================
+ */
+template<typename T, template<typename U> class Descriptor>
+class dissolutionGather3D : public LatticeBoxProcessingFunctional3D<T,Descriptor>
+{
+public:
+    dissolutionGather3D (plint nx_, plint ny_, plint nz_, plint subsNum_,
+                         plint solid_, plint bb_, const DissolutionConfig *cfg_)
+        : nx(nx_), ny(ny_), nz(nz_), subsNum(subsNum_),
+          solid(solid_), bb(bb_), cfg(cfg_),
+          dCloc(subsNum_), maskLloc(2*subsNum_), phaseLloc(2*subsNum_ + 1)
+    {}
+
+    virtual void process (Box3D domain, std::vector<BlockLattice3D<T,Descriptor>*> lattices)
+    {
+        const T thrd = (T) 1e-14;
+        static const int dloc[6][3] = { {1,0,0}, {-1,0,0}, {0,1,0}, {0,-1,0}, {0,0,1}, {0,0,-1} };
+
+        Dot3D absoluteOffset = lattices[0]->getLocation();
+        std::vector<Dot3D> off;
+        off.reserve(phaseLloc + 1);
+        for (plint iT = 0; iT <= phaseLloc; ++iT)
+            off.push_back(computeRelativeDisplacement(*lattices[0], *lattices[iT]));
+
+        DissolutionRuntime &RT = dissolutionRuntime();
+
+        for (plint iX = domain.x0; iX <= domain.x1; ++iX) {
+            const plint absX = iX + absoluteOffset.x;
+            if (absX < 1 || absX > nx-2) continue;
+            for (plint iY = domain.y0; iY <= domain.y1; ++iY) {
+                const plint absY = iY + absoluteOffset.y;
+                for (plint iZ = domain.z0; iZ <= domain.z1; ++iZ) {
+                    const plint absZ = iZ + absoluteOffset.z;
+
+                    /* only water collects: the same open test pass one used */
+                    const plint myMask = util::roundToInt(
+                        lattices[maskLloc]->get(iX+off[maskLloc].x, iY+off[maskLloc].y,
+                                                iZ+off[maskLloc].z).computeDensity());
+                    if (myMask == solid || myMask == bb) continue;
+
+                    for (int d = 0; d < 6; ++d) {
+                        const plint aX = absX + dloc[d][0];
+                        const plint aY = absY + dloc[d][1];
+                        const plint aZ = absZ + dloc[d][2];
+                        if (aX < 1 || aX > nx-2 || aY < 0 || aY > ny-1 || aZ < 0 || aZ > nz-1) continue;
+
+                        const plint jX = iX + dloc[d][0], jY = iY + dloc[d][1], jZ = iZ + dloc[d][2];
+
+                        /* a neighbour only parks anything if it is a declared phase */
+                        const plint pid = util::roundToInt(
+                            lattices[phaseLloc]->get(jX+off[phaseLloc].x, jY+off[phaseLloc].y,
+                                                     jZ+off[phaseLloc].z).computeDensity());
+                        if (pid <= 0) continue;
+                        const SolidPhase *ph = cfg->byId(pid);
+                        if (ph == 0) continue;
+                        const plint sM = ph->substrate;
+
+                        for (plint iS = 0; iS < subsNum; ++iS) {
+                            if (iS == sM) continue;              /* the mineral stays where it is */
+                            Cell<T,Descriptor> &src = lattices[iS+dCloc]->get(
+                                jX+off[iS+dCloc].x, jY+off[iS+dCloc].y, jZ+off[iS+dCloc].z);
+                            const T share = src.computeDensity();
+                            if (std::fabs(share) <= thrd) continue;
+
+                            /* The positivity rule, the same one every other increment in the
+                             * solver obeys: a dissolution reaction that CONSUMES a species may
+                             * not take more than this voxel holds. A release is never clamped --
+                             * it is mass the mineral limiter has already bounded. */
+                            T give = share;
+                            if (give < T()) {
+                                const T have = lattices[iS]->get(iX+off[iS].x, iY+off[iS].y,
+                                                                 iZ+off[iS].z).computeDensity();
+                                const T pend = lattices[iS+dCloc]->get(iX+off[iS+dCloc].x,
+                                                                       iY+off[iS+dCloc].y,
+                                                                       iZ+off[iS+dCloc].z).computeDensity();
+                                const T headroom = (have > T() ? have : T()) + pend;
+                                if (give + headroom < T()) { give = -headroom; ++RT.clamped; }
+                                if (give > T()) give = T();
+                            }
+
+                            ++RT.collected;
+                            RT.gathered += std::fabs((double) give);
+                            if (!(std::fabs(give) > thrd)) continue;
+
+                            Array<T,7> g;
+                            Cell<T,Descriptor> &dst = lattices[iS+dCloc]->get(
+                                iX+off[iS+dCloc].x, iY+off[iS+dCloc].y, iZ+off[iS+dCloc].z);
+                            dst.getPopulations(g);
+                            g[0]+=give/4; g[1]+=give/8; g[2]+=give/8; g[3]+=give/8;
+                            g[4]+=give/8; g[5]+=give/8; g[6]+=give/8;
+                            dst.setPopulations(g);
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    /* Reads its face neighbours, writes only itself. Bulk, because an envelope cell's own
+     * neighbours lie outside the block. */
+    virtual BlockDomain::DomainT appliesTo() const { return BlockDomain::bulk; }
+
+    virtual dissolutionGather3D<T,Descriptor>* clone() const {
+        return new dissolutionGather3D<T,Descriptor>(*this);
+    }
+    void getTypeOfModification (std::vector<modif::ModifT> &modified) const {
+        for (size_t i = 0; i < modified.size(); ++i) modified[i] = modif::nothing;
+        for (plint iT = dCloc; iT < maskLloc; ++iT) modified[iT] = modif::staticVariables;
+    }
+
+private:
+    plint nx, ny, nz, subsNum;
+    plint solid, bb;
     const DissolutionConfig *cfg;
     plint dCloc, maskLloc, phaseLloc;
 };

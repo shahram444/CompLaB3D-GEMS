@@ -1,0 +1,462 @@
+\part{The pipeline blocks}
+
+% =====================================================================
+\chapter{What these four blocks replace}
+\label{ch:pipeline}
+
+Everything up to here has assumed that the files a run needs already exist: a
+\file{geometry.dat} somebody made, a metabolic model somebody converted, a
+surrogate somebody trained, and a habit of loading the output into Python
+afterwards to find out whether anything was conserved.
+
+Those four assumptions were four scripts, run by hand, in the right order,
+before and after every simulation. This part is about the four XML blocks that
+do them instead.
+
+\begin{center}
+\begin{tikzpicture}[font=\footnotesize,
+  b/.style={draw=cbRule,fill=cbSand,rounded corners=2pt,minimum width=4.3cm,
+            minimum height=0.85cm,align=center,line width=0.7pt},
+  o/.style={draw=cbRule,fill=white,rounded corners=2pt,minimum width=4.3cm,
+            minimum height=0.85cm,align=center,line width=0.7pt},
+  a/.style={-{Latex[length=2mm]},cbGrey,line width=0.7pt}]
+
+\node[o] (g1) at (-3.4, 1.4) {\texttt{geometry.py}\\ by hand, before};
+\node[o] (g2) at (-3.4, 0.0) {\texttt{extractMM.py}\\ by hand, before};
+\node[o] (g3) at (-3.4,-1.4) {four training scripts\\ by hand, before};
+\node[o] (g4) at (-3.4,-2.8) {\texttt{postprocess.py}\\ by hand, after};
+
+\node[b] (n1) at ( 3.4, 1.4) {\tg{domain}\tg{generate}};
+\node[b] (n2) at ( 3.4, 0.0) {\tg{model\_source}};
+\node[b] (n3) at ( 3.4,-1.4) {\tg{surrogate}};
+\node[b] (n4) at ( 3.4,-2.8) {\tg{diagnostics}};
+
+\draw[a] (g1) -- (n1);
+\draw[a] (g2) -- (n2);
+\draw[a] (g3) -- (n3);
+\draw[a] (g4) -- (n4);
+\end{tikzpicture}
+\end{center}
+
+\note{The old way still works.}{None of these blocks is required, and every
+one of them is absent by default. An input file written before they existed
+takes exactly the path it always took --- the code checks for the block, does
+not find it, and carries on. The Python tools in \file{tools/} are still
+shipped and still supported; they do things C++ cannot, such as reading a TIFF
+stack or drawing a plot.}
+
+\warn{One thing genuinely changed.}{\tg{model\_filename} may now point at an
+SBML file directly, and \file{extractMM.py} is no longer needed for the GLPK
+path. The old matrix files still load --- the format is decided by looking at
+the file's root element, not its name --- so nothing you already have stops
+working.}
+
+% =====================================================================
+\chapter{Where your metabolic model comes from}
+\label{ch:modelsource}
+
+\section{The point}
+
+A genome-scale model is a published artefact with a revision. Chapter
+\ref{ch:reference} treats \tg{model\_filename} as just a path, but in practice
+getting that path right was three manual steps: find the model on BiGG,
+download it, run \file{extractMM.py} to flatten it into the matrix format
+CompLaB used to read. Each step is somewhere the wrong file can be substituted
+without anything complaining.
+
+\section{Reading SBML directly}
+
+The simplest change is that \tg{model\_filename} can now name the SBML file
+itself:
+
+\begin{lstlisting}[style=xml]
+<model_filename>iJO1366.xml</model_filename>
+\end{lstlisting}
+
+The reader is \file{complab3d\_sbml.hh}. It produces the same
+$S$, $b$, $c$, $lb$, $ub$ and objective column that \file{extractMM.py} did, in
+the same order, and was checked against \texttt{cobrapy} on \emph{iJO1366}:
+identical reaction order, identical $4.7$ million-entry stoichiometry matrix,
+identical bounds, identical objective. It takes about $0.35$\,s where
+\texttt{cobrapy} takes $5$\,s, because it does one pass of tinyxml and no
+object graph.
+
+\note{How the format is decided.}{By the root element. \code{<sbml>} means
+SBML; \code{<Metabolic\_Model>} means the \file{extractMM.py} matrix format.
+The file extension is never consulted, so renaming a file cannot change how it
+is read.}
+
+\section{Naming exchange reactions instead of numbering them}
+
+This is the part worth changing in an existing input file even if you change
+nothing else.
+
+\begin{lstlisting}[style=xml]
+<!-- before: column numbers, correct only for one revision of one model -->
+<exchange_reaction_indices>27 35 -1</exchange_reaction_indices>
+
+<!-- after: names, checked against the model at start-up -->
+<exchange_reaction_names>EX_glc__D_e EX_o2_e none</exchange_reaction_names>
+\end{lstlisting}
+
+Both mean the same thing --- which reaction of the metabolic model exchanges
+each substrate, in \tg{name\_of\_substrates} order. The difference is what
+happens when they are wrong.
+
+\begin{itemize}[leftmargin=1.4em]
+\item An index that points at the wrong reaction is not detectable. The run
+      proceeds, the linear program is well posed, and the answer is wrong
+      everywhere.
+\item A name that does not exist stops the run at start-up, names the
+      substrate, and lists the boundary reactions whose names are close.
+\end{itemize}
+
+Use \code{none} (or \code{-1}) for a substrate this organism does not exchange.
+If both tags are given, the names win and a note says so.
+
+\warn{Names need SBML.}{The \file{extractMM.py} matrix format does not carry
+reaction names, so \tg{exchange\_reaction\_names} with a matrix file is a hard
+error rather than a silent fallback. Point \tg{model\_filename} at the SBML.}
+
+\section{Letting the run find the model}
+
+\begin{lstlisting}[style=xml]
+<model_source>bigg:e_coli_core</model_source>
+<model_bundle>models</model_bundle>      <!-- shipped with the code -->
+<model_cache>input</model_cache>         <!-- where the unpacked file goes -->
+<allow_download>false</allow_download>   <!-- default: never touch the network -->
+\end{lstlisting}
+
+The search order is fixed and is reported in the log:
+
+\begin{enumerate}[leftmargin=1.6em]
+\item \textbf{already unpacked} in \tg{model\_cache}. Used as is.
+\item \textbf{bundled} with the code as \file{models/<id>.xml.gz}. Unpacked
+      into the cache. Three models ship this way: \emph{e\_coli\_core},
+      \emph{iJO1366} and \emph{STM\_v1\_0}.
+\item \textbf{downloaded}, and only if \tg{allow\_download} is \code{true}.
+      A cluster compute node usually has no route to the internet, which is
+      exactly why the default is \code{false} and why the models are bundled.
+\end{enumerate}
+
+Whichever branch runs, the file is checked against \file{models/manifest.txt},
+which records for each model its species count, reaction count, parsed
+metabolite and reaction counts, objective reaction, SHA-style hash, byte size
+and source URL. A mismatch does not stop the run; it prints what it expected
+and what it found, so a model that has been revised upstream is visible in the
+log rather than buried in the results.
+
+\note{One microbe, or all of them.}{The resolved file is given to every
+metabolic microbe that did not name its own \tg{model\_filename}. A microbe
+with an explicit one keeps it, so a two-organism run can mix a bundled model
+with a local one.}
+
+\note{Parallel runs.}{Only rank 0 unpacks or downloads. The others wait at a
+barrier and then find the file already there. Nothing is written twice and no
+two ranks race for the same path.}
+
+% =====================================================================
+\chapter{Making a pore space}
+\label{ch:geomgen}
+
+\section{The point}
+
+\file{tools/geometry.py} can build a packing or threshold an image stack, and
+it is still the right tool when the source is a TIFF stack or a PNG series.
+But for the common cases --- a sphere pack at a given porosity, a fracture, a
+layered medium --- there is no reason to leave the input file.
+
+\section{Generating}
+
+Inside \tg{domain}, alongside \tg{nx} and friends:
+
+\begin{lstlisting}[style=xml]
+<generate>spheres</generate>      <!-- channel | spheres | cylinders |
+                                       random | fracture | layered -->
+<porosity>0.55</porosity>
+<grain_radius>3.0</grain_radius>
+<seed>12345</seed>
+<walls>y</walls>                  <!-- solid walls on the named axes -->
+<write_geometry>generated.dat</write_geometry>
+\end{lstlisting}
+
+The generated volume is written to \tg{write\_geometry} inside the input
+directory before the run starts. That file is the record: the run is
+reproducible from its own output even if the seed, the code or the XML later
+change, and the generated geometry can be inspected with exactly the same
+tools as one that came from imaging.
+
+\section{Importing a binary volume}
+
+\begin{lstlisting}[style=xml]
+<import_raw>rock.raw</import_raw>
+<raw_dtype>uint8</raw_dtype>
+<threshold>128</threshold>
+<invert>false</invert>
+\end{lstlisting}
+
+A flat binary volume, thresholded into pore and solid. \tg{generate} and
+\tg{import\_raw} are mutually exclusive and setting both stops the run.
+
+\section{What the inspection tells you}
+
+Either way, the pore space is inspected before the flow solver is built, and
+the report is printed:
+
+\begin{lstlisting}[style=sh]
+[GEOM] generated a 'spheres' pore space
+[GEOM] 24 x 24 x 6 = 3456 voxels
+[GEOM]   material 1   bounce_back    288    8.33%
+[GEOM]   material 0   solid         1170   33.85%
+[GEOM]   material 2   pore          1998   57.81%
+[GEOM] porosity 0.5781
+[GEOM] percolates along x: yes, 1 spanning cluster(s)
+[GEOM] isolated pore space: 1 voxel(s), 0.1% of the open space
+[GEOM] written to input/generated.dat so this run can be reproduced exactly
+\end{lstlisting}
+
+\warn{A sealed domain stops the run.}{If the pore space does not percolate
+along $x$, the run stops before the flow solver starts. A pressure drop across
+a sealed medium has no solution, and the flow solver would spend its entire
+iteration budget failing to converge to one. Lower the porosity target, or
+shrink the grains.}
+
+\note{Isolated pockets are reported, not removed.}{Pore voxels that no
+percolating path reaches still hold substrate and still host biology, and
+nothing about them is wrong --- but they never exchange with the through-flow,
+so a mass balance that includes them behaves differently from one that does
+not. The count is printed so the number is not a surprise.}
+
+\note{The file is \code{nx} slices wide, where \code{nx} is what you wrote in
+the XML.}{Internally the code adds two ghost columns, and \code{readGeometry}
+duplicates the first and last slice into them. The generator is given the
+width you asked for, so this is handled --- but it is why a geometry file made
+by hand must have exactly $\code{nx}\times\code{ny}\times\code{nz}$ entries and
+not two slices more.}
+
+% =====================================================================
+\chapter{A surrogate without leaving the XML}
+\label{ch:surrogateblock}
+
+\section{The point}
+
+Chapter \ref{ch:trainsurrogate} describes the offline route: sweep the FBA into
+a CSV, fit a network, export it as a header, paste the header into
+\file{surrogateModel.hh}, rebuild. That route still exists and is still the
+right one when you want to inspect the fit, try several architectures, or
+train on a machine that is not the one you will run on.
+
+The change is that the weights now live in a \textbf{file the solver reads at
+run time} rather than in a header it was compiled with. Once that is true, the
+run can also fit the network itself.
+
+\section{The block}
+
+\begin{lstlisting}[style=xml]
+<surrogate>
+    <enabled>true</enabled>
+    <weights_file>output/ecoli.srg</weights_file>
+    <train_if_missing>true</train_if_missing>
+    <train>
+        <samples>2000</samples>
+        <layers>10 10</layers>
+        <restarts>5</restarts>
+        <epochs>4000</epochs>
+        <verify_points>512</verify_points>
+        <seed>20260814</seed>
+        <input0>S 0.1 10.0</input0>
+        <input1>O 0.1 20.0 log</input1>
+    </train>
+</surrogate>
+\end{lstlisting}
+
+Each \tg{inputN} line reads: \emph{substrate name}, \emph{low}, \emph{high},
+and optionally \code{log} for a logarithmic sweep. The substrate name must be
+one of \tg{name\_of\_substrates}.
+
+\section{What happens at start-up}
+
+\begin{center}
+\begin{tikzpicture}[font=\footnotesize,
+  s/.style={draw=cbRule,fill=cbSand,rounded corners=2pt,minimum width=6.4cm,
+            minimum height=0.85cm,align=center,line width=0.7pt},
+  a/.style={-{Latex[length=2mm]},cbGrey,line width=0.7pt}]
+\node[s] (a1) at (0, 0)    {\tg{weights\_file} exists?};
+\node[s] (a2) at (0,-1.5)  {load it, print its valid range};
+\node[s] (b2) at (0,-3.2)  {build a linear program from the model};
+\node[s] (b3) at (0,-4.7)  {sweep it, fit, verify on fresh points};
+\node[s] (b4) at (0,-6.2)  {write the \texttt{.srg}; later runs load it};
+\draw[a] (a1) -- node[right,font=\tiny,xshift=2pt]{yes} (a2);
+\draw[a] (a1.west) -- ++(-2.6,0) |- node[left,font=\tiny,pos=0.25]{no, and \tg{train\_if\_missing}} (b2.west);
+\draw[a] (b2) -- (b3);
+\draw[a] (b3) -- (b4);
+\end{tikzpicture}
+\end{center}
+
+The linear program the sweep solves is not a copy. If the run already has a
+GLPK microbe, its own persistent \code{glp\_prob} is used --- the same object,
+with the same \tg{constraint\_indices} overrides, that the simulation would
+have solved. If it does not (the usual case: one organism, reaction type
+\code{surrogate}), a temporary problem is built from that microbe's own model
+and released as soon as training finishes.
+
+\note{Positive uptake in, negative bound out.}{Exchange reactions are written
+\code{metabolite ->}, so consuming is a negative flux. The sweep passes
+positive uptake rates in \code{mmol/gDW/h}, the same convention as
+\code{Fin} everywhere else, and the sign is applied in exactly one place. An
+infeasible solve is recorded as zero growth rather than an error, so the
+network learns where the feasible region ends instead of having a hole in its
+domain.}
+
+\section{Training is on rank 0 only}
+
+Every rank fitting its own network from its own random start would give a
+different growth rate in each subdomain. Rank 0 trains, writes the file,
+everyone barriers, the others read it.
+
+\section{Which substrate is which}
+
+A \file{.srg} file records the substrate name of every input:
+
+\begin{lstlisting}[style=sh]
+inputs 2
+inputnames S O
+trainmin 0.127038797 0.118747061
+trainmax 9.983995766 19.978325403
+\end{lstlisting}
+
+At start-up those names are matched against \tg{name\_of\_substrates}, and a
+name that is not there stops the run. Without this a network trained on
+(acetate, Fe\textsuperscript{3+}) could be fed them the other way round: every
+number plausible, every growth rate wrong, nothing to see in the log.
+
+\warn{A file with no \code{inputnames} line.}{Networks exported by the older
+MATLAB route have no such line. They still load, and their inputs are assumed
+to be the first substrates in order --- with a warning saying so. Check it.}
+
+\section{Outside the training box}
+
+A neural network does not fail outside the range it was fitted on. It returns
+a confident number that means nothing. So the range travels with the weights,
+and at run time every evaluation is \textbf{clamped} to that box and
+\textbf{counted}:
+
+\begin{lstlisting}[style=sh]
+[SRG] runtime network: 1076692 evaluation(s), 0 clamped (0.00%)
+\end{lstlisting}
+
+Clamping rather than extrapolating is the conservative choice: at the edge the
+network returns the growth rate at the nearest uptake that was actually solved
+for, which is a real answer for a nearby state. It is still an approximation,
+which is why the count is reported. Above 5\% the report says, in as many
+words, that the results should not be used until the ranges are widened and
+the network refitted.
+
+\section{Does it agree with the FBA?}
+
+On \emph{e\_coli\_core}, in a run otherwise identical, glucose and oxygen as
+the two inputs:
+
+\begin{center}
+\begin{tabular}{@{}lrr@{}}
+\toprule
+& \textbf{GLPK, every voxel} & \textbf{surrogate} \\
+\midrule
+biomass change over the run & $-4.3090\%$ & $-4.3107\%$ \\
+final product concentration & $2.0871\times10^{-2}$ & $2.0871\times10^{-2}$ \\
+wall clock                  & $492$\,s & $3.3$\,s \\
+\bottomrule
+\end{tabular}
+\end{center}
+
+A factor of about $150$ in wall clock, for a difference in the answer of four
+parts in ten thousand. That ratio is the whole argument for surrogates, and it
+is why the training range matters so much: the speed is only worth having if
+the simulation stays inside the box.
+
+% =====================================================================
+\chapter{The run's own record}
+\label{ch:diagnostics}
+
+\section{The point}
+
+Until this block existed, a CompLB3D run wrote VTI volumes and nothing else.
+Every scalar question --- did mass balance, how did porosity change, when did a
+concentration first go negative --- meant loading the volumes into Python
+afterwards and hoping the answer was still in them.
+
+\section{The block}
+
+\begin{lstlisting}[style=xml]
+<diagnostics>
+    <enabled>true</enabled>
+    <summary_csv>summary.csv</summary_csv>
+    <interval>100</interval>            <!-- 0 = follow the VTI interval -->
+    <tolerance>1e-6</tolerance>
+    <conserve>Fe2 + Fe3</conserve>
+    <conserve1>SO4 + HS</conserve1>
+</diagnostics>
+\end{lstlisting}
+
+\section{summary.csv}
+
+One row per interval, written next to the VTI files:
+
+\begin{lstlisting}[style=sh]
+iteration,porosity,open_voxels,S_total,S_mean,S_min,S_max,O_total,...
+0,0.578125,1998,1998,1,0,1
+100,0.578125,1998,1832.4,0.917,0,1
+\end{lstlisting}
+
+Totals and means are over \textbf{open voxels only} --- pore plus biofilm --- and
+over the physical domain $x = 1 \ldots n_x-2$, excluding the two ghost columns.
+Both choices matter: including the solid would make the mean fall as biofilm
+grew for no chemical reason, and including the ghost columns would count the
+inlet and outlet slices twice, so a conserved total would jump whenever the
+inlet concentration changed.
+
+\section{The conservation checks}
+
+\tg{conserve} names a sum of substrates that ought to be constant. The first
+recorded value is the baseline; after that the drift is
+\[
+  \text{drift} \;=\; \frac{|\Sigma_{\text{now}} - \Sigma_{\text{first}}|}
+                          {\max\!\left(|\Sigma_{\text{first}}|,\,
+                                        |\Sigma_{\text{now}}|\right)} .
+\]
+Normalising by the larger of the two, rather than by the baseline, is what
+keeps the number meaningful when a run starts from an empty domain --- there
+the baseline is zero and dividing by it reports $10^{302}$, which tells nobody
+anything.
+
+\warn{What to conserve, and what not to.}{A substrate held at a fixed
+concentration on an inlet is being supplied from outside. Its total is not
+conserved and never will be, and asking for it to be produces a failure that
+is entirely your own. Conserve a \emph{closed} sum instead: every species
+sharing one element, which is a conserved moiety of the reaction network. The
+failure message says this, in those words, because it is by far the most
+common cause.}
+
+A negative concentration is reported once, loudly, the first time it appears,
+with the substrate and the step. At the end of the run each check is reported
+as PASS, FAIL, or SKIPPED:
+
+\begin{lstlisting}[style=sh]
+[DIAG] summary written to output/summary.csv
+[DIAG] Fe2 + Fe3            worst relative drift 3.104e-09  PASS
+[DIAG] SO4 + HS             worst relative drift 1.882e-02  FAIL
+[DIAG] verdict: FAIL
+\end{lstlisting}
+
+\note{SKIPPED is not PASS.}{A \tg{conserve} naming a substrate that does not
+exist is reported as SKIPPED, never as PASS. A skipped check that looks like a
+pass is how a mass-balance guarantee quietly becomes worthless.}
+
+\note{Something this found.}{Running example 02 with no-flux boundaries at both
+ends --- a genuinely closed box --- the tracer total rises about
+2.3\% over the first two hundred steps and is then flat to
+$10^{-5}$ for the rest of the run. That is a start-up transient of the Neumann
+boundary implementation, not an ongoing leak, and it is present with or without
+any of the new code. It is recorded here because it is exactly the kind of
+thing this block exists to surface, and because a tolerance below about
+$3\times10^{-2}$ on a Neumann case will report it.}

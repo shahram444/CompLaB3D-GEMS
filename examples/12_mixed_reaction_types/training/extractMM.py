@@ -352,13 +352,23 @@ def main(argv=None):
 
     # -----------------------------------------------------------------------
     # ROUND-TRIP CHECK OF S
-    #   [FIX-3D] The 2D script never verified the flattening. A wrong order
-    #   (metabolite-major vs reaction-major) or a lossy number format produces a
-    #   file that loads fine and gives silently wrong fluxes. Here we parse the
-    #   text we just wrote back into numbers, reshape it the way the C++ loader
-    #   does -- S[irow*nrxn + icol], see load_metabolic_models() in
-    #   src/complab_functions.hh -- and require it to equal the original matrix
-    #   EXACTLY (which "%.17g" guarantees for IEEE-754 doubles).
+    #   [FIX-3D] The 2D script never verified the flattening. A lossy number
+    #   format produces a file that loads fine and gives silently wrong fluxes.
+    #   Here we parse the text we just wrote back into numbers, reshape it the
+    #   way the C++ loader does -- S[irow*nrxn + icol], see
+    #   load_metabolic_models() in src/complab_functions.hh -- and require it to
+    #   equal the original matrix EXACTLY (which "%.17g" guarantees for
+    #   IEEE-754 doubles).
+    #
+    #   [v1.3] What this check establishes, precisely: the COUNT of values
+    #   written (nmet * nrxn of them) and the round-trip PRECISION of the
+    #   "%.17g" formatting. It does NOT test the flattening order, and the
+    #   comment here used to claim that it did. The string is built from
+    #   S.flatten() in C order and read back with reshape() in C order, and a
+    #   C-order flatten followed by a C-order reshape is the identity for any
+    #   array, so a wrong order could never make this comparison fail. The
+    #   order is correct because the writer here and the C++ reader agree on C
+    #   order, not because anything below checks it.
     # -----------------------------------------------------------------------
     back = np.array([float(t) for t in str_S.split()], dtype=float)
     ok = (back.size == nmet * nrxn)

@@ -131,7 +131,11 @@ int main() {
     clamped = 0;
     c[0] = -1.0; c[1] = 99.0;                /* both outside, one low one high */
     N.eval(c, out, true, &clamped);
-    ckTrue("two clamps counted for two out-of-box species", clamped == 2);
+    /* ONE count, not two.  The counter is compared against the number of evaluations in
+     * runtimeReport(), so it counts evaluations that clamped anything rather than clamped
+     * values -- otherwise a four-species network can report 400% of its evaluations as
+     * out of range, and the percentage a reader uses to judge a result becomes unreadable. */
+    ckTrue("an evaluation that clamps two species still counts once", clamped == 1);
 
     clamped = 0;
     c[0] = 1.0; c[1] = 2.0;
@@ -221,6 +225,86 @@ int main() {
         R.evaluations = 0; R.clamped = 0;
         ckTrue("a run that never evaluated says nothing",
                complab_gnn::runtimeReport().empty());
+    }
+
+    std::printf("--- the EXTENT readout, where the stoichiometry is exact by construction\n");
+    {
+        /* The same tiny shape, read out the other way.  With S = [-1; 2] and one reaction, every
+         * output pair must satisfy rate_B / rate_A = 2 / -1 exactly, at every input, whatever the
+         * weights happen to be.  That is the whole claim of this mode, so it is checked at inputs
+         * chosen to be awkward rather than at one convenient point.
+         *
+         *   xi   = tanh-free linear readout on the REACTION node:  bout + Wout . hR
+         *   r_A  = -1 * xi * xiscale ,   r_B = +2 * xi * xiscale
+         */
+        std::string body(TINY);
+        body.insert(body.find("stoich"), "readout extent\n");
+        /* EXTENT mode carries no per-species scaling: xiscale replaces it. */
+        body.replace(body.find("yoffset 0 0\n"), 12, "xiscale 3\n");
+        body.replace(body.find("ygain 1 1\n"), 10, "");
+        write("tiny_ext.gnn", body.c_str());
+
+        complab_gnn::Network E;
+        ckTrue("the extent file loads", complab_gnn::load(E, "tiny_ext.gnn", &err));
+        if (!err.empty()) std::printf("     %s\n", err.c_str());
+        ckTrue("the mode was read", E.readout == complab_gnn::Network::EXTENT);
+        ckTrue("no per-species scaling is required", E.yOffset.empty() && E.yGain.empty());
+        ckTrue("one extent scale, for the one reaction", E.xiScale.size() == 1);
+        ckTrue("and the log says which readout it is",
+               complab_gnn::describe(E, "tiny_ext.gnn").find("EXTENT") != std::string::npos);
+
+        const double probe2[5][2] = { {1.0, 2.0}, {0.0, 0.0}, {3.5, 0.25},
+                                      {10.0, 10.0}, {0.125, 9.75} };
+        std::vector<double> c2(2), o2;
+        for (int t = 0; t < 5; ++t) {
+            c2[0] = probe2[t][0]; c2[1] = probe2[t][1];
+            E.eval(c2, o2, true, 0);
+
+            /* the same message passing written out by hand, then the extent readout */
+            const double hA = std::tanh(c2[0]);
+            const double hB = std::tanh(c2[1]);
+            const double mR = (-1.0) * hA + (2.0) * hB;
+            const double hR = std::tanh(1.0 * mR + 2.0 * 0.5);
+            const double xi = (0.0 + 1.0 * hR) * 3.0;          /* bout + Wout.hR, times xiscale */
+
+            char lbl[96];
+            std::sprintf(lbl, "rate A at (%.4g, %.4g)", c2[0], c2[1]);
+            ck(lbl, o2[0], -1.0 * xi);
+            std::sprintf(lbl, "rate B at (%.4g, %.4g)", c2[0], c2[1]);
+            ck(lbl, o2[1], 2.0 * xi);
+
+            /* the claim, stated as the test: the ratio is the stoichiometry, exactly */
+            if (std::fabs(o2[0]) > 1e-14) {
+                std::sprintf(lbl, "B over A is exactly -2 at (%.4g, %.4g)", c2[0], c2[1]);
+                ck(lbl, o2[1] / o2[0], -2.0, 1e-14);
+            }
+        }
+
+        std::printf("--- a file labelled one mode and written for the other is refused\n");
+        {
+            /* Extent mode without xiscale: the species rates would have no scale at all. */
+            std::string b2(TINY);
+            b2.insert(b2.find("stoich"), "readout extent\n");
+            b2.replace(b2.find("yoffset 0 0\n"), 12, "");
+            b2.replace(b2.find("ygain 1 1\n"), 10, "");
+            write("bad.gnn", b2.c_str());
+            complab_gnn::Network B;
+            std::string e;
+            ckTrue("extent mode with no xiscale is refused",
+                   !complab_gnn::load(B, "bad.gnn", &e));
+
+            /* Extent mode still carrying the species-mode scaling: two entries where the mode
+             * wants none, which would silently consume the next key's numbers. */
+            std::string b3(TINY);
+            b3.insert(b3.find("stoich"), "readout extent\n");
+            b3 += "xiscale 3\n";
+            write("bad.gnn", b3.c_str());
+            complab_gnn::Network B2;
+            ckTrue("extent mode with species-mode yoffset/ygain is refused",
+                   !complab_gnn::load(B2, "bad.gnn", &e));
+        }
+
+        std::remove("tiny_ext.gnn");
     }
 
     std::remove("tiny.gnn"); std::remove("tiny_hr.gnn"); std::remove("bad.gnn");

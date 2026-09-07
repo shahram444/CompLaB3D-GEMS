@@ -69,6 +69,7 @@
 #define COMPLAB3D_PROCESSORS_SURROGATE_HH
 
 #include "complab3d_metabolic.hh"
+#include "complab3d_thermo.hh"      /* the F_T gate; a no-op unless <thermodynamics> is on */
 #include "../surrogateModel.hh"
 
 template<typename T, template<typename U> class Descriptor>
@@ -113,6 +114,9 @@ public:
         std::vector< std::vector<double> > Fin (totalMicrobes, std::vector<double>(subsNum, 0.0));
         std::vector< std::vector<double> > Fout(totalMicrobes, std::vector<double>(subsNum, 0.0));
         std::vector<double> bioR(totalMicrobes, 0.0);
+
+        std::vector<double> tconc;                 /* the gate's view of the same chemistry */
+        const bool gated = complab_thermo::enabled();
 
         for (plint iX = domain.x0; iX <= domain.x1; ++iX) {
             const plint absX = iX + absoluteOffset.x;
@@ -210,6 +214,24 @@ public:
                         defineSurrogateModel(globalId[bLoc[k]], Fin, Fout, bioR, mask);
                     }
 
+                    /* ---- the thermodynamic gate -------------------------- *
+                     * Applied to the network's ANSWER rather than to its inputs, because the
+                     * network was trained on a metabolic model that knows nothing about the
+                     * local energy balance: the flux it predicts is the one the organism could
+                     * run if energy allowed, and F_T is the fraction of that which energy does
+                     * allow.  A no-op when <thermodynamics> is off or this organism has no
+                     * reaction block, so an existing case is bit-identical. */
+                    if (gated) {
+                        complab_thermo::fillConc(avail, (int) subsNum, tconc);
+                        for (size_t k = 0; k < bLoc.size(); ++k) {
+                            const plint gM = globalId[bLoc[k]];
+                            const double ft = complab_thermo::gateFor((int) gM, tconc);
+                            if (ft >= 1.0) continue;
+                            for (plint iS = 0; iS < subsNum; ++iS) Fout[gM][iS] *= ft;
+                            bioR[gM] *= ft;
+                        }
+                    }
+
                     /* ---- turn the answer into increments ------------------ */
                     for (size_t k = 0; k < bLoc.size(); ++k) {
                         const plint iB = bLoc[k];
@@ -242,9 +264,18 @@ public:
                          * a transported substrate was debited twice. */
                         const T headroom = avail[iS] + (cfg->useTotals ? T() : dC[iS]);
                         if (draw + headroom < T()) draw = -headroom;
-                        if (draw > T()) draw = T();          // consumption only
-                        if (cfg->useTotals) cfg->totals.drawDown(conc, iS, -draw, dC);
-                        else                dC[iS] += draw;
+                        /* [FIX] `if (draw > T()) draw = T();` used to stand here, matching the
+                         * COBRApy path and, like it, discarding every net release. A multi-output
+                         * network returns the flux the linear program actually ran, INCLUDING the
+                         * exchanges the model excretes -- so this line threw away the one thing a
+                         * multi-output network was trained to provide over a growth-only one, and
+                         * the two looked identical in the substrate field for exactly the reason
+                         * the multi-output network exists.
+                         *
+                         * A growth-only network is unaffected: Fout is then the solver's own Monod
+                         * estimate, which is a consumption and never positive. */
+                        if (cfg->useTotals && draw < T()) cfg->totals.drawDown(conc, iS, -draw, dC);
+                        else                             dC[iS] += draw;
                     }
 
                     /* ---- deposit ----------------------------------------- */

@@ -12,7 +12,7 @@ make            # produces CompLB3D_User_Guide.pdf
 |---|---|
 | `main.tex` | preamble, styling, title page, "how to read this guide" |
 | `part1.tex` | Getting started: what it does, installing, first run, the input file |
-| `part2.tex` | Tutorial: one chapter per capability, built on the 15 shipped examples |
+| `part2.tex` | Tutorial: one chapter per capability, built on the 16 shipped examples |
 | `part3.tex` | Going further: your own kinetics, surrogate training, clusters, output |
 | `part4.tex` | Reference: every XML tag, every error message, known limits, file map |
 

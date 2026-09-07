@@ -426,6 +426,127 @@ plint MaskedScalarCounts3D(Box3D domain, MultiScalarField3D<T1>& field, plint ma
     return functional.getCount();
 }
 
+/* ===============================================================================================================
+   HOW MUCH IS IN THE LATTICE, AS OPPOSED TO HOW MUCH THE DYNAMICS SAY IS THERE
+   ===============================================================================================================
+
+   computeDensity() asks each cell's dynamics. That is the right question for a fluid voxel and the wrong one
+   everywhere else, because two of the dynamics this program uses answer from a stored number and never look at
+   the populations they are holding:
+
+       BounceBack::computeDensity   returns its own rho
+       NoDynamics::computeDensity   returns its own rho
+
+   A wall is not empty. Mass streams into a bounce-back cell, sits in its populations for one step, and streams
+   back out. At any instant a share of the field is in flight there, and computeDensity reports none of it. On a
+   spread-out biomass patch that touches a lot of wall it is about 9% of the total. Nothing is lost -- but a
+   conservation check written against the reported totals looks like it is failing by that fraction, and the
+   person reading it goes looking for a leak in the chemistry.
+
+   This functional asks the populations instead. Every dynamics in this program stores an advection-diffusion
+   population as a deviation from equilibrium at density 1, so the density held by a cell is sum(f) + 1 whatever
+   dynamics is attached to it. That identity is what makes one sweep valid across fluid, wall and grain alike.
+
+   It is a MEASUREMENT, not a change to the physics. Nothing here writes a cell, and no dynamics is replaced;
+   the fields evolve exactly as they did before. What changes is only what the run is able to tell you about
+   them.
+
+   `restingValue` is subtracted per masked voxel before the sum. Wall and grain voxels are parked at the
+   background concentration at start-up so that a bounce-back wall does not stream a spurious gradient into the
+   water, so the raw population sum over them is mostly that parked background rather than anything in transit.
+   Pass the value they were parked at and what comes back is the excess: the mass actually in flight.
+   =============================================================================================================== */
+template<typename T1, template<typename U1> class Descriptor1, typename T2>
+class MaskedPopulationSumFunctional3D : public ReductiveBoxProcessingFunctional3D_LS<T1,Descriptor1,T2>
+{
+public:
+    MaskedPopulationSumFunctional3D(std::vector<plint> materials_, T1 restingValue_)
+        : sumId(this->getStatistics().subscribeSum()),
+          materials(materials_), restingValue(restingValue_)
+    {}
+    virtual void process(Box3D domain, BlockLattice3D<T1,Descriptor1> &lattice, ScalarField3D<T2> &mask) {
+        BlockStatistics &statistics = this->getStatistics();
+        Dot3D ofs = computeRelativeDisplacement(lattice, mask);
+        for (plint iX=domain.x0; iX<=domain.x1; ++iX) {
+            for (plint iY=domain.y0; iY<=domain.y1; ++iY) {
+                for (plint iZ=domain.z0; iZ<=domain.z1; ++iZ) {
+                    const plint m = util::roundToInt(mask.get(iX+ofs.x, iY+ofs.y, iZ+ofs.z));
+                    bool wanted = false;
+                    for (size_t k=0; k<materials.size(); ++k) if (m == materials[k]) { wanted = true; break; }
+                    if (!wanted) continue;
+                    /* sum(f) + 1: the density the cell is holding, whatever its dynamics would say */
+                    T1 rho = T1();
+                    for (plint iPop=0; iPop<Descriptor1<T1>::q; ++iPop) rho += lattice.get(iX,iY,iZ)[iPop];
+                    rho += (T1) 1;
+                    statistics.gatherSum(sumId, (double) (rho - restingValue));
+                }
+            }
+        }
+    }
+    virtual MaskedPopulationSumFunctional3D<T1,Descriptor1,T2>* clone() const {
+        return new MaskedPopulationSumFunctional3D<T1,Descriptor1,T2>(*this);
+    }
+    virtual void getTypeOfModification(std::vector<modif::ModifT>& modified) const {
+        modified[0] = modif::nothing;
+        modified[1] = modif::nothing;
+    }
+    double getSum() const { return this->getStatistics().getSum(sumId); }
+private:
+    plint sumId;
+    std::vector<plint> materials;
+    T1 restingValue;
+};
+
+/* Everything the lattice is holding over `domain`, read from the populations, with no mask and nothing
+   subtracted. Subtract the reported total from this and what is left is exactly the mass computeDensity
+   cannot see: whatever is in flight at a bounce-back wall, resting inside a grain, or sitting in a boundary
+   plane that the reported box excludes. That difference is the honest correction, and unlike a masked sum it
+   cannot miss a category -- a cell counts here whatever dynamics is attached to it. */
+template<typename T1, template<typename U1> class Descriptor1>
+class PopulationSumFunctional3D : public ReductiveBoxProcessingFunctional3D_L<T1,Descriptor1>
+{
+public:
+    PopulationSumFunctional3D() : sumId(this->getStatistics().subscribeSum()) {}
+    virtual void process(Box3D domain, BlockLattice3D<T1,Descriptor1> &lattice) {
+        BlockStatistics &statistics = this->getStatistics();
+        for (plint iX=domain.x0; iX<=domain.x1; ++iX)
+            for (plint iY=domain.y0; iY<=domain.y1; ++iY)
+                for (plint iZ=domain.z0; iZ<=domain.z1; ++iZ) {
+                    T1 rho = T1();
+                    for (plint iPop=0; iPop<Descriptor1<T1>::q; ++iPop) rho += lattice.get(iX,iY,iZ)[iPop];
+                    statistics.gatherSum(sumId, (double) (rho + (T1) 1));
+                }
+    }
+    virtual PopulationSumFunctional3D<T1,Descriptor1>* clone() const {
+        return new PopulationSumFunctional3D<T1,Descriptor1>(*this);
+    }
+    virtual void getTypeOfModification(std::vector<modif::ModifT>& modified) const {
+        modified[0] = modif::nothing;
+    }
+    double getSum() const { return this->getStatistics().getSum(sumId); }
+private:
+    plint sumId;
+};
+
+template<typename T1, template<typename U1> class Descriptor1>
+double PopulationSum3D(Box3D domain, MultiBlockLattice3D<T1,Descriptor1> &lattice) {
+    PopulationSumFunctional3D<T1,Descriptor1> functional;
+    applyProcessingFunctional(functional, domain, lattice);
+    return functional.getSum();
+}
+
+/* The mass a lattice is holding inside the named materials, in excess of what those voxels were parked at.
+   Kept for callers that want one category rather than the difference above. */
+template<typename T1, template<typename U1> class Descriptor1, typename T2>
+double MaskedPopulationSum3D(Box3D domain, MultiBlockLattice3D<T1,Descriptor1> &lattice,
+                             MultiScalarField3D<T2> &mask,
+                             const std::vector<plint> &materials, T1 restingValue) {
+    if (materials.empty()) return 0.0;
+    MaskedPopulationSumFunctional3D<T1,Descriptor1,T2> functional(materials, restingValue);
+    applyProcessingFunctional(functional, domain, lattice, mask);
+    return functional.getSum();
+}
+
 // calculate RMSE for convergence checking
 template<typename T1, template<typename U1> class Descriptor1, typename T2, template<typename U2> class Descriptor2>
 class BoxLatticeRMSEFunctional3D : public ReductiveBoxProcessingFunctional3D_LL<T1,Descriptor1,T2,Descriptor2>

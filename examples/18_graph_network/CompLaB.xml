@@ -50,8 +50,8 @@
     <LB_numerics>
         <domain>
             <nx>24</nx>
-            <ny>24</ny>
-            <nz>6</nz>
+            <ny>26</ny>
+            <nz>8</nz>
             <dx>10</dx>
             <unit>um</unit>
             <characteristic_length>24</characteristic_length>
@@ -123,9 +123,9 @@
                 <in_pore>1.5e-9</in_pore>
                 <in_biofilm>7.5e-10</in_biofilm>
             </substrate_diffusion_coefficients>
-            <left_boundary_type>Neumann</left_boundary_type>
+            <left_boundary_type>closed</left_boundary_type>
             <left_boundary_condition>0.</left_boundary_condition>
-            <right_boundary_type>Neumann</right_boundary_type>
+            <right_boundary_type>closed</right_boundary_type>
             <right_boundary_condition>0.</right_boundary_condition>
         </substrate2>
 
@@ -136,9 +136,9 @@
                 <in_pore>1.2e-9</in_pore>
                 <in_biofilm>6.0e-10</in_biofilm>
             </substrate_diffusion_coefficients>
-            <left_boundary_type>Neumann</left_boundary_type>
+            <left_boundary_type>closed</left_boundary_type>
             <left_boundary_condition>0.</left_boundary_condition>
-            <right_boundary_type>Neumann</right_boundary_type>
+            <right_boundary_type>closed</right_boundary_type>
             <right_boundary_condition>0.</right_boundary_condition>
         </substrate3>
 
@@ -159,9 +159,9 @@
             <viscosity_ratio_in_biofilm>0</viscosity_ratio_in_biofilm>
             <half_saturation_constants>0 0 0 0</half_saturation_constants>  <!-- unused: the .gnn carries its own -->
             <maximum_uptake_flux>0 0 0 0</maximum_uptake_flux>
-            <left_boundary_type>Neumann</left_boundary_type>
+            <left_boundary_type>closed</left_boundary_type>
             <left_boundary_condition>0.</left_boundary_condition>
-            <right_boundary_type>Neumann</right_boundary_type>
+            <right_boundary_type>closed</right_boundary_type>
             <right_boundary_condition>0.</right_boundary_condition>
         </microbe0>
 
@@ -178,6 +178,17 @@
     <dissolution>
         <enabled>false</enabled>
     </dissolution>
+
+    <!-- The run's own scalar record: one row per interval with the total,
+         mean, min and max of every field, plus the mass held where
+         computeDensity cannot see it. Without this the case runs but
+         nothing about it can be checked afterwards. -->
+    <diagnostics>
+        <enabled>true</enabled>
+        <summary_csv>summary.csv</summary_csv>
+        <interval>100</interval>
+        <tolerance>1e-6</tolerance>
+    </diagnostics>
 
     <IO>
         <read_NS_file>false</read_NS_file>

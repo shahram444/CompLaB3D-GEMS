@@ -8,10 +8,25 @@
 
      The rate law lives in defineAbioticKinetics.hh in this folder, which
      is COMPILED IN, not read at run time. That is why every example
-     carries its own copy and why runAllExamples.sh rebuilds between cases.
+     carries its own copy and why each case's pipeline.sh rebuilds before
+     it runs. tests/check_repo.sh checks that every example assembles, and
+     tests/run_tests.sh checks that every shipped rate law loads.
 
-     One A plus one B makes exactly one C, so the totals must satisfy
-     dA + dC = 0 and dB + dC = 0 at every step. The runner checks it.
+     One A plus one B makes exactly one C, so the per step reaction
+     INCREMENTS satisfy dA + dC = 0 and dB + dC = 0.
+
+     [v1.3] That is a statement about the increments, meaning the amounts
+     the rate law adds to and removes from each field in one time step, and
+     NOT about the reported totals. Earlier text here said the totals must
+     satisfy those sums. They cannot. A and B both start at 0 and are each
+     held at 1.0 on one face by a Dirichlet condition, that is, a boundary
+     that holds the concentration at a fixed value, so both are supplied
+     from outside the domain. All three totals rise. What can be checked is
+     that C rises, C being the only closed species here, and that the
+     increments balance. Do NOT name A or B in a <conserve> sum: a species
+     fed from a boundary is not conserved, so that sum would guarantee a
+     mass-balance FAIL that means nothing. postprocess.py prints the change
+     in each field so you can read that off after a run.
      ========================================================================= -->
 <parameters>
 
@@ -34,8 +49,8 @@
     <LB_numerics>
         <domain>
             <nx>24</nx>
-            <ny>24</ny>
-            <nz>6</nz>
+            <ny>26</ny>
+            <nz>8</nz>
             <dx>10</dx>
             <unit>um</unit>
             <characteristic_length>24</characteristic_length>
@@ -100,9 +115,9 @@
                 <in_pore>5e-10</in_pore>
                 <in_biofilm>5e-10</in_biofilm>
             </substrate_diffusion_coefficients>
-            <left_boundary_type>Neumann</left_boundary_type>
+            <left_boundary_type>closed</left_boundary_type>
             <left_boundary_condition>0.</left_boundary_condition>
-            <right_boundary_type>Neumann</right_boundary_type>
+            <right_boundary_type>closed</right_boundary_type>
             <right_boundary_condition>0.</right_boundary_condition>
         </substrate2>
 
@@ -123,6 +138,17 @@
     <dissolution>
         <enabled>false</enabled>
     </dissolution>
+
+    <!-- The run's own scalar record: one row per interval with the total,
+         mean, min and max of every field, plus the mass held where
+         computeDensity cannot see it. Without this the case runs but
+         nothing about it can be checked afterwards. -->
+    <diagnostics>
+        <enabled>true</enabled>
+        <summary_csv>summary.csv</summary_csv>
+        <interval>150</interval>
+        <tolerance>1e-6</tolerance>
+    </diagnostics>
 
     <IO>
         <read_NS_file>false</read_NS_file>

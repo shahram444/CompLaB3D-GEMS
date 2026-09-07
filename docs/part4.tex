@@ -168,8 +168,9 @@ for.}
 \midrule\endhead
 \tg{viscosity\_ratio\_in\_biofilm} & the organism has a \tg{microbeN} material entry & ratio used for the flow through biofilm. Must be present for \emph{exactly} the seeded organisms; the parser counts them.\\
 \tg{biomass\_diffusion\_} \tg{coefficients} & \code{solver\_type} is FD & m$^2$/s, \tg{in\_pore} and \tg{in\_biofilm}\\
-\tg{model\_filename} & \code{reaction\_type} uses FBA & name without \file{.xml}, inside \tg{input\_path}\\
-\tg{exchange\_reaction\_indices} & \code{reaction\_type} uses FBA & one per substrate; \code{-1} for one the organism does not exchange\\
+\tg{model\_filename} & \code{reaction\_type} uses FBA, unless \tg{model\_source} supplies it & the metabolic model, inside \tg{input\_path}. May be an SBML file (\file{iJO1366.xml}) or the \file{extractMM.py} matrix format; the root element decides which. A bare stem gets \file{.xml} appended, as it always did.\\
+\tg{exchange\_reaction\_indices} & FBA, unless \tg{exchange\_reaction\_names} is given & one per substrate; \code{-1} (or \code{-99}) for one the organism does not exchange. Correct only for the exact model revision it was written against.\\
+\tg{exchange\_reaction\_names} & alternative to the above; needs an SBML model & one reaction name per substrate, \code{none} for one the organism does not exchange. Resolved against the model at start-up, so a wrong name stops the run and suggests near matches. Wins if both are given.\\
 \tg{fba\_maximum\_uptake\_flux} & FBA or surrogate & the \textbf{metabolic} path's Vmax, mmol/gDW/h. Separate from \tg{maximum\_uptake\_flux}.\\
 \tg{substrate\_lower\_bounds} & FBA & hard floor on each exchange flux; eating is negative\\
 \tg{substrate\_upper\_bounds} & FBA & hard ceiling\\
@@ -200,6 +201,113 @@ for.}
 \bottomrule
 \end{tabular}
 \end{center}
+
+\section{\tg{model\_source} and friends}
+
+Top level, inside \tg{parameters}. Chapter \ref{ch:modelsource} explains the
+search order.
+
+\begin{longtable}{@{}p{3.6cm}p{1.4cm}p{2.2cm}p{7.2cm}@{}}
+\toprule
+\textbf{Tag} & \textbf{Type} & \textbf{Default} & \textbf{Meaning}\\
+\midrule\endhead
+\tg{model\_source} & string & --- & \code{bigg:<id>}, e.g. \code{bigg:iJO1366}. Absent means every FBA microbe supplies its own \tg{model\_filename}.\\
+\tg{model\_bundle} & string & \code{models} & where the gzipped bundled models live, relative to the working directory\\
+\tg{model\_cache} & string & \code{input} & where the unpacked \file{.xml} is put, and looked for first\\
+\tg{allow\_download} & bool & \code{false} & permit fetching over the network when the model is neither cached nor bundled. Compute nodes usually cannot, which is why this is off.\\
+\bottomrule
+\end{longtable}
+
+\note{Who gets the file.}{Every microbe whose \tg{reaction\_type} is metabolic
+--- FBA \emph{or} surrogate --- and that did not name its own
+\tg{model\_filename}. A surrogate microbe needs it too, because that is what
+\tg{train\_if\_missing} sweeps.}
+
+\section{Geometry generation, inside \tg{domain}}
+
+All optional. Absent means \tg{filename} is read as before. Chapter
+\ref{ch:geomgen} has the details.
+
+\begin{longtable}{@{}p{3.4cm}p{1.4cm}p{1.8cm}p{7.6cm}@{}}
+\toprule
+\textbf{Tag} & \textbf{Type} & \textbf{Default} & \textbf{Meaning}\\
+\midrule\endhead
+\tg{generate} & string & --- & \code{channel}, \code{spheres}, \code{cylinders}, \code{random}, \code{fracture} or \code{layered}\\
+\tg{porosity} & real & 0.5 & target open fraction, for \code{spheres}, \code{cylinders} and \code{random}\\
+\tg{grain\_radius} & real & 3 & voxels, for \code{spheres} and \code{cylinders}\\
+\tg{grain\_count} & int & --- & fix the number of grains instead of the porosity\\
+\tg{aperture} & real & --- & voxels, for \code{fracture}\\
+\tg{roughness} & real & 0 & fracture wall roughness, 0 to 1\\
+\tg{layers} & int & --- & for \code{layered}\\
+\tg{seed} & int & 1 & the generator is deterministic given this\\
+\tg{walls} & string & --- & axes to wall off, e.g. \code{y} or \code{yz}\\
+\tg{write\_geometry} & string & \code{generated\_geometry.dat} & where to record what was generated\\
+\tg{import\_raw} & string & --- & a flat binary volume to threshold instead. Mutually exclusive with \tg{generate}.\\
+\tg{raw\_dtype} & string & \code{uint8} & \code{uint8}, \code{uint16}, \code{int32}, \code{float32}, \code{float64}\\
+\tg{threshold} & real & 128 & at or above this is one phase, below is the other\\
+\tg{invert} & bool & \code{false} & swap which side of the threshold is pore\\
+\bottomrule
+\end{longtable}
+
+\warn{The run stops on a sealed domain.}{Not percolating along $x$ is fatal, by
+design. See chapter \ref{ch:geomgen}.}
+
+\section{\tg{surrogate}}
+
+Top level, inside \tg{parameters}. Chapter \ref{ch:surrogateblock} explains what
+happens at start-up.
+
+\begin{longtable}{@{}p{3.8cm}p{1.4cm}p{1.8cm}p{7.2cm}@{}}
+\toprule
+\textbf{Tag} & \textbf{Type} & \textbf{Default} & \textbf{Meaning}\\
+\midrule\endhead
+\tg{enabled} & bool & \code{false} & the whole block is ignored when this is off\\
+\tg{weights\_file} & string & --- & a \file{.srg} file. Required when the block is enabled.\\
+\tg{train\_if\_missing} & bool & \code{false} & fit one now if the file is not there, instead of stopping\\
+\tg{microbe} & int & $-1$ & which microbe the network is for. $-1$ means all of them.\\
+\bottomrule
+\end{longtable}
+
+Inside \tg{train}, all optional except the inputs:
+
+\begin{longtable}{@{}p{3.8cm}p{1.4cm}p{1.8cm}p{7.2cm}@{}}
+\toprule
+\textbf{Tag} & \textbf{Type} & \textbf{Default} & \textbf{Meaning}\\
+\midrule\endhead
+\tg{input0} \ldots \tg{input7} & string & --- & \code{<substrate> <low> <high> [log]}. At least one when training. Three at most --- past that the samples needed grow faster than the fit improves.\\
+\tg{samples} & int & 2000 & points in the sweep\\
+\tg{layers} & ints & \code{10 10} & hidden layer sizes\\
+\tg{restarts} & int & 5 & independent fits; the best is kept\\
+\tg{epochs} & int & 4000 & Adam iterations per restart\\
+\tg{verify\_points} & int & 512 & fresh points, re-solved by the LP, that the network never saw\\
+\tg{seed} & int & 1 & the fit is reproducible given this, on every compiler\\
+\tg{log\_output} & bool & \code{false} & fit $\log_{10}$ of the growth rate\\
+\bottomrule
+\end{longtable}
+
+\warn{The training range is not advice.}{It is written into the \file{.srg}
+file and enforced at run time: evaluations outside it are clamped to the edge
+and counted, and a run that clamps more than 5\% of the time says so at the
+end. Set the ranges from what the simulation will actually visit --- the upper
+end is \tg{fba\_maximum\_uptake\_flux}, because no voxel can ever request
+more.}
+
+\section{\tg{diagnostics}}
+
+Top level, inside \tg{parameters}. Chapter \ref{ch:diagnostics} has the
+details.
+
+\begin{longtable}{@{}p{3.8cm}p{1.4cm}p{2.0cm}p{7.0cm}@{}}
+\toprule
+\textbf{Tag} & \textbf{Type} & \textbf{Default} & \textbf{Meaning}\\
+\midrule\endhead
+\tg{enabled} & bool & \code{false} & the whole block is ignored when this is off\\
+\tg{summary\_csv} & string & \code{summary.csv} & written inside \tg{output\_path} unless the path is absolute\\
+\tg{interval} & int & 0 & steps between rows. 0 follows the VTI interval.\\
+\tg{tolerance} & real & \code{1e-6} & relative drift above which a conserved sum is reported as failed\\
+\tg{conserve} \ \tg{conserve1} \ldots \tg{conserve31} & string & --- & a sum of substrate names, \code{+} separated, that ought to be constant\\
+\bottomrule
+\end{longtable}
 
 \section{\tg{equilibrium}}
 
@@ -398,7 +506,8 @@ this is correct for their situation.
 \file{examples/} & fifteen cases, one per capability\\
 \file{examples/makeExamples.py} & regenerates them\\
 \file{examples/validateExamples.py} & structural check, one second\\
-\file{examples/runAllExamples.sh} & builds and runs all fifteen\\
+\file{scripts/setup\_case.sh} & assembles one case, ready to build\\
+\file{tests/check\_repo.sh} & structural check over the whole tree\\
 \file{examples/runExamples.slurm} & the same, under Slurm\\
 \midrule
 \multicolumn{2}{@{}l}{\textit{Surrogate training}}\\

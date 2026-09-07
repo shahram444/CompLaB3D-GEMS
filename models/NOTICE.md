@@ -59,10 +59,10 @@ cost is paid once.
 Append a row to `manifest.txt`:
 
 ```
-name  nmet  nrxn  objective  hash  bytes  url
+name  raw_species  raw_reactions  met  rxn  objective  hash  bytes  url
 ```
 
-`hash` may be `0` to skip the checksum. `nmet` and `nrxn` are the important
+`hash` may be `0` to skip the checksum. `met` and `rxn` are the important
 columns: they are what lets the solver notice that a model has been revised
 under you, which silently shifts every positional `<exchange_reaction_indices>`
 entry. Set them to `0` to skip that check too, but read the warning in

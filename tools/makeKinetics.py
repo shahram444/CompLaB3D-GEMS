@@ -214,9 +214,23 @@ def gen_abiotic(spec, source):
         reactants = [(c, i, n) for (c, i, n) in terms if c < 0]
         rate = "GeneratedAbiotic::k_%s" % r["name"]
         for c, i, n in reactants:
-            order = int(round(-c))
-            for _ in range(order):
-                rate += " * std::max(C[%d], 0.0)" % i
+            # [v1.3] This was `order = int(round(-c))` followed by that many
+            # multiplications, which silently drops any reactant whose coefficient
+            # rounds to zero: `0.5 A + B -> C` emitted a rate with no C[A] factor at
+            # all, so the reaction ran at a rate independent of one of its own
+            # reactants. parse_equation reads the coefficient as a float and the
+            # format documentation at the top of this file promises rate = k [A]^a
+            # [B]^b, so a fractional order is legal input; and the generated
+            # self-test only checks conserved moieties, which is a property of the
+            # stoichiometry rather than of the rate expression, so it printed PASS.
+            # Integer orders keep their exact repeated-multiplication form; a
+            # fractional one becomes a pow on a floored base.
+            order = -c
+            if abs(order - round(order)) < 1e-12:
+                for _ in range(int(round(order))):
+                    rate += " * std::max(C[%d], 0.0)" % i
+            else:
+                rate += " * std::pow(std::max(C[%d], 0.0), %.17g)" % (i, order)
         out.append("    {")
         out.append("        const double R = %s;" % rate)
         for c, i, n in terms:
@@ -395,7 +409,14 @@ def _left_nullspace(N, tol=1e-10):
     import numpy as np
     N = np.asarray(N, float)
     if N.size == 0 or N.shape[1] == 0:
-        return np.eye(N.shape[0])
+        # [v1.3] This returned the identity, i.e. "every species on its own is a
+        # conserved moiety", which is vacuously true of an empty reaction set and
+        # made NW == n_substrates > 0. The generated driver then never printed its
+        # "nothing to check" note, every trial hit `scale < 1e-300` and was skipped,
+        # worst stayed 0, and the test closed with "PASS: every conserved moiety is
+        # conserved" having evaluated nothing. An empty network has no conserved
+        # moiety to check, which is what NW == 0 tells the driver to say.
+        return np.zeros((0, N.shape[0]))
     u, s, vt = np.linalg.svd(N)
     rank = int((s > tol * max(1.0, s[0])).sum())
     W = u[:, rank:].T                      # rows span the left null space
@@ -473,6 +494,7 @@ def gen_selftest(spec, source):
     lines += ["",
               "    unsigned seed = 12345u;",
               "    double worst = 0.0; int trials = 20000; int worstw = -1;",
+              "    int evaluated = 0;   /* trials that produced a non-zero rate vector */",
               "    for (int t = 0; t < trials; ++t) {",
               "        std::vector<double> C(NS), R(NS);",
               "        for (int i = 0; i < NS; ++i) {",
@@ -483,6 +505,7 @@ def gen_selftest(spec, source):
               "        double scale = 0.0;",
               "        for (int i = 0; i < NS; ++i) scale += std::fabs(R[i]);",
               "        if (scale < 1e-300) continue;",
+              "        ++evaluated;   /* [v1.3] a trial with no rate at all proves nothing */",
               "        for (int k = 0; k < NW; ++k) {",
               "            double dot = 0.0;",
               "            for (int i = 0; i < NS; ++i) dot += W[k][i] * R[i];",
@@ -491,16 +514,24 @@ def gen_selftest(spec, source):
               "        }",
               "    }",
               '    std::printf("%d trials, %d conserved moiety(ies), worst relative "',
-              '                "imbalance %.3e\\n", trials, NW, worst);',
-              "    if (NW == 0)",
-              '        std::printf("NOTE: this network has no conserved moiety, so there "',
-              '                    "is nothing for this test to check.\\n");',
+              '                "imbalance %.3e\\n", evaluated, NW, worst);',
+              "    if (NW == 0) {",
+              '        std::printf("NOTHING CHECKED: this network has no conserved moiety, so "',
+              '                    "there is no mass-balance\\n                statement for this test to make. That is not a pass.\\n");',
+              "        return 0;",
+              "    }",
+              "    if (evaluated == 0) {",
+              '        std::printf("NOTHING CHECKED: every trial returned an all-zero rate "',
+              '                    "vector, so no balance was\\n                ever evaluated. That is not a pass.\\n");',
+              "        return 0;",
+              "    }",
               "    if (worst > 1e-12) {",
               '        std::printf("FAIL: %s is not conserved\\n",',
               "                    worstw >= 0 ? WNAME[worstw] : \"?\");",
               "        return 1;",
               "    }",
-              '    std::printf("PASS: every conserved moiety is conserved\\n");',
+              '    std::printf("PASS: every conserved moiety is conserved over %d evaluated "',
+              '                "trial(s)\\n", evaluated);',
               "    return 0;", "}", ""]
     return "\n".join(lines)
 

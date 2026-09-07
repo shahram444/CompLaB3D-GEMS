@@ -48,9 +48,11 @@
 #ifndef COMPLAB3D_GEOMETRY_HH
 #define COMPLAB3D_GEOMETRY_HH
 
+#include <algorithm>   // std::sort, for the porosity quantile
 #include <cmath>
 #include <cstdio>
 #include <cstdlib>
+#include <cstring>     // std::memcpy, for reading raw volumes of any width
 #include <string>
 #include <vector>
 

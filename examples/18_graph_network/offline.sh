@@ -33,8 +33,20 @@ python3 training/train_graphnet.py --stoich "$STOICH" --data "$SAMPLES" \
         --out input/aom_retrained.gnn
 
 # The number that matters is NOT the correlation. It is the ratio between
-# species rates, which should come out close to the stoichiometry without
-# ever having been a training target. If it does not, the graph is wrong.
+# species rates, which must come out AS the stoichiometry without ever having
+# been a training target.
+#
+# With the default --readout extent that ratio is exact by construction: the
+# network predicts one extent per reaction and the species rates are formed as
+# r = S xi, so the last line the trainer prints -- "predictions off the
+# stoichiometric subspace" -- should be at machine precision. Anything larger
+# means the writer and the reader disagree about the file, not that the fit is
+# poor.
+#
+# --readout species reproduces what every .gnn written before v1.2 means: each
+# species reads its own rate off its own node, and the ratio is only
+# approximately held. Use it to read an old file, not to make a new one.
+#
 # The trainer writes its own fit quality into the file's provenance lines.
 echo
 echo "what the trainer recorded about the fit it just made:"

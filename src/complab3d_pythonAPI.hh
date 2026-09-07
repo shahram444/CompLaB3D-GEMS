@@ -391,6 +391,59 @@ static PyObject *cobrapy_pRunFBA  = NULL;   // strong reference to complab3d_cob
 // The Python module shipped with CompLaB3D. Renamed from the 2-D "complab_cobrapy".
 static const char *COMPLAB3D_PY_MODULE = "complab3d_cobrapy";
 
+/* ===============================================================================================
+   register_multistep_cobrapy
+   -----------------------------------------------------------------------------------------------
+   Ship one microbe's lexicographic stage chain to the Python side, ONCE, at set-up.
+
+   The chain does not change during a run, so it does not belong in the per-voxel wire format.
+   That format is positional and is decoded by arithmetic on argument counts at both ends; adding
+   a variable-length block to it is how the 2-D bridge grew its off-by-one bugs. This sends the
+   stages to a module-level table instead, and run_FBA() looks the microbe up there.
+
+   `stages` is flattened as (column, alpha, maximise) triples. Fewer than two stages clears any
+   registration for that microbe, so turning a chain off needs no rebuild.
+
+   Returns COBRAPY_OK, or COBRAPY_NOT_PREPPED if prep_cobrapy() has not run, or
+   COBRAPY_PY_EXCEPTION if the call itself failed. A failure here is fatal at the call site: a
+   silently unregistered chain would run as plain FBA and nothing in the output would say so.
+   =============================================================================================== */
+inline int register_multistep_cobrapy(int microbe, const std::vector<double> &stages,
+                                      int growthCol)
+{
+    if (cobrapy_pModule == NULL) return COBRAPY_NOT_PREPPED;
+    if (stages.size() % 3 != 0)  return COBRAPY_PY_EXCEPTION;
+
+    PyObject *pFun = PyObject_GetAttrString(cobrapy_pModule, "set_multistep");
+    if (pFun == NULL || !PyCallable_Check(pFun)) {
+        cobrapyCheckError("register_multistep_cobrapy (getattr set_multistep)");
+        Py_XDECREF(pFun);
+        return COBRAPY_PY_EXCEPTION;
+    }
+
+    const Py_ssize_t nstage = (Py_ssize_t) (stages.size() / 3);
+    PyObject *pArgs = PyTuple_New(3 + (Py_ssize_t) stages.size());
+    if (pArgs == NULL) { Py_DECREF(pFun); return COBRAPY_PY_EXCEPTION; }
+
+    PyTuple_SetItem(pArgs, 0, PyFloat_FromDouble((double) microbe));   /* steals */
+    PyTuple_SetItem(pArgs, 1, PyFloat_FromDouble((double) nstage));
+    for (size_t k = 0; k < stages.size(); ++k)
+        PyTuple_SetItem(pArgs, (Py_ssize_t) (2 + k), PyFloat_FromDouble(stages[k]));
+    PyTuple_SetItem(pArgs, (Py_ssize_t) (2 + stages.size()),
+                    PyFloat_FromDouble((double) growthCol));
+
+    PyObject *pRet = PyObject_CallObject(pFun, pArgs);
+    Py_DECREF(pArgs);
+    Py_DECREF(pFun);
+
+    if (pRet == NULL) {
+        cobrapyCheckError("register_multistep_cobrapy (call)");
+        return COBRAPY_PY_EXCEPTION;
+    }
+    Py_DECREF(pRet);
+    return COBRAPY_OK;
+}
+
 /* Release the cached module/function (and, optionally, the cached cobra models).
    Call before Py_FinalizeEx(). Safe to call more than once and safe to call if prep_cobrapy() never ran. */
 inline void finalize_cobrapy(std::vector<PyObject *> *vec_model = NULL)
@@ -463,6 +516,37 @@ inline int prep_cobrapy(char *pyFileName, char *src_path, std::vector<PyObject *
         pcout << "COBRApy ERROR: failed to import module \"" << COMPLAB3D_PY_MODULE
               << "\" (host passed \"" << (pyFileName ? pyFileName : "(null)") << "\"). "
               << "Check that " << COMPLAB3D_PY_MODULE << ".py is in " << src_path << "." << std::endl;
+
+        /* [FIX-3D] Say WHICH interpreter this is.
+         *
+         * The overwhelmingly common cause of "No module named 'cobra'" here is not a missing
+         * install: it is that cmake linked one Python and `pip install cobra` went to another.
+         * The executable embeds whichever libpython was found at build time, and that is very
+         * often not the `python3` on PATH -- on a cluster with modules it almost never is.
+         *
+         * Without this, the message sends the user to check a file that is already there. With
+         * it, a version mismatch is visible in one line:
+         *     embedded interpreter: 3.13.13, prefix /usr
+         *     $ python3 -c 'import cobra'      # works, because python3 is 3.11
+         */
+        pcout << "COBRApy: the interpreter compiled into this executable is:" << std::endl;
+        {
+            const char *ver = Py_GetVersion();
+            pcout << "COBRApy:   version " << (ver ? ver : "(unknown)") << std::endl;
+            PyObject *pfx = PySys_GetObject((char *) "prefix");
+            if (pfx != NULL) {
+                PyObject *s = PyObject_Str(pfx);
+                if (s != NULL) {
+                    const char *c = PyUnicode_AsUTF8(s);
+                    pcout << "COBRApy:   sys.prefix " << (c ? c : "(unprintable)") << std::endl;
+                    Py_DECREF(s);
+                }
+            }
+            PyErr_Clear();          /* the diagnostics above must not leave an exception set */
+        }
+        pcout << "COBRApy: if that version differs from the `python3` you installed cobra with,\n"
+              << "COBRApy: that IS the problem. Install cobra for THIS interpreter, or rebuild\n"
+              << "COBRApy: with -DPython3_EXECUTABLE=<the python3 that has cobra>." << std::endl;
         return COBRAPY_PY_EXCEPTION;
     }
 

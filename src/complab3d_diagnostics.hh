@@ -58,7 +58,16 @@ namespace complab_diag {
 struct FieldStat {
     std::string name;
     double total, mean, minv, maxv;
-    FieldStat() : total(0), mean(0), minv(0), maxv(0) {}
+    /* What computeDensity() cannot see. Palabos's BounceBack and NoDynamics both answer
+     * computeDensity() from a stored number and ignore the populations they are holding, so mass
+     * momentarily in flight at a wall or inside a grain is absent from `total`. `held` is that
+     * mass, measured from the populations themselves. It is reported as its own column, and the
+     * conservation check adds it back, so a run is judged on what the lattice actually holds
+     * rather than on what the dynamics are willing to say. */
+    double held;
+    FieldStat() : total(0), mean(0), minv(0), maxv(0), held(0) {}
+    /* The conserved quantity: everything the lattice is holding, wherever it is sitting. */
+    double conserved() const { return total + held; }
 };
 
 struct Row {
@@ -75,10 +84,15 @@ struct ConserveCheck {
     std::vector<std::string> terms;
     double first;
     bool haveFirst;
+    /* [v1.3] How many times the sum was actually COMPARED against its baseline. record()
+     * establishes the baseline and returns, so a run producing fewer than two diagnostic rows
+     * left worstDrift at 0 and reported PASS having compared nothing -- which is precisely the
+     * "a skipped check that looks like a pass" failure the note in finalReport() warns about. */
+    long comparisons;
     double worstDrift;
     bool warned;
     bool skipped;
-    ConserveCheck() : first(0), haveFirst(false), worstDrift(0), warned(false), skipped(false) {}
+    ConserveCheck() : first(0), haveFirst(false), comparisons(0), worstDrift(0), warned(false), skipped(false) {}
 };
 
 inline std::vector<std::string> splitPlus(const std::string &s)
@@ -140,7 +154,7 @@ public:
             for (size_t t = 0; t < k.terms.size(); ++t) {
                 bool found = false;
                 for (size_t f = 0; f < r.fields.size(); ++f)
-                    if (r.fields[f].name == k.terms[t]) { sum += r.fields[f].total; found = true; break; }
+                    if (r.fields[f].name == k.terms[t]) { sum += r.fields[f].conserved(); found = true; break; }
                 if (!found) { complete = false; break; }
             }
             if (!complete) {
@@ -154,18 +168,35 @@ public:
             }
             if (!k.haveFirst) { k.first = sum; k.haveFirst = true; continue; }
 
-            const double scale = (std::fabs(k.first) > 1e-300) ? std::fabs(k.first) : 1e-300;
+            /* Normalise by the LARGER of the two values, not by the first one.
+             *
+             * Dividing by the first value alone breaks whenever a run starts from an empty
+             * domain: the baseline is 0, and the first non-zero total produces a "drift" of
+             * 1e+302, which tells the user nothing except that something is wrong somewhere.
+             * With max(|first|, |now|) the number is always between 0 and 1 and reads as what
+             * it is -- the fraction of the sum that appeared or disappeared. */
+            double scale = std::fabs(k.first);
+            if (std::fabs(sum) > scale) scale = std::fabs(sum);
+            if (scale < 1e-300) scale = 1e-300;
             const double drift = std::fabs(sum - k.first) / scale;
+            ++k.comparisons;
             if (drift > k.worstDrift) k.worstDrift = drift;
             if (drift > tol_ && !k.warned) {
                 k.warned = true;
                 anyFail_ = true;
-                char b[512];
+                char b[1024];
                 std::snprintf(b, sizeof(b),
                     "  [DIAG] MASS BALANCE: %s drifted %.3e (tolerance %.1e) by step %ld.\n"
                     "  [DIAG]   started %.10g, now %.10g.\n"
-                    "  [DIAG]   That is chemistry that does not close, or a time step too long\n"
-                    "  [DIAG]   for the rate you specified. It will not fix itself.\n",
+                    "  [DIAG]   Three things cause this, in order of how often they do:\n"
+                    "  [DIAG]   1. An OPEN BOUNDARY. A substrate held at a fixed concentration on\n"
+                    "  [DIAG]      an inlet is being supplied from outside, so its total is not\n"
+                    "  [DIAG]      conserved and never will be. Do not <conserve> it -- conserve a\n"
+                    "  [DIAG]      sum that is closed, such as every species sharing one element.\n"
+                    "  [DIAG]   2. Reaction stoichiometry that does not balance. Check the sum you\n"
+                    "  [DIAG]      named really is a conserved moiety of your reaction network.\n"
+                    "  [DIAG]   3. A time step too long for the rate you specified. This one shows\n"
+                    "  [DIAG]      up together with negative concentrations, below.\n",
                     k.expr.c_str(), drift, tol_, r.iteration, k.first, sum);
                 msg += b;
             }
@@ -194,14 +225,28 @@ public:
         for (size_t c = 0; c < checks_.size(); ++c) {
             /* A check that never ran is reported as SKIPPED, not PASS. A skipped check that
              * looks like a pass is how a mass-balance guarantee quietly becomes worthless. */
+            const char *verdict =
+                checks_[c].skipped        ? "SKIPPED (unknown substrate)"
+              : checks_[c].comparisons==0 ? "SKIPPED (never compared: fewer than two "
+                                            "diagnostic rows, so there was no baseline to "
+                                            "compare against)"
+              : (checks_[c].worstDrift <= tol_ ? "PASS" : "FAIL");
             std::snprintf(b, sizeof(b), "  [DIAG] %-24s worst relative drift %.3e  %s\n",
-                          checks_[c].expr.c_str(), checks_[c].worstDrift,
-                          checks_[c].skipped ? "SKIPPED (unknown substrate)"
-                                             : (checks_[c].worstDrift <= tol_ ? "PASS" : "FAIL"));
+                          checks_[c].expr.c_str(), checks_[c].worstDrift, verdict);
             s += b;
         }
-        if (!checks_.empty())
-            s += std::string("  [DIAG] verdict: ") + (anyFail_ ? "FAIL" : "PASS") + "\n";
+        /* A verdict is only meaningful if at least one check actually ran. */
+        size_t ran = 0;
+        for (size_t c = 0; c < checks_.size(); ++c)
+            if (!checks_[c].skipped && checks_[c].comparisons > 0) ++ran;
+        if (!checks_.empty()) {
+            if (ran == 0)
+                s += "  [DIAG] verdict: NOT CHECKED -- no conservation check ever ran. Lower "
+                     "<interval>, or\n         raise <ade_max_iT>, so the run records at least "
+                     "two diagnostic rows.\n";
+            else
+                s += std::string("  [DIAG] verdict: ") + (anyFail_ ? "FAIL" : "PASS") + "\n";
+        }
         return s;
     }
 
@@ -211,11 +256,23 @@ private:
         std::FILE *f = std::fopen(path_.c_str(), "w");
         if (!f) return;
         std::fprintf(f, "# CompLB3D run summary, one row per diagnostic interval\n");
-        std::fprintf(f, "# totals and means are over OPEN voxels only\n");
+        /* This line used to claim the totals were over open voxels only. They are not, and they
+         * must not be: an immobile species keeps its inventory inside SOLID voxels, so excluding
+         * those would drop a dissolving mineral out of its own mass balance and the check would
+         * fail for a reason that has nothing to do with the chemistry. The totals are over the
+         * physical domain; the open-voxel count is reported separately, as porosity, and is what
+         * the means are divided by. */
+        std::fprintf(f, "# totals are over the physical domain x=1..nx-2; porosity and the means\n");
+        std::fprintf(f, "# use the OPEN voxel count, taken from the live mask so it tracks a\n");
+        std::fprintf(f, "# pore space that precipitation or dissolution is changing.\n");
+        std::fprintf(f, "# <name>_held is the mass sitting in wall and grain voxels, which\n");
+        std::fprintf(f, "# computeDensity cannot report because BounceBack and NoDynamics answer\n");
+        std::fprintf(f, "# from a stored number. The conserved quantity is _total + _held, and\n");
+        std::fprintf(f, "# that is what <conserve> is checked against.\n");
         std::fprintf(f, "iteration,porosity,open_voxels");
         for (size_t i = 0; i < r.fields.size(); ++i) {
             const char *n = r.fields[i].name.c_str();
-            std::fprintf(f, ",%s_total,%s_mean,%s_min,%s_max", n, n, n, n);
+            std::fprintf(f, ",%s_total,%s_mean,%s_min,%s_max,%s_held", n, n, n, n, n);
         }
         std::fprintf(f, "\n");
         std::fclose(f);
@@ -227,8 +284,9 @@ private:
         if (!f) return;
         std::fprintf(f, "%ld,%.17g,%ld", r.iteration, r.porosity, r.openVoxels);
         for (size_t i = 0; i < r.fields.size(); ++i)
-            std::fprintf(f, ",%.17g,%.17g,%.17g,%.17g",
-                         r.fields[i].total, r.fields[i].mean, r.fields[i].minv, r.fields[i].maxv);
+            std::fprintf(f, ",%.17g,%.17g,%.17g,%.17g,%.17g",
+                         r.fields[i].total, r.fields[i].mean, r.fields[i].minv, r.fields[i].maxv,
+                         r.fields[i].held);
         std::fprintf(f, "\n");
         std::fclose(f);          // reopened per row on purpose: a run killed by the queue still
                                  // leaves a complete, readable CSV behind

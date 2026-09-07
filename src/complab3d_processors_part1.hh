@@ -43,6 +43,7 @@
 #ifndef COMPLAB3D_PROCESSORS_PART1_HH
 #define COMPLAB3D_PROCESSORS_PART1_HH
 
+#include "complab3d_thermo.hh"      /* the F_T gate; a no-op unless <thermodynamics> is on */
 #include "../defineKinetics.hh"
 #include "../defineAbioticKinetics.hh"  // For abiotic (substrate-only) reactions
 #include <random>
@@ -71,6 +72,8 @@ public:
     // dt in seconds, dx in meters
     virtual void process(Box3D domain, std::vector<BlockLattice3D<T,Descriptor>*> lattices) {
         Dot3D absoluteOffset = lattices[0]->getLocation();
+        std::vector<double> tconc;                 /* the gate's view of the same chemistry */
+        const bool gated = complab_thermo::enabled();
         for (plint iX=domain.x0; iX<=domain.x1; ++iX) {
             plint absX = iX+absoluteOffset.x;
             if (absX > 0 && absX < nx-1) {
@@ -98,6 +101,23 @@ public:
                             }
 
                             defineRxnKinetics( bmass, conc, subs_rate, bio_rate, mask );
+
+                            /* ---- the thermodynamic gate -------------------------------------
+                             * defineKinetics.hh returns ONE combined rate vector for the whole
+                             * voxel: subs_rate carries every organism's contribution added
+                             * together, and there is no way to tell them apart afterwards.  So a
+                             * single gate applies to the whole vector, and integ::prepareThermo()
+                             * refuses a .thm file with more than one reaction block whenever this
+                             * path is in use.  gateFor(0) is that one block.  A no-op when
+                             * <thermodynamics> is off, so an existing case is bit-identical. */
+                            if (gated) {
+                                complab_thermo::fillConc(conc, (int) subsNum, tconc);
+                                const T ft = (T) complab_thermo::gateFor(0, tconc);
+                                if (ft < (T) 1) {
+                                    for (plint iS = 0; iS < subsNum; ++iS) subs_rate[iS] *= ft;
+                                    for (plint iB = 0; iB < bioNum;  ++iB) bio_rate[iB]  *= ft;
+                                }
+                            }
 
                             // update dC
                             for (plint iS=0; iS<subsNum; ++iS) {
@@ -259,10 +279,27 @@ template<typename T, template<typename U> class Descriptor>
 class update_abiotic_rxnLattices : public LatticeBoxProcessingFunctional3D<T,Descriptor>
 {
 public:
-    update_abiotic_rxnLattices(plint nx_, plint subsNum_, plint solid_, plint bb_)
+    /* `immobile_` is one flag per substrate and may be left empty, which means "none are".
+     *
+     * It exists because the mask test below used to skip solid and bounce-back voxels for EVERY
+     * species, and an immobile species lives in a solid voxel by definition -- that is the whole
+     * purpose of <immobile>. So a mineral could be debited in the increment lattice and never have
+     * the debit applied: dissolution released calcium into the water and the calcite it came from
+     * was never consumed. Measured on example 14 before this fix: Ca rose by 5.28 mol/L while the
+     * calcite total sat at 1951.2 and did not move by a single digit.
+     *
+     * A MOBILE species still skips those voxels. It has no business holding anything in a grain,
+     * and applying an increment there would put mass where no water is. */
+    update_abiotic_rxnLattices(plint nx_, plint subsNum_, plint solid_, plint bb_,
+                               const std::vector<bool> &immobile_ = std::vector<bool>())
     : nx(nx_), subsNum(subsNum_), solid(solid_), bb(bb_),
-      dCloc(subsNum_), maskLloc(2*subsNum_)
+      dCloc(subsNum_), maskLloc(2*subsNum_), immobile(immobile_)
     {}
+
+    bool appliesHere(plint iS, plint mask) const {
+        if (mask != solid && mask != bb) return true;
+        return (iS < (plint) immobile.size()) && immobile[(size_t) iS];
+    }
 
     virtual void process(Box3D domain, std::vector<BlockLattice3D<T,Descriptor>*> lattices) {
         Dot3D absoluteOffset = lattices[0]->getLocation();
@@ -277,8 +314,9 @@ public:
                         plint mask = util::roundToInt(lattices[maskLloc]->get(
                             iX+maskOffset.x, iY+maskOffset.y, iZ+maskOffset.z).computeDensity());
 
-                        // Skip solid and bounce-back cells
-                        if (mask != solid && mask != bb) {
+                        /* Solid and bounce-back voxels are skipped for a mobile species, and
+                         * NOT for an immobile one: see the constructor note. */
+                        {
                             std::vector<Dot3D> vec_offset;
                             for (plint iT=0; iT<maskLloc; ++iT) {
                                 vec_offset.push_back(computeRelativeDisplacement(*lattices[0], *lattices[iT]));
@@ -286,6 +324,7 @@ public:
 
                             // Apply dC to substrate concentrations
                             for (plint iS=0; iS<subsNum; ++iS) {
+                                if (!appliesHere(iS, mask)) continue;
                                 plint iXd = iX + vec_offset[iS+dCloc].x;
                                 plint iYd = iY + vec_offset[iS+dCloc].y;
                                 plint iZd = iZ + vec_offset[iS+dCloc].z;
@@ -333,6 +372,7 @@ private:
     plint nx, subsNum;
     plint solid, bb;
     plint dCloc, maskLloc;
+    std::vector<bool> immobile;
 };
 
 template<typename T, template<typename U> class Descriptor>
@@ -573,7 +613,13 @@ public:
                                 }
 
                                 // redistribute the remaining biomass (this is the most time consuming part)
-                                if (chk == 0) {
+                                /* [v1.3] The nbrTlen > 0 test is what makes the [CA-ROBUST] note
+                                 * above true. Without it, a voxel whose six face neighbours are
+                                 * all wall or solid -- the sealed-throat case that note describes
+                                 * -- fell straight into this block with nbrsLocMask empty, and the
+                                 * tmp1Len == 0 branch below then read nbrsLocMask[0..2] from a
+                                 * default-constructed vector, whose data pointer is null. */
+                                if (chk == 0 && nbrTlen > 0) {
                                     /* use the age lattice */
                                     std::vector<T> tmp1Vector;
                                     plint tmp1Len = 0;
@@ -812,7 +858,9 @@ public:
 
                             // redistribute the remaining biomass (this is the most time consuming part)
                             plint push_dir = 0, delx = 0, dely = 0, delz = 0;
-                            if (chk == 0) {
+                            /* [v1.3] See the matching note in pushExcessBiomass3D: without the
+                             * nbrTlen > 0 test, a fully encased voxel indexes an empty vector. */
+                            if (chk == 0 && nbrTlen > 0) {
                                 /* use the distance lattice */
                                 std::vector<T> tmp1Vector;
                                 plint tmp1Len = 0;

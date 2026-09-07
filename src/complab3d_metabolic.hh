@@ -117,9 +117,23 @@
 #include <cstring>
 #include <cstdlib>
 
+/* [NEW] The native SBML reader.  Unconditional: it is header-only and depends only on tinyxml,
+ * which Palabos already compiles into every build (externalLibraries/tinyxml).  Including it here
+ * is what lets <model_filename> point straight at a genome-scale model instead of at the output of
+ * extractMM.py. */
+#include "complab3d_configpath.hh"   /* complab_input::configPath(), set from argv in main() */
+#include "complab3d_sbml.hh"
+
 #ifdef COMPLAB_ENABLE_GLPK
 #include "complab3d_glpkcpp.hh"
 #endif
+
+/* The two refinements of the linear program itself.  Both are header-only and neither needs a
+ * solver to be present -- run_glpk_lex() is the only part of either that touches GLPK, and it is
+ * guarded inside its own file -- so they are included unconditionally and stay parseable in a
+ * build with no metabolic back end at all. */
+#include "complab3d_lexicographic.hh"
+#include "complab3d_cybernetic.hh"
 
 #ifdef COMPLAB_ENABLE_COBRAPY
 #include "complab3d_pythonAPI.hh"
@@ -149,23 +163,24 @@ namespace rxntype {
         GLPK_KNS   = 5,   // GLPK      and defineKinetics.hh together
         SRG_KNS    = 6,   // surrogate and defineKinetics.hh together
         CPY_KNS    = 7,   // COBRApy   and defineKinetics.hh together
-        SYMBOLIC   = 8,   // complab3d_symbolic.hh: rate laws read from a .sym file at run time
-        SYM_KNS    = 9,   // symbolic  and defineKinetics.hh together
-        GRAPHNET   = 10,  // complab3d_graphnet.hh: a graph network read from a .gnn file
-        GNN_KNS    = 11   // graph network and defineKinetics.hh together
+        SYMBOLIC   = 8,   // an algebraic rate law read from a .sym file
+        GRAPHNET   = 9,   // a message-passing network read from a .gnn file
+        SYM_KNS    = 10,  // symbolic  and defineKinetics.hh together
+        GNN_KNS    = 11   // graphnet  and defineKinetics.hh together
     };
 
-    inline bool usesKinetics  (plint r) { return r==KINETICS || r==GLPK_KNS || r==SRG_KNS || r==CPY_KNS
-                                              || r==SYM_KNS  || r==GNN_KNS; }
-    /* Neither a symbolic rate law nor a graph network is a metabolic model: they need no SBML file,
-     * no exchange-reaction binding and no linear program, so both are deliberately left out of
-     * usesMetabolic() below.  Folding them in would drag them through code that has nothing to do. */
-    inline bool usesSymbolic  (plint r) { return r==SYMBOLIC || r==SYM_KNS; }
-    inline bool usesGraphnet  (plint r) { return r==GRAPHNET || r==GNN_KNS; }
+    inline bool usesKinetics  (plint r) { return r==KINETICS || r==GLPK_KNS || r==SRG_KNS
+                                              || r==CPY_KNS  || r==SYM_KNS  || r==GNN_KNS; }
     inline bool usesGlpk      (plint r) { return r==GLPK      || r==GLPK_KNS; }
     inline bool usesCobrapy   (plint r) { return r==COBRAPY   || r==CPY_KNS; }
     inline bool usesSurrogate (plint r) { return r==SURROGATE || r==SRG_KNS; }
+    inline bool usesSymbolic  (plint r) { return r==SYMBOLIC  || r==SYM_KNS; }
+    inline bool usesGraphnet  (plint r) { return r==GRAPHNET  || r==GNN_KNS; }
     inline bool usesFBA       (plint r) { return usesGlpk(r)  || usesCobrapy(r); }
+    /* "learned" = fitted offline and read from a file at start-up, as opposed to solved in line.
+     * The surrogate is deliberately NOT in here: it predates these two and is threaded through the
+     * metabolic config, whereas these two carry their own files and their own runtime registry. */
+    inline bool usesLearned   (plint r) { return usesSymbolic(r) || usesGraphnet(r); }
     inline bool usesMetabolic (plint r) { return usesFBA(r)   || usesSurrogate(r); }
 
     inline std::string name (plint r) {
@@ -179,8 +194,8 @@ namespace rxntype {
             case SRG_KNS:   return "surrogate_and_kinetics";
             case CPY_KNS:   return "cobrapy_and_kinetics";
             case SYMBOLIC:  return "symbolic";
-            case SYM_KNS:   return "symbolic_and_kinetics";
             case GRAPHNET:  return "graphnet";
+            case SYM_KNS:   return "symbolic_and_kinetics";
             case GNN_KNS:   return "graphnet_and_kinetics";
             default:        return "UNKNOWN";
         }
@@ -194,7 +209,7 @@ namespace rxntype {
         /* [FIX-3D] "1" was missing, so an existing CompLB3D input file written as
          * <reaction_type>1</reaction_type> -- which the comment above promises
          * still works -- was rejected outright.  All eight numeric forms are
-         * accepted now, matching the enum, as are 8..11 added since. */
+         * accepted now, matching the enum. */
         if (s=="none"      || s=="no"  || s=="0")                          return NONE;
         if (s=="kinetics"  || s=="kns" || s=="1")                          return KINETICS;
         if (s=="2") return GLPK;
@@ -204,18 +219,19 @@ namespace rxntype {
         if (s=="6") return SRG_KNS;
         if (s=="7") return CPY_KNS;
         if (s=="8") return SYMBOLIC;
-        if (s=="9") return SYM_KNS;
-        if (s=="10") return GRAPHNET;
+        if (s=="9") return GRAPHNET;
+        if (s=="10") return SYM_KNS;
         if (s=="11") return GNN_KNS;
         if (s=="glpk"      || s=="fba" || s=="fba_glpk")                   return GLPK;
         if (s=="surrogate" || s=="srg" || s=="ann")                        return SURROGATE;
         if (s=="cobrapy"   || s=="cpy" || s=="fba_cobrapy")                return COBRAPY;
+        if (s=="symbolic"  || s=="sym" || s=="sym_law" || s=="rate_law")   return SYMBOLIC;
+        if (s=="graphnet"  || s=="gnn" || s=="graph_network"
+                           || s=="graph")                                  return GRAPHNET;
         if (s=="glpk_and_kinetics"      || s=="glpk+kinetics")             return GLPK_KNS;
         if (s=="surrogate_and_kinetics" || s=="surrogate+kinetics")        return SRG_KNS;
         if (s=="cobrapy_and_kinetics"   || s=="cobrapy+kinetics")          return CPY_KNS;
-        if (s=="symbolic"  || s=="sym" || s=="expression")                 return SYMBOLIC;
         if (s=="symbolic_and_kinetics"  || s=="symbolic+kinetics")         return SYM_KNS;
-        if (s=="graphnet"  || s=="gnn" || s=="graph_network")              return GRAPHNET;
         if (s=="graphnet_and_kinetics"  || s=="graphnet+kinetics")         return GNN_KNS;
         return -1;
     }
@@ -419,16 +435,34 @@ struct MetabolicConfig {
     bool enable_fba_glpk;
     bool enable_fba_cobrapy;
     bool enable_surrogate;
+    /* The two learned paths.  Their files are read by integ::readConfig() and their networks live
+     * in complab_sym::runtime() / complab_gnn::runtime(), so all this struct carries is whether
+     * the switch is on and how many organisms asked for it -- which is what the dispatch in
+     * complab.cpp gates on, exactly as it does for the three above. */
+    bool enable_symbolic;
+    bool enable_graphnet;
+    /* The thermodynamic gate is not a rate path -- no microbe has reaction_type thermo -- so this
+     * switch has no count beside it.  It is read here only so the summary below can say whether
+     * the run is thermodynamically controlled; the file itself is loaded by integ::prepareThermo,
+     * which runs later, once the substrate and microbe names are known. */
+    bool enable_thermo;
 
     /* ---- derived counts -------------------------------------------------- */
     plint glpk_count;      // microbes whose reaction_type uses GLPK
     plint cpy_count;       // ... COBRApy
     plint srg_count;       // ... the surrogate
+    plint sym_count;       // ... a .sym rate law
+    plint gnn_count;       // ... a .gnn network
     plint mm_count;        // glpk_count + cpy_count  (microbes with a metabolic model)
 
     /* ---- per-microbe, indexed by GLOBAL microbe id ------------------------ */
     std::vector<std::string>            model_filename;     // "" when not an FBA microbe
     std::vector< std::vector<plint> >   subsLoc;            // [microbe][substrate] -> exchange column, -1 if unused
+    /* [NEW] <exchange_reaction_names>: the same mapping written as reaction names rather than
+     * column numbers.  Empty when the user gave indices instead.  Resolved into subsLoc by
+     * load_metabolic_models3D(), because it needs the model's reaction list to do it -- which is
+     * the whole point: a name survives a change of model revision, a column number does not. */
+    std::vector< std::vector<std::string> > exchange_names;
     /* [FIX-3D] The Michaelis-Menten Vmax now comes from <maximum_uptake_flux>,
      * which is what the documentation, the 2-D code and every comment always
      * said it did.  The first version of this port used <substrate_lower_bounds>
@@ -443,6 +477,11 @@ struct MetabolicConfig {
     std::vector< std::vector<T> >       maxUptake;          // [microbe][substrate] lower bound floor  (<=0)
     std::vector< std::vector<T> >       maxRelease;         // [microbe][substrate] upper bound        (>=0)
     std::vector<plint>                  objDir;             // -1 maximize, +1 minimize
+    /* [v1.3] "the user wrote <objective_direction>" has to be distinguishable from "nobody
+     * said", because both used to be stored as objDir = -1 and the SBML override below then
+     * could not tell them apart: an explicit `maximize` was silently flipped to minimize by an
+     * fbc:type="minimize" in the model file, which is the opposite of what its comment says. */
+    std::vector<char>                   objDirExplicit;     // 1 where CompLaB.xml set it
     std::vector< std::vector<int> >     constraint_loc;     // extra bound overrides
     std::vector< std::vector<T> >       constraint_lb;
     std::vector< std::vector<T> >       constraint_ub;
@@ -463,6 +502,13 @@ struct MetabolicConfig {
     std::vector< std::vector<T> >                vec_b, vec_c, vec_lb, vec_ub;
     std::vector<plint>                           vec_objLoc;
     std::vector<int>                             vec_nmets, vec_nrxns;
+
+    /* ---- refinements of the program, per microbe, both off by default ------ */
+    /* <multi_step>: the lexicographic chain.  Empty or one stage == plain FBA. */
+    std::vector<complab_lex::LexPlan>       lexPlan;
+    /* <cybernetic>: alternative carbon sources and the weights between them.
+     * Fewer than two sources == one growth option == the ordinary path. */
+    std::vector<complab_cyb::CyberneticPlan> cybPlan;
 
     /* ---- solver handles --------------------------------------------------- */
 #ifdef COMPLAB_ENABLE_GLPK
@@ -491,11 +537,16 @@ struct MetabolicConfig {
 
     MetabolicConfig()
       : enable_fba_glpk(false), enable_fba_cobrapy(false), enable_surrogate(false),
-        glpk_count(0), cpy_count(0), srg_count(0), mm_count(0),
+        enable_symbolic(false), enable_graphnet(false), enable_thermo(false),
+        glpk_count(0), cpy_count(0), srg_count(0), sym_count(0), gnn_count(0), mm_count(0),
         useTotals(false), lpsolver(1), save_pb(0), released(false)
     {}
 
-    bool anyEnabled() const { return enable_fba_glpk || enable_fba_cobrapy || enable_surrogate; }
+    bool anyEnabled() const { return enable_fba_glpk || enable_fba_cobrapy || enable_surrogate
+                                  || enable_symbolic || enable_graphnet; }
+    /* The learned paths need vec_Kc / vec_mu sized and the totals tableau built, but they do NOT
+     * need a metabolic model loaded, so they are separated out where that distinction matters. */
+    bool anyLearned() const { return enable_symbolic || enable_graphnet; }
 
     /* ---- the two unit conversions, in one place only --------------------- */
 
@@ -563,7 +614,7 @@ inline int initialize_metabolic (MetabolicConfig &cfg,
                                  const std::vector< std::vector<T> > &vec_Kc,
                                  const std::vector<T>                &vec_mu)
 {
-    std::string fin("CompLaB.xml");
+    std::string fin(complab_input::configPath());
 
     /* ---------------------------------------------------------------- switches */
     {
@@ -607,14 +658,41 @@ inline int initialize_metabolic (MetabolicConfig &cfg,
         catch (PlbIOException& exception) { cfg.lpsolver = 1; }
         try { doc["parameters"]["simulation_mode"]["glpk_save_problem"].read(cfg.save_pb); }
         catch (PlbIOException& exception) { cfg.save_pb = 0; }
+
+        /* The two learned paths keep their switch inside their own block, beside the file they
+         * read, because that is where a user looks for it.  Same yes/no discipline: a typo stops
+         * the run rather than quietly turning the feature off. */
+        {
+            const char *blk[3]  = { "symbolic", "graphnet", "thermodynamics" };
+            bool *ldest[3]      = { &cfg.enable_symbolic, &cfg.enable_graphnet,
+                                    &cfg.enable_thermo };
+            for (int k = 0; k < 3; ++k) {
+                try {
+                    std::string tmp;
+                    doc["parameters"][blk[k]]["enabled"].read(tmp);
+                    std::transform(tmp.begin(), tmp.end(), tmp.begin(),
+                                   [](unsigned char c){ return std::tolower(c); });
+                    if      (tmp=="yes" || tmp=="true"  || tmp=="1" || tmp=="on")  *ldest[k] = true;
+                    else if (tmp=="no"  || tmp=="false" || tmp=="0" || tmp=="off") *ldest[k] = false;
+                    else {
+                        pcout << "<" << blk[k] << "><enabled> is \"" << tmp
+                              << "\", which is not a yes/no value. Use true or false. Terminating.\n";
+                        return -1;
+                    }
+                }
+                catch (PlbIOException& exception) { *ldest[k] = false; }
+            }
+        }
     }
 
     /* ------------------------------------------------- count what is requested */
-    cfg.glpk_count = cfg.cpy_count = cfg.srg_count = 0;
+    cfg.glpk_count = cfg.cpy_count = cfg.srg_count = cfg.sym_count = cfg.gnn_count = 0;
     for (plint iM = 0; iM < num_of_microbes && iM < (plint) reaction_type.size(); ++iM) {
         if (rxntype::usesGlpk     (reaction_type[iM])) ++cfg.glpk_count;
         if (rxntype::usesCobrapy  (reaction_type[iM])) ++cfg.cpy_count;
         if (rxntype::usesSurrogate(reaction_type[iM])) ++cfg.srg_count;
+        if (rxntype::usesSymbolic (reaction_type[iM])) ++cfg.sym_count;
+        if (rxntype::usesGraphnet (reaction_type[iM])) ++cfg.gnn_count;
     }
     cfg.mm_count = cfg.glpk_count + cfg.cpy_count;
 
@@ -634,6 +712,16 @@ inline int initialize_metabolic (MetabolicConfig &cfg,
               << "Set it to true, or change the microbe's reaction_type. Terminating.\n";
         return -1;
     }
+    if (cfg.sym_count > 0 && !cfg.enable_symbolic) {
+        pcout << "A microbe asks for reaction_type symbolic but <symbolic><enabled> is false. "
+              << "Set it to true, or change the microbe's reaction_type. Terminating.\n";
+        return -1;
+    }
+    if (cfg.gnn_count > 0 && !cfg.enable_graphnet) {
+        pcout << "A microbe asks for reaction_type graphnet but <graphnet><enabled> is false. "
+              << "Set it to true, or change the microbe's reaction_type. Terminating.\n";
+        return -1;
+    }
 #ifndef COMPLAB_ENABLE_GLPK
     if (cfg.enable_fba_glpk) {
         pcout << "<enable_fba_glpk> is true but this executable was built without GLPK.\n"
@@ -650,13 +738,32 @@ inline int initialize_metabolic (MetabolicConfig &cfg,
         return -1;
     }
 #endif
-    /* CompLaB 2D refused to mix the two FBA back ends in one run, because both
-     * would write into the same increment lattices with different flux index
-     * conventions.  The same restriction applies here. */
+    /* CompLaB 2D refused to mix the two FBA back ends in one run.  The reason given
+     * was that both write into the same increment lattices with different flux index
+     * conventions.  That reason no longer holds: both back ends address substrates
+     * through cfg.subsLoc[globalMicrobe][substrate] and convert through the one
+     * shared fluxToDeltaC(), so a flux means the same thing on either path.
+     *
+     * What actually broke was narrower.  Both processors were handed ONE list of FBA
+     * microbes, built over usesFBA(), so each tried to solve for the other back end's
+     * organisms -- and cfg.vec_lp[gM] is null for a COBRApy microbe.  complab.cpp now
+     * builds glpk_globalId and cpy_globalId separately and gives each processor its
+     * own lattice vector, so neither can see the other's organisms.  The two then add
+     * into the shared dC/dB increments in the same way the surrogate, symbolic and
+     * graphnet paths already coexist, and update_rxnLattices applies the sum once.
+     *
+     * One honest caveat, the same one that applies to any two paths running side by
+     * side: if a GLPK organism and a COBRApy organism draw on the SAME substrate in
+     * the SAME voxel, each sizes its uptake without knowing about the other, and only
+     * the positivity clamp in update_rxnLattices stops the pair from over-drawing.
+     * The within-back-end exhaustion repair does not cross back ends.  Give competing
+     * organisms the same back end if that matters for your problem. */
     if (cfg.glpk_count > 0 && cfg.cpy_count > 0) {
-        pcout << "GLPK and COBRApy microbes cannot be mixed in one simulation. "
-              << "Pick one FBA back end. Terminating.\n";
-        return -1;
+        pcout << "  note: this run mixes GLPK and COBRApy organisms ("
+              << cfg.glpk_count << " GLPK, " << cfg.cpy_count << " COBRApy).\n"
+              << "        Each back end solves only its own organisms and both add into the same\n"
+              << "        increment lattices. Shared-substrate exhaustion is repaired within a back\n"
+              << "        end, not across the two.\n";
     }
 
     if (!cfg.anyEnabled()) return 0;   // nothing asked for: leave everything alone
@@ -694,10 +801,12 @@ inline int initialize_metabolic (MetabolicConfig &cfg,
     /* -------------------------------------------------- allocate per-microbe -- */
     cfg.model_filename.assign(num_of_microbes, std::string());
     cfg.subsLoc      .assign(num_of_microbes, std::vector<plint>(num_of_substrates, -1));
+    cfg.exchange_names.assign(num_of_microbes, std::vector<std::string>());
     cfg.vmax         .assign(num_of_microbes, std::vector<T>(num_of_substrates, T()));
     cfg.maxUptake    .assign(num_of_microbes, std::vector<T>(num_of_substrates, (T) -1e30));
     cfg.maxRelease   .assign(num_of_microbes, std::vector<T>(num_of_substrates, (T)  1e30));
     cfg.objDir       .assign(num_of_microbes, -1);
+    cfg.objDirExplicit.assign(num_of_microbes, (char) 0);
     cfg.constraint_loc.assign(num_of_microbes, std::vector<int>());
     cfg.constraint_lb .assign(num_of_microbes, std::vector<T>());
     cfg.constraint_ub .assign(num_of_microbes, std::vector<T>());
@@ -713,6 +822,8 @@ inline int initialize_metabolic (MetabolicConfig &cfg,
     cfg.vec_objLoc.assign(num_of_microbes, 0);
     cfg.vec_nmets .assign(num_of_microbes, 0);
     cfg.vec_nrxns .assign(num_of_microbes, 0);
+    cfg.lexPlan.assign(num_of_microbes, complab_lex::LexPlan());
+    cfg.cybPlan.assign(num_of_microbes, complab_cyb::CyberneticPlan());
 
     /* ------------------------------------------------------- per-substrate --- */
     cfg.fix_concentration.assign(num_of_substrates, false);
@@ -768,7 +879,28 @@ inline int initialize_metabolic (MetabolicConfig &cfg,
                 return -1;
             }
 
-            /* which substrates this microbe exchanges, and where in its model */
+            /* which substrates this microbe exchanges, and where in its model.
+             *
+             * [NEW] Two spellings are accepted.  <exchange_reaction_indices> is the original:
+             * column numbers, which are fast and exact but silently mean something different the
+             * moment the model file changes revision.  <exchange_reaction_names> is the safer one:
+             * reaction names, resolved against the model itself in load_metabolic_models3D().  If
+             * both are given the names win, because they are the ones that can be checked. */
+            bool haveNames = false;
+            try {
+                std::vector<std::string> nm;
+                doc["parameters"]["microbiology"][bioname]["exchange_reaction_names"].read(nm);
+                if ((plint) nm.size() != num_of_substrates) {
+                    pcout << bioname << ": <exchange_reaction_names> has " << (plint) nm.size()
+                          << " entries but there are " << num_of_substrates << " substrates. "
+                          << "Use 'none' for a substrate this microbe does not exchange. Terminating.\n";
+                    return -1;
+                }
+                cfg.exchange_names[iM] = nm;
+                haveNames = true;
+            }
+            catch (PlbIOException& exception) {}
+
             try {
                 std::vector<plint> loc;
                 doc["parameters"]["microbiology"][bioname]["exchange_reaction_indices"].read(loc);
@@ -781,12 +913,17 @@ inline int initialize_metabolic (MetabolicConfig &cfg,
                 /* [FIX-3D] CompLaB 2D marks an unused substrate with -99; this code
                  * uses -1.  Accept both, so 2D input files port unchanged. */
                 for (size_t q = 0; q < loc.size(); ++q) if (loc[q] < 0) loc[q] = -1;
-                cfg.subsLoc[iM] = loc;
+                if (haveNames)
+                    pcout << "  note: " << bioname << " gives both <exchange_reaction_names> and "
+                          << "<exchange_reaction_indices>. The names are used; the indices are ignored.\n";
+                else
+                    cfg.subsLoc[iM] = loc;
             }
             catch (PlbIOException& exception) {
-                if (rxntype::usesFBA(rt)) {
+                if (rxntype::usesFBA(rt) && !haveNames) {
                     pcout << bioname << ": reaction_type " << rxntype::name(rt)
-                          << " requires <exchange_reaction_indices>. Terminating.\n";
+                          << " requires <exchange_reaction_indices> or <exchange_reaction_names>. "
+                          << "Terminating.\n";
                     return -1;
                 }
             }
@@ -857,13 +994,171 @@ inline int initialize_metabolic (MetabolicConfig &cfg,
                 std::string tmp;
                 doc["parameters"]["microbiology"][bioname]["objective_direction"].read(tmp);
                 std::transform(tmp.begin(), tmp.end(), tmp.begin(), [](unsigned char c){ return std::tolower(c); });
-                if      (tmp=="maximize" || tmp=="max") cfg.objDir[iM] = -1;
-                else if (tmp=="minimize" || tmp=="min") cfg.objDir[iM] =  1;
+                if      (tmp=="maximize" || tmp=="max") { cfg.objDir[iM] = -1; cfg.objDirExplicit[iM] = 1; }
+                else if (tmp=="minimize" || tmp=="min") { cfg.objDir[iM] =  1; cfg.objDirExplicit[iM] = 1; }
                 else {
                     pcout << bioname << ": <objective_direction> must be maximize or minimize. Terminating.\n";
                     return -1;
                 }
             } catch (PlbIOException& exception) { cfg.objDir[iM] = -1; }
+
+            /* ================================================================================
+             *  <multi_step> -- the lexicographic chain
+             * --------------------------------------------------------------------------------
+             *      <multi_step>
+             *          <stage_reactions>  BIOMASS EX_pyr_e EX_ac_e </stage_reactions>
+             *          <retain_fraction>  0.6721  0.6848   1.0     </retain_fraction>
+             *          <stage_direction>  max     max      max     </stage_direction>
+             *      </multi_step>
+             *
+             *  Reactions are named, not numbered, because a column index is meaningless the
+             *  moment the model file is regenerated.  They are resolved against the model's own
+             *  reaction names in load_metabolic_models3D(), which is the first point at which
+             *  those names exist; here we only record the request.
+             *
+             *  <retain_fraction> is what makes this calibration rather than pure mathematics --
+             *  see the header of complab3d_lexicographic.hh.  It defaults to 1.0 for every
+             *  stage, which is strict lexicographic optimisation and costs no fitted parameter.
+             * ============================================================================== */
+            try {
+                std::vector<std::string> names;
+                doc["parameters"]["microbiology"][bioname]["multi_step"]["stage_reactions"].read(names);
+
+                if (names.size() < 2) {
+                    pcout << bioname << ": <multi_step> needs at least two <stage_reactions>; "
+                          << "one stage is ordinary FBA and the block should be omitted. Terminating.\n";
+                    return -1;
+                }
+
+                std::vector<T> alphas;
+                try { doc["parameters"]["microbiology"][bioname]["multi_step"]["retain_fraction"].read(alphas); }
+                catch (PlbIOException& exception) {}
+                if (alphas.empty()) alphas.assign(names.size(), (T) 1.0);
+                if (alphas.size() != names.size()) {
+                    pcout << bioname << ": <retain_fraction> has " << (plint) alphas.size()
+                          << " entries but <stage_reactions> has " << (plint) names.size()
+                          << ". Terminating.\n";
+                    return -1;
+                }
+                for (size_t s = 0; s < alphas.size(); ++s) {
+                    if (alphas[s] <= (T) 0 || alphas[s] > (T) 1) {
+                        pcout << bioname << ": <retain_fraction> entry " << (plint) s << " is "
+                              << alphas[s] << "; it must lie in (0, 1]. Terminating.\n";
+                        return -1;
+                    }
+                }
+
+                std::vector<std::string> dirs;
+                try { doc["parameters"]["microbiology"][bioname]["multi_step"]["stage_direction"].read(dirs); }
+                catch (PlbIOException& exception) {}
+                if (dirs.empty()) dirs.assign(names.size(), std::string("max"));
+                if (dirs.size() != names.size()) {
+                    pcout << bioname << ": <stage_direction> has " << (plint) dirs.size()
+                          << " entries but <stage_reactions> has " << (plint) names.size()
+                          << ". Terminating.\n";
+                    return -1;
+                }
+
+                cfg.lexPlan[iM].stages.clear();
+                for (size_t s = 0; s < names.size(); ++s) {
+                    std::string d = dirs[s];
+                    std::transform(d.begin(), d.end(), d.begin(),
+                                   [](unsigned char c){ return std::tolower(c); });
+                    if (d != "max" && d != "maximize" && d != "min" && d != "minimize") {
+                        pcout << bioname << ": <stage_direction> entry " << (plint) s
+                              << " is \"" << dirs[s] << "\"; it must be max or min. Terminating.\n";
+                        return -1;
+                    }
+                    const bool mx = (d == "max" || d == "maximize");
+                    /* column stays -1 until the model's reaction names are known */
+                    cfg.lexPlan[iM].stages.push_back(
+                        complab_lex::LexStage(-1, (double) alphas[s], mx, names[s]));
+                }
+            } catch (PlbIOException& exception) {}
+
+            /* ================================================================================
+             *  <cybernetic> -- competing growth options on alternative carbon sources
+             * --------------------------------------------------------------------------------
+             *      <cybernetic>
+             *          <sources>       lactate pyruvate acetate </sources>
+             *          <substrate_ids>    0        1       2    </substrate_ids>
+             *          <carbon_number>    3        3       2    </carbon_number>
+             *          <uptake_kmax>   22.1      8.19    4.39   </uptake_kmax>
+             *          <uptake_half_saturation> 0.02 0.02 0.02  </uptake_half_saturation>
+             *          <weight_floor>  1e-3 </weight_floor>
+             *      </cybernetic>
+             *
+             *  <substrate_ids> are indices into this simulation's substrate list, which is what
+             *  ties each growth option to a concentration on the lattice.  Every source is
+             *  solved with the OTHER sources closed, so the exclusion list is derived here
+             *  rather than being asked for: writing it by hand is an invitation to leave one
+             *  open, and an open second carbon source silently destroys the switching.
+             * ============================================================================== */
+            try {
+                std::vector<std::string> snames;
+                doc["parameters"]["microbiology"][bioname]["cybernetic"]["sources"].read(snames);
+
+                if (snames.size() < 2) {
+                    pcout << bioname << ": <cybernetic> needs at least two <sources>; with one "
+                          << "growth option there is nothing to switch between. Terminating.\n";
+                    return -1;
+                }
+
+                std::vector<plint> sids;
+                std::vector<T>     ncarbon, kmax, khalf;
+                doc["parameters"]["microbiology"][bioname]["cybernetic"]["substrate_ids"]  .read(sids);
+                doc["parameters"]["microbiology"][bioname]["cybernetic"]["carbon_number"]  .read(ncarbon);
+                doc["parameters"]["microbiology"][bioname]["cybernetic"]["uptake_kmax"]    .read(kmax);
+                doc["parameters"]["microbiology"][bioname]["cybernetic"]["uptake_half_saturation"].read(khalf);
+
+                if (sids.size() != snames.size() || ncarbon.size() != snames.size() ||
+                    kmax.size() != snames.size() || khalf.size() != snames.size()) {
+                    pcout << bioname << ": every list inside <cybernetic> must have one entry per "
+                          << "source (" << (plint) snames.size() << " expected). Terminating.\n";
+                    return -1;
+                }
+                for (size_t s = 0; s < sids.size(); ++s) {
+                    if (sids[s] < 0 || sids[s] >= num_of_substrates) {
+                        pcout << bioname << ": <substrate_ids> entry " << (plint) s << " is "
+                              << sids[s] << ", outside the " << num_of_substrates
+                              << " substrates declared. Terminating.\n";
+                        return -1;
+                    }
+                    if (ncarbon[s] <= (T) 0) {
+                        pcout << bioname << ": <carbon_number> entry " << (plint) s
+                              << " must be positive. Terminating.\n";
+                        return -1;
+                    }
+                    if (khalf[s] <= (T) 0) {
+                        pcout << bioname << ": <uptake_half_saturation> entry " << (plint) s
+                              << " must be positive. Terminating.\n";
+                        return -1;
+                    }
+                }
+
+                T floorv = (T) 1e-3;
+                try { doc["parameters"]["microbiology"][bioname]["cybernetic"]["weight_floor"].read(floorv); }
+                catch (PlbIOException& exception) {}
+                if (floorv < (T) 0 || floorv >= (T) 1) {
+                    pcout << bioname << ": <weight_floor> must lie in [0, 1). Terminating.\n";
+                    return -1;
+                }
+
+                cfg.cybPlan[iM].sources.clear();
+                cfg.cybPlan[iM].weightFloor = (double) floorv;
+                for (size_t s = 0; s < snames.size(); ++s) {
+                    complab_cyb::CyberneticSource src;
+                    src.name      = snames[s];
+                    src.subsIndex = (int) sids[s];
+                    src.carbon    = (double) ncarbon[s];
+                    src.kmax      = (double) kmax[s];
+                    src.Ks        = (double) khalf[s];
+                    /* everything that is not this source is closed while this source is solved */
+                    for (size_t o = 0; o < sids.size(); ++o)
+                        if (o != s) src.exclusive.push_back((int) sids[o]);
+                    cfg.cybPlan[iM].sources.push_back(src);
+                }
+            } catch (PlbIOException& exception) {}
 
             /* optional extra bound overrides applied to the model at load time */
             try { doc["parameters"]["microbiology"][bioname]["constraint_indices"]     .read(cfg.constraint_loc[iM]); } catch (PlbIOException& exception) {}
@@ -890,9 +1185,11 @@ inline int initialize_metabolic (MetabolicConfig &cfg,
             if (rxntype::usesFBA(rt)) {
                 try { doc["parameters"]["microbiology"][bioname]["model_filename"].read(cfg.model_filename[iM]); }
                 catch (PlbIOException& exception) {
-                    pcout << bioname << ": reaction_type " << rxntype::name(rt)
-                          << " requires <model_filename>. Terminating.\n";
-                    return -1;
+                    /* [NEW] No longer fatal here.  <model_source> can supply the file instead, and
+                     * that block is read later, by the integration layer.  An FBA microbe with
+                     * neither is still an error -- it is just reported by
+                     * load_metabolic_models3D(), which is the first point that knows both. */
+                    cfg.model_filename[iM].clear();
                 }
             }
         }
@@ -922,6 +1219,10 @@ inline int initialize_metabolic (MetabolicConfig &cfg,
           << "    GLPK FBA        : " << (cfg.enable_fba_glpk    ? "on " : "off") << "  (" << cfg.glpk_count << " microbe(s))\n"
           << "    COBRApy FBA     : " << (cfg.enable_fba_cobrapy ? "on " : "off") << "  (" << cfg.cpy_count  << " microbe(s))\n"
           << "    Surrogate model : " << (cfg.enable_surrogate   ? "on " : "off") << "  (" << cfg.srg_count  << " microbe(s))\n"
+          << "    Symbolic law    : " << (cfg.enable_symbolic   ? "on " : "off") << "  (" << cfg.sym_count  << " microbe(s))\n"
+          << "    Graph network   : " << (cfg.enable_graphnet   ? "on " : "off") << "  (" << cfg.gnn_count  << " microbe(s))\n"
+          << "    Thermo gate     : " << (cfg.enable_thermo       ? "on " : "off")
+          << "  (multiplies whichever path each microbe uses)\n"
           << "    Uptake bounds   : " << (cfg.useTotals ? "TOTAL (speciation-aware)" : "FREE ion") << "\n";
 
     return 0;
@@ -931,16 +1232,125 @@ inline int initialize_metabolic (MetabolicConfig &cfg,
 /* ============================================================================
  *  load_metabolic_models3D
  *
- *  Reads one <input_path>/<model_filename>.xml per FBA microbe -- the file
- *  produced by extractMM.py -- and applies any <constraint_*> overrides.
+ *  Reads one metabolic model per FBA microbe and applies the <constraint_*>
+ *  overrides.  TWO file formats are accepted, told apart by their root element
+ *  rather than by their extension:
  *
- *  Schema (must match extractMM.py exactly):
- *      Metabolic_Model / nmet nrxn objLoc S b c lb ub
- *  with S flattened row-major, metabolite-major:  S[i][j] = flat[i*nrxn + j].
+ *    <sbml>            a genome-scale model as it is distributed -- BiGG,
+ *                      ModelSEED, anything with the FBC v2 package.  Read
+ *                      natively by complab3d_sbml.hh.  This is the path that
+ *                      makes extractMM.py optional.
+ *
+ *    <Metabolic_Model> the flattened matrix file extractMM.py produces:
+ *                      nmet nrxn objLoc S b c lb ub, with S row-major and
+ *                      metabolite-major, S[i][j] = flat[i*nrxn + j].  Kept
+ *                      because every existing input file uses it.
+ *
+ *  <model_filename> may name the file with or without its extension.  Without,
+ *  ".xml" is appended, which is what every CompLaB 2D and 3D input file has
+ *  always assumed.
  *
  *  Returns 0 on success, -1 on failure.
  * ============================================================================
  */
+
+/* Does `s` end with `suffix`?  Written out because this header is compiled as
+ * C++98 in some build configurations and std::string::ends_with is C++20. */
+inline bool endsWithCI (const std::string &s, const std::string &suffix)
+{
+    if (s.size() < suffix.size()) return false;
+    for (size_t i = 0; i < suffix.size(); ++i) {
+        char a = s[s.size() - suffix.size() + i];
+        char b = suffix[i];
+        if (a >= 'A' && a <= 'Z') a = (char)(a - 'A' + 'a');
+        if (b >= 'A' && b <= 'Z') b = (char)(b - 'A' + 'a');
+        if (a != b) return false;
+    }
+    return true;
+}
+
+/* <model_filename> -> a path to open.
+ *
+ * An absolute path, or one that already looks like a file, is taken as given;
+ * a bare stem gets input_path in front and ".xml" behind.  That keeps every
+ * existing input file working while letting <model_source> hand back a path
+ * such as "input/e_coli_core.xml" that must NOT have ".xml" appended twice. */
+inline std::string resolveModelPath (const std::string &input_path, const std::string &name)
+{
+    if (name.empty()) return name;
+    const bool absolute = (name[0] == '/');
+    const bool hasDir   = (name.find('/') != std::string::npos);
+    const bool hasExt   = endsWithCI(name, ".xml") || endsWithCI(name, ".sbml")
+                       || endsWithCI(name, ".xml.gz");
+    if (absolute) return name;
+    if (hasExt && hasDir) return name;             // already a usable relative path
+    if (hasExt)           return input_path + name;
+    return input_path + name + ".xml";
+}
+
+/* The half of the load that is the same whichever format the file was in:
+ * override bounds, check the exchange columns, reshape S, store, report.
+ * Returns 0 or -1.  `nmet`/`nrxn` are taken from the caller's own parse. */
+inline int storeMetabolicModel (MetabolicConfig &cfg, plint iM, const std::string &fname,
+                                int nmet, int nrxn, plint objLoc,
+                                std::vector<T> &s1, std::vector<T> &b, std::vector<T> &c,
+                                std::vector<T> &lb, std::vector<T> &ub)
+{
+    if ((plint) s1.size() != (plint) nmet * (plint) nrxn) {
+        pcout << "  " << fname << ": <S> has " << (plint) s1.size()
+              << " entries but nmet*nrxn = " << (plint) nmet * (plint) nrxn << ". Terminating.\n";
+        return -1;
+    }
+    if ((plint) b.size()  != nmet) { pcout << "  " << fname << ": <b> must have nmet entries.\n";  return -1; }
+    if ((plint) c.size()  != nrxn) { pcout << "  " << fname << ": <c> must have nrxn entries.\n";  return -1; }
+    if ((plint) lb.size() != nrxn) { pcout << "  " << fname << ": <lb> must have nrxn entries.\n"; return -1; }
+    if ((plint) ub.size() != nrxn) { pcout << "  " << fname << ": <ub> must have nrxn entries.\n"; return -1; }
+
+    /* apply the per-microbe constraint overrides */
+    for (size_t k = 0; k < cfg.constraint_loc[iM].size(); ++k) {
+        const int j = cfg.constraint_loc[iM][k];
+        if (j < 0 || j >= nrxn) {
+            pcout << "  microbe" << iM << ": <constraint_indices> entry " << j
+                  << " is outside 0.." << nrxn-1 << ". Terminating.\n";
+            return -1;
+        }
+        lb[j] = cfg.constraint_lb[iM][k];
+        ub[j] = cfg.constraint_ub[iM][k];
+    }
+    /* and sanity-check the exchange indices while we have nrxn to hand */
+    for (plint s = 0; s < (plint) cfg.subsLoc[iM].size(); ++s) {
+        const plint j = cfg.subsLoc[iM][s];
+        if (j >= (plint) nrxn) {
+            pcout << "  microbe" << iM << ": exchange reaction " << j
+                  << " for substrate " << s << " is outside 0.." << nrxn-1 << ". Terminating.\n";
+            return -1;
+        }
+    }
+
+    /* reshape */
+    std::vector< std::vector<T> > s2(nmet, std::vector<T>(nrxn, T()));
+    for (int i = 0; i < nmet; ++i)
+        for (int j = 0; j < nrxn; ++j)
+            s2[i][j] = s1[(size_t) i * (size_t) nrxn + (size_t) j];
+
+    cfg.S3[iM] = s2;
+    cfg.S1[iM] = s1;
+    cfg.vec_b[iM]  = b;
+    cfg.vec_c[iM]  = c;
+    cfg.vec_lb[iM] = lb;
+    cfg.vec_ub[iM] = ub;
+    cfg.vec_objLoc[iM] = objLoc;
+    cfg.vec_nmets[iM]  = nmet;
+    cfg.vec_nrxns[iM]  = nrxn;
+
+    plint nz = 0;
+    for (size_t k = 0; k < s1.size(); ++k) if (s1[k] != T()) ++nz;
+    pcout << "    microbe" << iM << "  " << fname
+          << " : " << nmet << " metabolites, " << nrxn << " reactions, "
+          << nz << " nonzeros, objective at column " << objLoc << "\n";
+    return 0;
+}
+
 inline int load_metabolic_models3D (MetabolicConfig &cfg, const std::string &input_path,
                                     const std::vector<plint> &reaction_type,
                                     plint num_of_microbes)
@@ -950,7 +1360,117 @@ inline int load_metabolic_models3D (MetabolicConfig &cfg, const std::string &inp
     for (plint iM = 0; iM < num_of_microbes; ++iM) {
         if (!rxntype::usesFBA(reaction_type[iM])) continue;
 
-        const std::string fname = input_path + cfg.model_filename[iM] + ".xml";
+        if (cfg.model_filename[iM].empty()) {
+            pcout << "  microbe" << iM << ": reaction_type " << rxntype::name(reaction_type[iM])
+                  << " needs a metabolic model, but neither <model_filename> nor <model_source>\n"
+                  << "  supplied one. Terminating.\n";
+            return -1;
+        }
+
+        const std::string fname = resolveModelPath(input_path, cfg.model_filename[iM]);
+
+        /* ------------------------------------------------------------------ *
+         *  Which format is this?  Decided by the root element, not the name.  *
+         * ------------------------------------------------------------------ */
+        const complab_sbml::ModelFileKind kind = complab_sbml::classify(fname);
+
+        if (kind == complab_sbml::MODEL_UNKNOWN) {
+            pcout << "  could not read the metabolic model " << fname << "\n"
+                  << "  Its root element is neither <sbml> nor <Metabolic_Model>, or the file is\n"
+                  << "  missing or not well-formed XML.\n"
+                  << "  A gzipped model (.xml.gz) must be decompressed first; <model_source> does\n"
+                  << "  that for you. Terminating.\n";
+            return -1;
+        }
+
+        /* ================================================================== *
+         *  SBML, read natively.                                              *
+         * ================================================================== */
+        if (kind == complab_sbml::MODEL_SBML) {
+            complab_sbml::SbmlModel M = complab_sbml::readSbml(fname);
+            if (!M.ok()) {
+                pcout << "  could not read the SBML model " << fname << "\n  " << M.error
+                      << "\n  Terminating.\n";
+                return -1;
+            }
+
+            /* Resolve <exchange_reaction_names> now that the reaction list exists.  This is the
+             * reason names are better than indices: a wrong name is caught here, by name, with
+             * suggestions -- a wrong index is not caught at all. */
+            if (!cfg.exchange_names[iM].empty()) {
+                std::vector<int> cols;
+                std::string err;
+                if (!complab_sbml::resolveExchangeNames(M, cfg.exchange_names[iM], cols, err)) {
+                    pcout << "  microbe" << iM << ", model " << fname << ":\n  " << err
+                          << "  Terminating.\n";
+                    return -1;
+                }
+                cfg.subsLoc[iM].assign(cols.size(), -1);
+                for (size_t s = 0; s < cols.size(); ++s) cfg.subsLoc[iM][s] = (plint) cols[s];
+                pcout << "    microbe" << iM << "  resolved " << (plint) cols.size()
+                      << " exchange reaction name(s) against " << M.modelId << "\n";
+            }
+
+            /* Resolve <multi_step><stage_reactions> the same way, and for the same reason.  A
+             * mistyped stage is far more damaging than a mistyped exchange: the chain would
+             * silently skip that stage at run time and the flux vector would go back to being
+             * whatever the simplex chose, which is exactly the ambiguity the block was added to
+             * remove -- and nothing in the output would say so.  So it is fatal here. */
+            if (!cfg.lexPlan[iM].stages.empty()) {
+                for (size_t s = 0; s < cfg.lexPlan[iM].stages.size(); ++s) {
+                    complab_lex::LexStage &st = cfg.lexPlan[iM].stages[s];
+                    const int j = complab_sbml::findReaction(M, st.name);
+                    if (j < 0) {
+                        pcout << "  microbe" << iM << ", model " << fname << ":\n"
+                              << "  <multi_step> stage " << (plint) s << " names reaction '"
+                              << st.name << "', which is not in model '" << M.modelId << "'.\n"
+                              << "  Terminating.\n";
+                        return -1;
+                    }
+                    st.column = j;
+                }
+                /* Two stages on the same column would pin a quantity against itself and make
+                 * every later stage vacuous.  Cheap to check, impossible to debug from output. */
+                for (size_t a = 0; a < cfg.lexPlan[iM].stages.size(); ++a)
+                    for (size_t b = a + 1; b < cfg.lexPlan[iM].stages.size(); ++b)
+                        if (cfg.lexPlan[iM].stages[a].column == cfg.lexPlan[iM].stages[b].column) {
+                            pcout << "  microbe" << iM << ": <multi_step> stages " << (plint) a
+                                  << " and " << (plint) b << " both resolve to reaction '"
+                                  << cfg.lexPlan[iM].stages[a].name << "'. Terminating.\n";
+                            return -1;
+                        }
+                pcout << "    microbe" << iM << "  multi-step: "
+                      << cfg.lexPlan[iM].describe() << "\n";
+            }
+
+            /* The objective sense the file itself declares.  <objective_direction> in CompLaB.xml
+             * still wins if the user set it, because a user who overrides it means to. */
+            if (!cfg.objDirExplicit[iM] && M.objSense == 1) cfg.objDir[iM] = 1;
+
+            pcout << complab_sbml::sanityReport(M);
+
+            if (storeMetabolicModel(cfg, iM, fname, M.nmet, M.nrxn, (plint) M.objLoc,
+                                    M.S, M.b, M.c, M.lb, M.ub) != 0) return -1;
+            continue;
+        }
+
+        /* ================================================================== *
+         *  The extractMM.py matrix format, exactly as before.                *
+         * ================================================================== */
+        if (!cfg.exchange_names[iM].empty()) {
+            pcout << "  microbe" << iM << ": <exchange_reaction_names> needs an SBML model, because\n"
+                  << "  the matrix format produced by extractMM.py does not carry reaction names.\n"
+                  << "  Point <model_filename> at the SBML file, or use <exchange_reaction_indices>.\n"
+                  << "  Terminating.\n";
+            return -1;
+        }
+        if (!cfg.lexPlan[iM].stages.empty()) {
+            pcout << "  microbe" << iM << ": <multi_step> names reactions, and the matrix format\n"
+                  << "  produced by extractMM.py does not carry reaction names.  Point\n"
+                  << "  <model_filename> at the SBML file instead.\n"
+                  << "  Terminating.\n";
+            return -1;
+        }
         try {
             XMLreader doc(fname);
 
@@ -976,63 +1496,14 @@ inline int load_metabolic_models3D (MetabolicConfig &cfg, const std::string &inp
             /* [FIX-3D] CompLaB 2D never checked these lengths, so a truncated or
              * mis-generated model file silently produced garbage fluxes.  Check now,
              * loudly, at start-up instead of quietly at every voxel. */
-            if ((plint) s1.size() != (plint) nmet * (plint) nrxn) {
-                pcout << "  " << fname << ": <S> has " << (plint) s1.size()
-                      << " entries but nmet*nrxn = " << (plint) nmet * (plint) nrxn << ". Terminating.\n";
+            if (storeMetabolicModel(cfg, iM, fname, nmet, nrxn, objLoc, s1, b, c, lb, ub) != 0)
                 return -1;
-            }
-            if ((plint) b.size()  != nmet) { pcout << "  " << fname << ": <b> must have nmet entries.\n";  return -1; }
-            if ((plint) c.size()  != nrxn) { pcout << "  " << fname << ": <c> must have nrxn entries.\n";  return -1; }
-            if ((plint) lb.size() != nrxn) { pcout << "  " << fname << ": <lb> must have nrxn entries.\n"; return -1; }
-            if ((plint) ub.size() != nrxn) { pcout << "  " << fname << ": <ub> must have nrxn entries.\n"; return -1; }
-
-            /* apply the per-microbe constraint overrides */
-            for (size_t k = 0; k < cfg.constraint_loc[iM].size(); ++k) {
-                const int j = cfg.constraint_loc[iM][k];
-                if (j < 0 || j >= nrxn) {
-                    pcout << "  microbe" << iM << ": <constraint_indices> entry " << j
-                          << " is outside 0.." << nrxn-1 << ". Terminating.\n";
-                    return -1;
-                }
-                lb[j] = cfg.constraint_lb[iM][k];
-                ub[j] = cfg.constraint_ub[iM][k];
-            }
-            /* and sanity-check the exchange indices while we have nrxn to hand */
-            for (plint s = 0; s < (plint) cfg.subsLoc[iM].size(); ++s) {
-                const plint j = cfg.subsLoc[iM][s];
-                if (j >= (plint) nrxn) {
-                    pcout << "  microbe" << iM << ": <exchange_reaction_indices> entry " << j
-                          << " for substrate " << s << " is outside 0.." << nrxn-1 << ". Terminating.\n";
-                    return -1;
-                }
-            }
-
-            /* reshape */
-            std::vector< std::vector<T> > s2(nmet, std::vector<T>(nrxn, T()));
-            for (int i = 0; i < nmet; ++i)
-                for (int j = 0; j < nrxn; ++j)
-                    s2[i][j] = s1[(size_t) i * (size_t) nrxn + (size_t) j];
-
-            cfg.S3[iM] = s2;
-            cfg.S1[iM] = s1;
-            cfg.vec_b[iM]  = b;
-            cfg.vec_c[iM]  = c;
-            cfg.vec_lb[iM] = lb;
-            cfg.vec_ub[iM] = ub;
-            cfg.vec_objLoc[iM] = objLoc;
-            cfg.vec_nmets[iM]  = nmet;
-            cfg.vec_nrxns[iM]  = nrxn;
-
-            plint nz = 0;
-            for (size_t k = 0; k < s1.size(); ++k) if (s1[k] != T()) ++nz;
-            pcout << "    microbe" << iM << "  " << cfg.model_filename[iM]
-                  << " : " << nmet << " metabolites, " << nrxn << " reactions, "
-                  << nz << " nonzeros, objective at column " << objLoc << "\n";
         }
         catch (PlbIOException& exception) {
             pcout << "  could not read the metabolic model " << fname << "\n"
                   << "  " << exception.what() << "\n"
-                  << "  (produce it with:  python3 extractMM.py <model.sbml>)  Terminating.\n";
+                  << "  (produce it with:  python3 extractMM.py <model.sbml>, or point\n"
+                  << "   <model_filename> straight at the SBML file)  Terminating.\n";
             return -1;
         }
     }
@@ -1146,6 +1617,45 @@ inline int setup_metabolic_solvers (MetabolicConfig &cfg,
         if (erck != 0) {
             pcout << "  prep_cobrapy failed (code " << erck << "). Terminating.\n";
             return -1;
+        }
+
+        /* Ship the lexicographic chains, once, now that the module is imported.
+         *
+         * NOTE ON THE INDEX.  prep_cobrapy() was handed a COMPACTED list -- only the microbes
+         * whose reaction_type uses COBRApy -- so the Python side numbers its models 0..n-1 in
+         * that compacted order, not by global microbe id.  The counter below has to walk the
+         * same filter in the same order or a chain lands on the wrong organism, which would be
+         * silent and would look like a modelling error rather than a wiring one. */
+        plint slot = 0;
+        for (plint iM = 0; iM < num_of_microbes; ++iM) {
+            if (!rxntype::usesCobrapy(reaction_type[iM])) continue;
+
+            if (cfg.lexPlan[iM].active()) {
+                std::vector<double> flat;
+                flat.reserve(3 * cfg.lexPlan[iM].stages.size());
+                for (size_t s = 0; s < cfg.lexPlan[iM].stages.size(); ++s) {
+                    const complab_lex::LexStage &st = cfg.lexPlan[iM].stages[s];
+                    flat.push_back((double) st.column);
+                    flat.push_back(st.alpha);
+                    flat.push_back(st.maximise ? 1.0 : 0.0);
+                }
+                /* The growth column travels with the chain so both back ends read the growth
+                 * rate out of the same reaction of the same final vector.  Without it the two
+                 * could disagree by tens of percent at any retain fraction below 1, and the
+                 * GLPK-versus-COBRApy cross-check -- the only independent check either has --
+                 * would be comparing two different quantities. */
+                const int erm = register_multistep_cobrapy((int) slot, flat,
+                                                           (int) cfg.vec_objLoc[iM]);
+                if (erm != 0) {
+                    pcout << "  microbe" << iM << ": could not register the <multi_step> chain "
+                          << "with COBRApy (code " << erm << ").\n"
+                          << "  Continuing would silently solve plain FBA instead. Terminating.\n";
+                    return -1;
+                }
+                pcout << "    microbe" << iM << " (cobrapy slot " << slot << ")  multi-step: "
+                      << cfg.lexPlan[iM].describe() << "\n";
+            }
+            ++slot;
         }
     }
 #endif

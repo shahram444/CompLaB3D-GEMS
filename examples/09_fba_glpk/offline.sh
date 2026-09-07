@@ -29,7 +29,7 @@ if [[ -z "$MODEL" ]]; then
 Nothing to prepare: this case ships input/toy_model.xml, already in the flat
 form the solver reads.
 
-    grep -c '<reaction' input/toy_model.xml     # four reactions, readable in full
+    cat input/toy_model.xml     # <nrxn> is 4, one column of <S> each, readable in full
 
 To convert a model of your own instead:
 

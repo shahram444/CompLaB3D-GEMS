@@ -1,0 +1,86 @@
+# =============================================================================
+#  aom.thm  --  the energetics of anaerobic oxidation of methane
+#
+#      CH4 + SO4(2-)  ->  HS(-) + HCO3(-) + H2O
+#
+#  Read by CompLaB3D at start-up when <thermodynamics><enabled> is true, and
+#  echoed into the log so the result carries the energetics that produced it.
+#
+#  Water is not a transported substrate of this case, so it does not appear in
+#  the stoich line; its activity is taken as one, which is the usual dilute
+#  solution assumption and is already folded into dG0.
+#
+#  EVERY NUMBER IN THIS FILE IS A CITED CLAIM.  Change one and the run changes;
+#  the log will say so.
+# =============================================================================
+
+provenance dG0 from He et al. (2021); ATP threshold from Hoehler et al. (2001)
+version 1
+
+# 4 C: the temperature of the seep sediments these aggregates come from.
+# dG0 MUST be quoted at this temperature, not at 25 C.
+temperature 277.15
+
+energy_units kJ
+
+# The lattices in this case carry mol/L, so no conversion is needed.  A case
+# posed in mmol/L would set this to 1e-3: ln Q is not scale-free.
+concentration_scale 1
+
+reaction AOM
+  microbe   ANME
+
+  # ---- the reaction ---------------------------------------------------------
+  # Negative is consumed, positive is produced.  These names must match
+  # <name_of_substrates> in CompLaB.xml exactly, or the run stops at start-up.
+  stoich    CH4 -1  SO4 -1  HS 1  HCO3 1
+  dG0       -33.12
+
+  # ---- the energy threshold -------------------------------------------------
+  # The reaction must release 0.25 x 50 = 12.5 kJ/mol before the organism can
+  # make its ATP.  Below that the gate is shut.  The 10-20 kJ/mol band is the
+  # one reported for anaerobic syntrophs (Schink 1997; Hoehler et al. 2001).
+  atp       0.25
+  dGatp     50.0
+
+  # Average stoichiometric number: how many times the rate-limiting step turns
+  # per turnover of the reaction as written.  1 unless a measurement says
+  # otherwise (Jin & Bethke 2003).
+  chi       1.0
+
+  # Activity floor.  A concentration the transport solver has driven to zero
+  # would otherwise send ln Q to minus infinity.
+  cmin      1e-9
+
+  # ---- the electron-transfer loss -------------------------------------------
+  # Craig Eq. 3.5 computes dG_net = dG_cat - dG_act - dG_ohm: the activation and
+  # ohmic losses along the conductive network between ANME and SRB.  CompLaB3D
+  # has no cytochrome-redox solver, so it cannot compute those terms; this line
+  # carries them as a constant instead, added to dG.
+  #
+  # WHERE 25.7 COMES FROM.  Not a direct measurement.  It is fixed by the one
+  # observational constraint available: the growth efficiency of these consortia
+  # is 1.0 to 2.75 % of the methane carbon (Nauhaus et al. 2007; Orphan et al.
+  # 2009), and the yield below with no transfer loss returns 5.18 % at the
+  # aggregate rim.  A loss of 25.7 kJ/mol brings it to 2.75 %, the top of that
+  # band.  That single number then determines where the gate closes, with
+  # nothing further tuned.  Set it to 0 to recover the direct-contact
+  # assumption.
+  #
+  # [v1.3] The unloaded figure is 5.18 %, not the 4.7 % quoted here before,
+  # recomputed from the constants in this file at the rim composition of
+  # offline/thermo_curve.py: RT ln Q = -21.6760 kJ/mol and the Heijnen
+  # dissipation for 1 carbon at degree of reduction 8 = 1088.09 kJ per C-mol
+  # give dG = -54.796 and Y = 5.18 %.  yieldmax 0.05 below then CLAMPS what the
+  # solver reports, so setting dGloss to 0 shows 5.00 %, not 5.18 %.  The
+  # 2.75 % figure is unclamped and is exact as written.
+  dGloss    25.7
+
+  # ---- the energy-based growth yield ----------------------------------------
+  # Heijnen & van Dijken (1992) dissipation, then Y = dG / -(dG_ana + dG_dis).
+  # Methane: one carbon, degree of reduction 8.
+  yield     on
+  dGana     -30.0
+  carbon    1
+  reduction 8.0
+  yieldmax  0.05

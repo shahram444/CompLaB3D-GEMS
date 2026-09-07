@@ -57,8 +57,8 @@
     <LB_numerics>
         <domain>
             <nx>24</nx>
-            <ny>24</ny>
-            <nz>6</nz>
+            <ny>26</ny>
+            <nz>8</nz>
             <dx>10</dx>
             <unit>um</unit>
             <characteristic_length>24</characteristic_length>
@@ -124,9 +124,9 @@
                 <in_biofilm>0.</in_biofilm>
             </substrate_diffusion_coefficients>
             <immobile>true</immobile>
-            <left_boundary_type>Neumann</left_boundary_type>
+            <left_boundary_type>closed</left_boundary_type>
             <left_boundary_condition>0.</left_boundary_condition>
-            <right_boundary_type>Neumann</right_boundary_type>
+            <right_boundary_type>closed</right_boundary_type>
             <right_boundary_condition>0.</right_boundary_condition>
         </substrate2>
 

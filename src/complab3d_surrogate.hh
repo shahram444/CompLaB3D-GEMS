@@ -122,18 +122,61 @@ struct Network {
 
     std::vector<double> xOffset, xGain;     // mapminmax on the inputs
     double xYmin;
-    double yOffset, yGain, yYmin;
-    bool logOutput;
+
+    /* PER OUTPUT.  A single-output network (every .srg written before this
+     * change) has one entry in each, and behaves exactly as it did: eval()
+     * still returns growth and nothing else moves.  A multi-output network
+     * additionally returns the exchange fluxes the linear program actually
+     * ran, so the solver no longer has to guess them with a Monod term. */
+    std::vector<double> yOffset, yGain;
+    double yYmin;
+    bool logOutput;                         // applies to OUTPUT 0 only
 
     std::vector<double> trainMin, trainMax; // the box the data covered
-    double outMin, outMax;
+    std::vector<double> outMin, outMax;     // per output
+
+    /* What each output IS, in order.  outputNames[0] is the growth rate; the
+     * rest name the substrate whose flux they carry, and the run matches them
+     * against name_of_substrates rather than trusting positional order.
+     * Empty for a single-output network. */
+    std::vector<std::string> outputNames;
+
+    /* [NEW] The substrate each input stands for, in order. Written into the file and checked
+     * against <name_of_substrates> when the network is registered for a run.
+     *
+     * Without this a network is just "a function of two numbers", and nothing stops a run from
+     * feeding it acetate where it expects oxygen. The numbers would all be plausible and the
+     * answer would be wrong everywhere, silently. Older files have no such line; they load, and
+     * the run then falls back to positional order with a warning. */
+    std::vector<std::string> inputNames;
 
     std::string provenance;                 // model, sample count, date: written into the file
 
-    Network() : nIn(0), xYmin(-1.0), yOffset(0.0), yGain(1.0), yYmin(-1.0),
-                logOutput(false), outMin(0.0), outMax(0.0) {}
+    Network() : nIn(0), xYmin(-1.0), yYmin(-1.0), logOutput(false) {}
 
-    bool valid() const { return nIn > 0 && !W.empty() && W.size() == B.size(); }
+    /* [v1.3] This used to be `nIn > 0 && !W.empty() && W.size() == B.size()`, which two kinds of
+     * truncated file satisfied. Reading a `W L` block resizes BOTH W and B to L+1, so a file
+     * ending before its last `B L` line left B[L] an empty vector that eval() then indexed. And
+     * nothing compared W.size() against sizes.size()-1, so a file cut at a whole layer boundary
+     * loaded as a SHORTER network: a hidden layer silently became the linear output layer and
+     * every rate in the run came from a different function than the one that was trained. Both
+     * were silent. Require one weight matrix and one bias vector per layer, each the right
+     * length for the architecture the file declares. */
+    bool valid() const {
+        if (nIn <= 0 || sizes.size() < 2) return false;
+        const size_t nL = sizes.size() - 1;
+        if (W.size() != nL || B.size() != nL) return false;
+        for (size_t L = 0; L < nL; ++L) {
+            const size_t rows = (size_t) sizes[L + 1], cols = (size_t) sizes[L];
+            if (W[L].size() != rows * cols) return false;
+            if (B[L].size() != rows)        return false;
+        }
+        return true;
+    }
+
+    /* How many numbers this network returns.  Read from the architecture, so
+     * it is right even for a file that predates the "outputs" line. */
+    int nOut() const { return sizes.empty() ? 0 : sizes.back(); }
 
     static double tansig(double n) { return 2.0 / (1.0 + std::exp(-2.0 * n)) - 1.0; }
 
@@ -146,6 +189,44 @@ struct Network {
         return true;
     }
 
+    /* Every output, in physical units.  out is resized to nOut(); out[0] is
+     * the specific growth rate in 1/h and the rest are exchange fluxes in
+     * mmol/gDW/h with CompLaB's sign convention, positive = consumed. */
+    void evalAll(const std::vector<double> &x, std::vector<double> &out) const {
+        const int nO = nOut();
+        out.assign((size_t) (nO > 0 ? nO : 1), 0.0);
+        if (!valid() || (int) x.size() < nIn) return;
+        std::vector<double> a((size_t) nIn);
+        for (int i = 0; i < nIn; ++i) a[(size_t) i] = (x[(size_t) i] - xOffset[(size_t) i]) * xGain[(size_t) i] + xYmin;
+
+        for (size_t L = 0; L < W.size(); ++L) {
+            const int rows = sizes[L + 1], cols = sizes[L];
+            std::vector<double> o((size_t) rows);
+            for (int r = 0; r < rows; ++r) {
+                double s = B[L][(size_t) r];
+                const double *w = &W[L][(size_t) r * (size_t) cols];
+                for (int c = 0; c < cols; ++c) s += w[c] * a[(size_t) c];
+                o[(size_t) r] = (L + 1 == W.size()) ? s : tansig(s);
+            }
+            a.swap(o);
+        }
+
+        for (int k = 0; k < nO; ++k) {
+            const double off  = (k < (int) yOffset.size()) ? yOffset[(size_t) k] : 0.0;
+            const double gain = (k < (int) yGain.size() && yGain[(size_t) k] != 0.0)
+                                ? yGain[(size_t) k] : 1.0;
+            out[(size_t) k] = (a[(size_t) k] - yYmin) / gain + off;
+        }
+        /* The log and the small-positive floor are for GROWTH only.  A flux may
+         * legitimately be zero or negative, and clamping one would corrupt it. */
+        if (logOutput) out[0] = std::pow(10.0, out[0]);
+        if (!(out[0] > 1e-8)) out[0] = 0.0;             // also catches NaN
+        for (size_t k = 1; k < out.size(); ++k)
+            if (out[k] != out[k]) out[k] = 0.0;         // NaN only
+    }
+
+    /* Growth alone.  Unchanged in meaning, so every existing caller is correct
+     * without an edit. */
     double eval(const std::vector<double> &x) const {
         if (!valid() || (int) x.size() < nIn) return 0.0;
         std::vector<double> a((size_t) nIn);
@@ -162,7 +243,9 @@ struct Network {
             }
             a.swap(out);
         }
-        double g = (a[0] - yYmin) / yGain + yOffset;
+        const double off  = yOffset.empty() ? 0.0 : yOffset[0];
+        const double gain  = (yGain.empty() || yGain[0] == 0.0) ? 1.0 : yGain[0];
+        double g = (a[0] - yYmin) / gain + off;
         if (logOutput) g = std::pow(10.0, g);
         if (!(g > 1e-8)) g = 0.0;               // also catches NaN
         return g;
@@ -191,14 +274,32 @@ inline bool save(const Network &N, const std::string &path, std::string *err = 0
     for (size_t i = 0; i < N.sizes.size(); ++i) std::fprintf(f, " %d", N.sizes[i]);
     std::fprintf(f, "\n");
     std::fprintf(f, "logoutput %d\n", N.logOutput ? 1 : 0);
+    if (!N.inputNames.empty()) {
+        std::fprintf(f, "inputnames");
+        for (size_t i = 0; i < N.inputNames.size(); ++i) std::fprintf(f, " %s", N.inputNames[i].c_str());
+        std::fprintf(f, "\n");
+    }
 
     std::fprintf(f, "xoffset"); for (int i = 0; i < N.nIn; ++i) std::fprintf(f, " %.17g", N.xOffset[(size_t) i]); std::fprintf(f, "\n");
     std::fprintf(f, "xgain");   for (int i = 0; i < N.nIn; ++i) std::fprintf(f, " %.17g", N.xGain[(size_t) i]);   std::fprintf(f, "\n");
     std::fprintf(f, "xymin %.17g\n", N.xYmin);
-    std::fprintf(f, "yoffset %.17g\nygain %.17g\nyymin %.17g\n", N.yOffset, N.yGain, N.yYmin);
+    /* v2: one entry per output. A v1 reader sees the first number and stops,
+     * which is exactly right for a single-output file and is why the format
+     * number does not have to change for those. */
+    std::fprintf(f, "outputs %d\n", N.nOut());
+    if (!N.outputNames.empty()) {
+        std::fprintf(f, "outputnames");
+        for (size_t i = 0; i < N.outputNames.size(); ++i) std::fprintf(f, " %s", N.outputNames[i].c_str());
+        std::fprintf(f, "\n");
+    }
+    std::fprintf(f, "yoffset"); for (size_t i = 0; i < N.yOffset.size(); ++i) std::fprintf(f, " %.17g", N.yOffset[i]); std::fprintf(f, "\n");
+    std::fprintf(f, "ygain");   for (size_t i = 0; i < N.yGain.size();   ++i) std::fprintf(f, " %.17g", N.yGain[i]);   std::fprintf(f, "\n");
+    std::fprintf(f, "yymin %.17g\n", N.yYmin);
     std::fprintf(f, "trainmin"); for (int i = 0; i < N.nIn; ++i) std::fprintf(f, " %.17g", N.trainMin[(size_t) i]); std::fprintf(f, "\n");
     std::fprintf(f, "trainmax"); for (int i = 0; i < N.nIn; ++i) std::fprintf(f, " %.17g", N.trainMax[(size_t) i]); std::fprintf(f, "\n");
-    std::fprintf(f, "outrange %.17g %.17g\n", N.outMin, N.outMax);
+    std::fprintf(f, "outrange");
+    for (size_t i = 0; i < N.outMin.size(); ++i) std::fprintf(f, " %.17g %.17g", N.outMin[i], N.outMax[i]);
+    std::fprintf(f, "\n");
 
     for (size_t L = 0; L < N.W.size(); ++L) {
         std::fprintf(f, "W %d\n", (int) L);
@@ -215,6 +316,48 @@ inline bool save(const Network &N, const std::string &path, std::string *err = 0
     return true;
 }
 
+/* Read every number on the rest of the current line.  A v1 file writes one
+ * number where v2 writes nOut of them, so a reader that stops at the first
+ * would load a multi-output file as if it were single-output and be wrong
+ * everywhere without saying so.  Reading to end-of-line handles both. */
+/* [v1.3] Read exactly n numbers into `out`, and leave `out` EMPTY if the line is short.
+ *
+ * The four per-input lines (xoffset, xgain, trainmin, trainmax) used to pre-size their vector and
+ * fill what they could, which made a short line indistinguishable from a complete one downstream:
+ * the completeness check tests size() < nIn, and size() was already nIn before a single number had
+ * been read. A short `trainmin` therefore loaded with zeros in the missing slots, so evalBound()
+ * never clamped those inputs at the low edge and never counted them, and the end-of-run "% clamped
+ * to the training box" report came out reassuring and wrong. A short `xgain` is worse: gain 1.0
+ * instead of 2/(hi-lo) makes every prediction for that input meaningless. Committing nothing on a
+ * short line lets the existing check name the offending keyword. */
+inline void readNPerInput(std::FILE *f, std::vector<double> &out, int n)
+{
+    out.clear();
+    if (n <= 0) return;
+    std::vector<double> v((size_t) n, 0.0);
+    for (int i = 0; i < n; ++i)
+        if (std::fscanf(f, "%lf", &v[(size_t) i]) != 1) return;   /* out stays empty */
+    out.swap(v);
+}
+
+inline bool readLineDoubles(std::FILE *f, std::vector<double> &out)
+{
+    out.clear();
+    std::string tok;
+    int c;
+    while (true) {
+        c = std::fgetc(f);
+        const bool end = (c == EOF || c == '\n');
+        if (c == ' ' || c == '\t' || c == '\r' || end) {
+            if (!tok.empty()) { out.push_back(std::atof(tok.c_str())); tok.clear(); }
+            if (end) break;
+        } else {
+            tok.push_back((char) c);
+        }
+    }
+    return !out.empty();
+}
+
 inline bool load(Network &N, const std::string &path, std::string *err = 0)
 {
     std::FILE *f = std::fopen(path.c_str(), "r");
@@ -223,6 +366,7 @@ inline bool load(Network &N, const std::string &path, std::string *err = 0)
     char key[64];
     N = Network();
     bool haveLayers = false;
+    int nDeclaredOut = 0;
     while (std::fscanf(f, "%63s", key) == 1) {
         if (key[0] == '#') { int ch; while ((ch = std::fgetc(f)) != EOF && ch != '\n') {} continue; }
         std::string k(key);
@@ -243,15 +387,45 @@ inline bool load(Network &N, const std::string &path, std::string *err = 0)
             haveLayers = true;
         }
         else if (k == "logoutput") { int v = 0; if (std::fscanf(f, "%d", &v) != 1) break; N.logOutput = (v != 0); }
-        else if (k == "xoffset") { N.xOffset.assign((size_t) N.nIn, 0.0); for (int i = 0; i < N.nIn; ++i) if (std::fscanf(f, "%lf", &N.xOffset[(size_t) i]) != 1) break; }
-        else if (k == "xgain")   { N.xGain.assign((size_t) N.nIn, 1.0);   for (int i = 0; i < N.nIn; ++i) if (std::fscanf(f, "%lf", &N.xGain[(size_t) i]) != 1) break; }
+        else if (k == "inputnames") {
+            N.inputNames.clear();
+            std::string tok;
+            int ch;
+            while ((ch = std::fgetc(f)) != EOF && ch != '\n') {
+                if (ch == ' ' || ch == '\t' || ch == '\r') { if (!tok.empty()) { N.inputNames.push_back(tok); tok.clear(); } }
+                else tok += (char) ch;
+            }
+            if (!tok.empty()) N.inputNames.push_back(tok);
+        }
+        /* [v1.3] These four used to assign() the vector to full length BEFORE parsing, so a
+         * line carrying fewer numbers than `inputs` left the remainder at the assign default and
+         * the completeness check below -- which tests size() < nIn -- could never see it. The
+         * error text says "no COMPLETE line"; only absence was detected. Commit nothing unless
+         * the whole line is there, so a short line reads as a missing one. */
+        else if (k == "xoffset") { readNPerInput(f, N.xOffset, N.nIn); }
+        else if (k == "xgain")   { readNPerInput(f, N.xGain,   N.nIn); }
         else if (k == "xymin")   { if (std::fscanf(f, "%lf", &N.xYmin) != 1) break; }
-        else if (k == "yoffset") { if (std::fscanf(f, "%lf", &N.yOffset) != 1) break; }
-        else if (k == "ygain")   { if (std::fscanf(f, "%lf", &N.yGain) != 1) break; }
+        else if (k == "outputs") { int nO = 0; if (std::fscanf(f, "%d", &nO) != 1) break; nDeclaredOut = nO; }
+        else if (k == "outputnames") {
+            /* the rest of THIS line, however many names it holds */
+            int c; std::string tok;
+            while ((c = std::fgetc(f)) != EOF && c != '\n') {
+                if (c == ' ' || c == '\t') { if (!tok.empty()) { N.outputNames.push_back(tok); tok.clear(); } }
+                else tok.push_back((char) c);
+            }
+            if (!tok.empty()) N.outputNames.push_back(tok);
+        }
+        else if (k == "yoffset") { if (!readLineDoubles(f, N.yOffset)) break; }
+        else if (k == "ygain")   { if (!readLineDoubles(f, N.yGain))   break; }
         else if (k == "yymin")   { if (std::fscanf(f, "%lf", &N.yYmin) != 1) break; }
-        else if (k == "trainmin"){ N.trainMin.assign((size_t) N.nIn, 0.0); for (int i = 0; i < N.nIn; ++i) if (std::fscanf(f, "%lf", &N.trainMin[(size_t) i]) != 1) break; }
-        else if (k == "trainmax"){ N.trainMax.assign((size_t) N.nIn, 0.0); for (int i = 0; i < N.nIn; ++i) if (std::fscanf(f, "%lf", &N.trainMax[(size_t) i]) != 1) break; }
-        else if (k == "outrange"){ if (std::fscanf(f, "%lf %lf", &N.outMin, &N.outMax) != 2) break; }
+        else if (k == "trainmin"){ readNPerInput(f, N.trainMin, N.nIn); }
+        else if (k == "trainmax"){ readNPerInput(f, N.trainMax, N.nIn); }
+        else if (k == "outrange"){
+            std::vector<double> v;
+            if (!readLineDoubles(f, v)) break;
+            N.outMin.clear(); N.outMax.clear();
+            for (size_t i = 0; i + 1 < v.size(); i += 2) { N.outMin.push_back(v[i]); N.outMax.push_back(v[i + 1]); }
+        }
         else if (k == "W" || k == "B") {
             int L = 0;
             if (std::fscanf(f, "%d", &L) != 1) break;
@@ -274,6 +448,58 @@ inline bool load(Network &N, const std::string &path, std::string *err = 0)
     }
     std::fclose(f);
     if (!N.valid()) { if (err) *err = "'" + path + "' is not a usable surrogate file"; return false; }
+
+    /* A file that declares "outputs N" and whose architecture ends in something
+     * else is inconsistent, and the mismatch would show up as fluxes written
+     * into the wrong substrates. Refuse it rather than guess. */
+    if (nDeclaredOut > 0 && nDeclaredOut != N.nOut()) {
+        char b[192];
+        std::snprintf(b, sizeof(b),
+                      "'%s' declares outputs %d but its last layer has %d",
+                      path.c_str(), nDeclaredOut, N.nOut());
+        if (err) *err = b;
+        return false;
+    }
+    if (!N.outputNames.empty() && (int) N.outputNames.size() != N.nOut()) {
+        char b[192];
+        std::snprintf(b, sizeof(b),
+                      "'%s' names %d output(s) but returns %d",
+                      path.c_str(), (int) N.outputNames.size(), N.nOut());
+        if (err) *err = b;
+        return false;
+    }
+    /* Older single-output files carry one yoffset/ygain and no outrange per
+     * output. Pad rather than reject: they are still perfectly good networks. */
+    if ((int) N.yOffset.size() < N.nOut()) N.yOffset.resize((size_t) N.nOut(), 0.0);
+    if ((int) N.yGain.size()   < N.nOut()) N.yGain.resize((size_t) N.nOut(), 1.0);
+
+    /* [FIX] The per-input arrays were never checked for completeness.  A .srg missing its
+     * trainmin/trainmax lines -- hand-trimmed, written by an older exporter, or truncated --
+     * loaded with an empty error string and valid() returning true, and then evalBound() read
+     * trainMin[0] off a zero-length vector at the first voxel.  Same exposure on xoffset and
+     * xgain in eval().
+     *
+     * complab3d_graphnet.hh already refuses a .gnn with no training box, on the grounds that a
+     * fitted model whose valid range is unknown cannot be trusted anywhere.  That argument is
+     * if anything stronger here, since this is the path whose own header argues hardest that
+     * the box must travel with the weights.  So refuse, and name the line that is missing. */
+    {
+        const char *missing = 0;
+        if ((int) N.trainMin.size() < N.nIn) missing = "trainmin";
+        else if ((int) N.trainMax.size() < N.nIn) missing = "trainmax";
+        else if ((int) N.xOffset.size() < N.nIn) missing = "xoffset";
+        else if ((int) N.xGain.size()   < N.nIn) missing = "xgain";
+        if (missing) {
+            char b[256];
+            std::snprintf(b, sizeof(b),
+                          "'%s' has %d input(s) but no complete '%s' line, so the range it was "
+                          "fitted over is unknown. A network evaluated outside its training box "
+                          "does not fail, it returns a confident number; refusing to load it.",
+                          path.c_str(), N.nIn, missing);
+            if (err) *err = b;
+            return false;
+        }
+    }
     return true;
 }
 
@@ -455,25 +681,35 @@ inline void fitNetwork(Network &N, const std::vector<std::vector<double> > &Xraw
         N.xGain[(size_t) j] = (hi > lo) ? 2.0 / (hi - lo) : 1.0;
     }
 
+    /* The IN-RUN trainer fits growth only, so this network has one output.
+     * It writes a perfectly valid single-output .srg; the offline Python path
+     * (tools/surrogate/) is where a multi-output network is produced, because
+     * fitting the exchange fluxes as well needs the whole LP solution recorded
+     * per sample and that is a sweep, not a side effect of a run. */
     std::vector<double> yfit(yraw);
-    N.outMin = N.outMax = yraw.empty() ? 0.0 : yraw[0];
-    for (int i = 0; i < n; ++i) { if (yraw[(size_t) i] < N.outMin) N.outMin = yraw[(size_t) i];
-                                  if (yraw[(size_t) i] > N.outMax) N.outMax = yraw[(size_t) i]; }
+    double oMin = yraw.empty() ? 0.0 : yraw[0], oMax = oMin;
+    for (int i = 0; i < n; ++i) { if (yraw[(size_t) i] < oMin) oMin = yraw[(size_t) i];
+                                  if (yraw[(size_t) i] > oMax) oMax = yraw[(size_t) i]; }
+    N.outMin.assign(1, oMin);
+    N.outMax.assign(1, oMax);
     if (opt.logOutput) {
-        const double floorv = (N.outMax > 0 ? N.outMax * 1e-9 : 1e-12);
+        const double floorv = (oMax > 0 ? oMax * 1e-9 : 1e-12);
         for (int i = 0; i < n; ++i) yfit[(size_t) i] = std::log10(yraw[(size_t) i] > floorv ? yraw[(size_t) i] : floorv);
     }
     double ylo = yfit[0], yhi = yfit[0];
     for (int i = 1; i < n; ++i) { if (yfit[(size_t) i] < ylo) ylo = yfit[(size_t) i];
                                   if (yfit[(size_t) i] > yhi) yhi = yfit[(size_t) i]; }
-    N.yOffset = ylo; N.yGain = (yhi > ylo) ? 2.0 / (yhi - ylo) : 1.0; N.yYmin = -1.0;
+    N.yOffset.assign(1, ylo);
+    N.yGain.assign(1, (yhi > ylo) ? 2.0 / (yhi - ylo) : 1.0);
+    N.yYmin = -1.0;
+    N.outputNames.assign(1, std::string("growth"));
 
     std::vector<std::vector<double> > Xs((size_t) n, std::vector<double>((size_t) d));
     std::vector<double> ys((size_t) n);
     for (int i = 0; i < n; ++i) {
         for (int j = 0; j < d; ++j)
             Xs[(size_t) i][(size_t) j] = (Xraw[(size_t) i][(size_t) j] - N.xOffset[(size_t) j]) * N.xGain[(size_t) j] + N.xYmin;
-        ys[(size_t) i] = (yfit[(size_t) i] - N.yOffset) * N.yGain + N.yYmin;
+        ys[(size_t) i] = (yfit[(size_t) i] - N.yOffset[0]) * N.yGain[0] + N.yYmin;
     }
 
     /* ---- 70 / 15 / 15, the same split MATLAB's dividerand uses by default ---- */
@@ -600,6 +836,12 @@ inline bool train(Network &N, const TrainOptions &opt, FbaFn fba, void *ctx, Tra
 
     fitNetwork(N, X, y, opt, rep);
 
+    /* Record WHICH substrate each input was. Without this the network is a function of two
+     * anonymous numbers and a later run has no way to check it is feeding them in the right
+     * order. */
+    N.inputNames.clear();
+    for (size_t j = 0; j < opt.inputs.size(); ++j) N.inputNames.push_back(opt.inputs[j].name);
+
     /* ---- verification: fresh points, solved by the LP, compared against the network ----
      * This is the step that makes the result trustworthy. The fit statistics above are computed on
      * a held-out split of the SAME sweep; this re-solves the linear program at points drawn
@@ -642,6 +884,234 @@ inline std::string reportText(const Network &N, const TrainReport &r)
     s += "    valid input range (outside it the network extrapolates and means nothing):\n";
     for (int i = 0; i < N.nIn; ++i) {
         std::snprintf(b, sizeof(b), "      input %d : %.10g .. %.10g\n", i, N.trainMin[(size_t) i], N.trainMax[(size_t) i]);
+        s += b;
+    }
+    return s;
+}
+
+/* ================================================================================================
+ *  THE RUNTIME REGISTRY  --  how a loaded network reaches surrogateModel.hh
+ * ================================================================================================
+ *
+ *  Everything above is about producing a Network. This is the one piece that is about USING it
+ *  inside a running simulation.
+ *
+ *  The problem it solves: surrogateModel.hh is a user-editable recipe file with a fixed signature,
+ *  called from deep inside a Palabos data processor. It has no way to reach anything main() knows.
+ *  Before this, the only way to get a trained network into a run was to paste its weights into that
+ *  file and recompile -- which is exactly the manual step <weights_file> exists to remove.
+ *
+ *  So main() registers the loaded network here, once, and defineSurrogateModel() asks for it. The
+ *  storage is a function-local static, which makes this header-only and gives one instance per
+ *  program no matter how many translation units include it.
+ *
+ *  ------------------------------------------------------------------------------------------------
+ *  EXTRAPOLATION IS COUNTED, NOT HIDDEN
+ *
+ *  A neural network outside its training box returns a confident number that means nothing. A
+ *  simulation will wander outside that box -- concentrations fall as substrate is consumed, so the
+ *  low end is visited constantly. evalBound() therefore CLAMPS to the box edge and COUNTS how
+ *  often it had to, and the count is printed at the end of the run.
+ *
+ *  Clamping rather than extrapolating is the conservative choice: at the low edge it returns the
+ *  growth rate at the lowest uptake that was actually solved for, which is a real FBA answer for a
+ *  nearby state, whereas the extrapolation is unbounded and can go negative or enormous. It is
+ *  still an approximation, and that is why the count is reported rather than swallowed. A run that
+ *  reports a large clamp fraction should have its <inputN> ranges widened and be run again.
+ * ================================================================================================ */
+struct Binding {
+    const Network *net;
+    std::vector<int> subs;      // subs[k] = index in Fin of the substrate that is input k
+    Binding() : net(0) {}
+};
+
+struct Runtime {
+    std::vector<Binding> byMicrobe;   // indexed by GLOBAL microbe id
+    long evaluations;
+    long clamped;
+
+    /* The COMPILED path keeps its own pair.  A network pasted into
+     * surrogateModel.hh is evaluated by hand-written arithmetic in that file
+     * rather than through evalBound(), so it cannot share the counters above --
+     * and for a long time it was not counted at all, which meant a compiled
+     * network extrapolated silently while a .srg one reported every clamp.  The
+     * two are reported separately because they are different claims: one is
+     * about a file the run read, the other about the executable it is. */
+    long compiledEvaluations;
+    long compiledClamped;
+
+    Runtime() : evaluations(0), clamped(0),
+                compiledEvaluations(0), compiledClamped(0) {}
+};
+
+inline Runtime &runtime() { static Runtime R; return R; }
+
+/* Work out which entry of Fin feeds each input of the network.
+ *
+ * The network records the substrate names it was trained on; the run knows the names in
+ * <name_of_substrates>. Matching them is the whole job, and getting it wrong is the failure this
+ * function exists to prevent: a network trained on (acetate, Fe3) fed (Fe3, acetate) returns
+ * perfectly plausible growth rates that are wrong in every voxel, and nothing downstream can tell.
+ *
+ * Returns "" on success. A network with no recorded names -- an older .srg file -- falls back to
+ * positional order and says so, because refusing to run would be worse than a warning the user can
+ * check. */
+inline std::string bindToSubstrates(const Network &N, const std::vector<std::string> &subsNames,
+                                    std::vector<int> &out, std::string *warning = 0)
+{
+    out.clear();
+    if (N.inputNames.empty()) {
+        if ((int) subsNames.size() < N.nIn) {
+            char b[192];
+            std::snprintf(b, sizeof(b), "the network takes %d input(s) but the run has only %d "
+                          "substrate(s).", N.nIn, (int) subsNames.size());
+            return std::string(b);
+        }
+        for (int i = 0; i < N.nIn; ++i) out.push_back(i);
+        if (warning)
+            *warning = "  [SRG] this weights file records no input names, so its inputs are assumed\n"
+                       "  [SRG] to be the first substrates in <name_of_substrates>, in order. Check\n"
+                       "  [SRG] that this is what the network was trained on -- if it is not, every\n"
+                       "  [SRG] growth rate in the run will be wrong and nothing will say so.\n";
+        return "";
+    }
+
+    if ((int) N.inputNames.size() != N.nIn) {
+        char b[192];
+        std::snprintf(b, sizeof(b), "the weights file names %d input(s) but declares %d.",
+                      (int) N.inputNames.size(), N.nIn);
+        return std::string(b);
+    }
+
+    for (int i = 0; i < N.nIn; ++i) {
+        int hit = -1;
+        for (size_t s = 0; s < subsNames.size(); ++s)
+            if (subsNames[s] == N.inputNames[(size_t) i]) { hit = (int) s; break; }
+        if (hit < 0) {
+            std::string m = "the network was trained on substrate '" + N.inputNames[(size_t) i]
+                          + "', which is not in <name_of_substrates>. This run has:";
+            for (size_t s = 0; s < subsNames.size(); ++s) m += " " + subsNames[s];
+            m += ".";
+            return m;
+        }
+        out.push_back(hit);
+    }
+    return "";
+}
+
+/* Register `N` for one microbe, or for every microbe when microbe < 0. `N` must outlive the run:
+ * in practice it is a local of main(), which is exactly as long-lived as the simulation. */
+inline void registerNetwork(int microbe, const Network *N, int nMicrobes,
+                            const std::vector<int> &subs)
+{
+    Runtime &R = runtime();
+    if ((int) R.byMicrobe.size() < nMicrobes) R.byMicrobe.resize((size_t) nMicrobes);
+    Binding b;
+    b.net = N;
+    b.subs = subs;
+    if (microbe < 0) {
+        for (size_t i = 0; i < R.byMicrobe.size(); ++i) R.byMicrobe[i] = b;
+    } else if (microbe < (int) R.byMicrobe.size()) {
+        R.byMicrobe[(size_t) microbe] = b;
+    }
+}
+
+inline const Binding *bindingFor(int microbe)
+{
+    const Runtime &R = runtime();
+    if (microbe < 0 || microbe >= (int) R.byMicrobe.size()) return 0;
+    const Binding &b = R.byMicrobe[(size_t) microbe];
+    return b.net ? &b : 0;
+}
+
+/* Gather the inputs this network wants out of the full per-substrate flux vector, clamp them to
+ * the training box, count how often that was necessary, and evaluate. */
+inline double evalBound(const Binding &b, const std::vector<double> &Fin)
+{
+    Runtime &R = runtime();
+    if (!b.net || !b.net->valid()) return 0.0;
+    const Network &N = *b.net;
+    if ((int) b.subs.size() < N.nIn) return 0.0;
+
+    ++R.evaluations;
+
+    bool outside = false;
+    std::vector<double> x((size_t) N.nIn, 0.0);
+    for (int i = 0; i < N.nIn; ++i) {
+        const int s = b.subs[(size_t) i];
+        double v = (s >= 0 && s < (int) Fin.size()) ? Fin[(size_t) s] : 0.0;
+        if (v < N.trainMin[(size_t) i]) { v = N.trainMin[(size_t) i]; outside = true; }
+        else if (v > N.trainMax[(size_t) i]) { v = N.trainMax[(size_t) i]; outside = true; }
+        x[(size_t) i] = v;
+    }
+    if (outside) ++R.clamped;
+    return N.eval(x);
+}
+
+/* ------------------------------------------------------------------------------------------------
+ *  THE COMPILED PATH'S COUNTERPART TO evalBound()
+ *
+ *  A network pasted into surrogateModel.hh is evaluated by arithmetic written out in that file, so
+ *  it never passes through evalBound() and used to get no range enforcement of any kind: outside
+ *  the box it was fitted over it returned a confident number, and nothing counted or reported it.
+ *  That is the one failure mode a fitted model has that a hand-written rate law does not, and it
+ *  is invisible in the output -- an extrapolated growth rate looks exactly like a real one.
+ *
+ *  Call this immediately before the forward pass, with the training box the weights came with.
+ *  It clamps x in place, counts one per evaluation that clamped ANYTHING (not per value: a
+ *  two-input network would otherwise report 200% of its evaluations as out of range), and the
+ *  end-of-run report says how often.
+ *
+ *  Deriving the box from a mapminmax export: the map is xp = (x - offset)*gain + ymin over
+ *  ymin..+1, so lo = offset and hi = offset + (1 - ymin)/gain, which is offset + 2/gain for the
+ *  usual ymin = -1.
+ * ---------------------------------------------------------------------------------------------- */
+inline void clampCompiled(std::vector<double> &x, const double *lo, const double *hi, int n)
+{
+    Runtime &R = runtime();
+    ++R.compiledEvaluations;
+    bool outside = false;
+    for (int i = 0; i < n && i < (int) x.size(); ++i) {
+        if      (x[(size_t) i] < lo[i]) { x[(size_t) i] = lo[i]; outside = true; }
+        else if (x[(size_t) i] > hi[i]) { x[(size_t) i] = hi[i]; outside = true; }
+    }
+    if (outside) ++R.compiledClamped;
+}
+
+/* One paragraph for the end of the run, one line per path that was actually used. Empty when no
+ * network of either kind was evaluated, so a run that does not use this path prints nothing. */
+inline std::string runtimeReport()
+{
+    const Runtime &R = runtime();
+    if (R.evaluations == 0 && R.compiledEvaluations == 0) return "";
+
+    char b[768];
+    std::string s;
+    double worst = 0.0;
+
+    if (R.evaluations > 0) {
+        const double frac = 100.0 * (double) R.clamped / (double) R.evaluations;
+        if (frac > worst) worst = frac;
+        std::snprintf(b, sizeof(b),
+                      "  [SRG] runtime network: %ld evaluation(s), %ld clamped to the training "
+                      "box (%.2f%%)\n", R.evaluations, R.clamped, frac);
+        s += b;
+    }
+    if (R.compiledEvaluations > 0) {
+        const double frac = 100.0 * (double) R.compiledClamped / (double) R.compiledEvaluations;
+        if (frac > worst) worst = frac;
+        std::snprintf(b, sizeof(b),
+                      "  [SRG] compiled network: %ld evaluation(s), %ld clamped to the training "
+                      "box (%.2f%%)\n", R.compiledEvaluations, R.compiledClamped, frac);
+        s += b;
+    }
+
+    if (worst > 5.0) {
+        std::snprintf(b, sizeof(b),
+            "  [SRG] MORE THAN 5%% OF EVALUATIONS WERE OUTSIDE THE TRAINING RANGE. Those growth\n"
+            "  [SRG] rates are the value at the edge of the box, not a solution of the metabolic\n"
+            "  [SRG] model. Widen the training ranges to cover the uptake rates this domain\n"
+            "  [SRG] actually reaches, retrain, and run again before using these results.\n");
         s += b;
     }
     return s;

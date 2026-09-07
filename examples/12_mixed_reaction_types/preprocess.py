@@ -2,10 +2,19 @@
 """
 12_mixed_reaction_types  --  PRE-PROCESSING
 
-Builds the pore space this case runs on: one patch. Both populations share it: they compete inside the same voxels.
+Builds the pore space this case runs on: one patch, holding the one organism that
+runs both a flux balance path and a compiled kinetics path inside the same voxels.
+[v1.3] Not two competing populations, as this line used to say: CompLaB.xml declares
+<number_of_microbes>1</number_of_microbes>, so summary.csv carries one biomass column
+rather than two.
 
   reads   nothing
-  writes  input/geometry.dat   24 x 24 x 6 = 3456 voxels, one integer per line
+  writes  input/geometry.dat   24 x 26 x 8 = 4992 voxels, one integer per line
+                               ([v1.3] 24 x 24 x 6 is the shape BEFORE the wall
+                               padding explained under pad_closed_faces() below,
+                               which grows y and z by two each. The file on disk
+                               holds 4992 values and CompLaB.xml declares
+                               ny 26, nz 8.)
 
 Self-contained: no imports beyond the standard library, nothing from tools/.
 Run it before the solver, or let pipeline.sh run it for you:
@@ -79,8 +88,52 @@ def percolates(g):
     return False
 
 
+def pad_closed_faces(g):
+    """Wrap the domain in the wall it was always assumed to have.
+
+    The solver conditions two faces of the box: x = 0 and x = NX-1 get the inlet
+    and the outlet named per substrate in CompLaB.xml. The four sides -- y = 0,
+    y = NY-1, z = 0, z = NZ-1 -- get nothing at all. Not a wall, not a symmetry
+    plane, not periodicity. A lattice Boltzmann field with no condition on a face
+    streams off the edge of the block there and reads back an envelope nothing
+    updates, so what crosses is undefined.
+
+    Every generator in this repository used to draw its grains and forget the box,
+    and this one used to be among them. It now ADDS a wall layer rather than
+    converting pore into wall: a face that is already closed is left alone, and a
+    face that is open gains one new layer of inert wall outside everything the
+    case declared. The pore space, the grains and the patches are untouched, so
+    porosity, the mineral inventory and every documented count are exactly what
+    they were. What changes is only NY and NZ, which grow by two where a pair of
+    faces needed closing, and those are printed at the end for CompLaB.xml.
+
+    Padding rather than converting matters most on a thin slab. Walling the two
+    z faces of a six-deep domain would spend a third of the pore space on the
+    boundary condition; adding two layers spends none of it.
+    """
+    nx, ny, nz = len(g), len(g[0]), len(g[0][0])
+    closed = (WALL, 0)
+    yopen = any(g[x][y][z] not in closed
+                for x in range(nx) for y in (0, ny - 1) for z in range(nz))
+    zopen = any(g[x][y][z] not in closed
+                for x in range(nx) for y in range(ny) for z in (0, nz - 1))
+    py, pz = (1 if yopen else 0), (1 if zopen else 0)
+    if not (py or pz):
+        return g, nx, ny, nz
+
+    NY2, NZ2 = ny + 2 * py, nz + 2 * pz
+    out = [[[WALL] * NZ2 for _ in range(NY2)] for _ in range(nx)]
+    for x in range(nx):
+        for y in range(ny):
+            for z in range(nz):
+                out[x][y + py][z + pz] = g[x][y][z]
+    return out, nx, NY2, NZ2
+
 def main():
-    g = build()
+    #   NY and NZ below are the padded dimensions, which is what the geometry
+    #   file now holds and what CompLaB.xml has to declare. The module constants
+    #   NX/NY/NZ stay as the case's own dimensions, so build() is unchanged.
+    g, NX, NY, NZ = pad_closed_faces(build())
 
     os.makedirs("input", exist_ok=True)
     with open(OUT, "w") as f:

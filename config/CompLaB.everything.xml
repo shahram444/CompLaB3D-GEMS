@@ -1,0 +1,396 @@
+<?xml version="1.0" ?>
+<!-- ============================================================================
+     CompLaB.everything.xml  ==  ONE LINE FOR EVERY ABILITY THE SOLVER HAS
+
+     This file is not a case. It will not run as it stands, because several
+     things below are alternatives to one another: you cannot both read a
+     geometry file and generate one, and an organism has one rate path, not
+     seven.
+
+     What it is for is the question "what can this code actually do". Every tag
+     the solver reads appears here exactly once, in the block it belongs to,
+     with its unit and its default. Copy the lines you need into your own
+     CompLaB.xml and delete the rest.
+
+     For the reasoning behind each tag == why it exists, what goes wrong if you
+     get it wrong == read config/CompLaB.reference.xml instead. That file is the
+     manual. This one is the index.
+
+     UNITS, one convention throughout:
+         length      micrometres          concentration   mol/L
+         time        seconds              diffusivity     m2/s
+         biomass     mol/L, the same unit as the chemicals
+
+     The single exception is flux balance analysis, which works in mmol/gDW/h
+     internally because that is what published metabolic models use, and
+     converts at the boundary through <biomass_molar_mass>.
+     ============================================================================ -->
+<parameters>
+
+<!-- ==========================================================================
+     1.  WHERE THINGS ARE
+     ========================================================================== -->
+    <path>
+        <src_path>src</src_path>                     <!-- solver sources -->
+        <input_path>input</input_path>               <!-- geometry, models, .sym/.gnn/.thm -->
+        <output_path>output</output_path>            <!-- VTI, CSV, checkpoints -->
+    </path>
+
+<!-- ==========================================================================
+     2.  WHAT IS SWITCHED ON
+     ========================================================================== -->
+    <simulation_mode>
+        <biotic_mode>true</biotic_mode>                       <!-- false = transport and chemistry only -->
+        <enable_kinetics>true</enable_kinetics>               <!-- defineKinetics.hh -->
+        <enable_abiotic_kinetics>false</enable_abiotic_kinetics>   <!-- defineAbioticKinetics.hh -->
+        <enable_fba_glpk>false</enable_fba_glpk>              <!-- needs -DENABLE_GLPK=ON -->
+        <enable_fba_cobrapy>false</enable_fba_cobrapy>        <!-- needs -DENABLE_COBRAPY=ON -->
+        <enable_surrogate>false</enable_surrogate>
+        <fba_concentration_basis>free</fba_concentration_basis>   <!-- free | total -->
+        <glpk_lpsolver>1</glpk_lpsolver>                      <!-- 1 simplex, 2 interior, 3 exact -->
+        <glpk_save_problem>0</glpk_save_problem>              <!-- 0 off, 1 .lp, 2/3 .mps -->
+        <enable_validation_diagnostics>true</enable_validation_diagnostics>
+    </simulation_mode>
+
+<!-- ==========================================================================
+     3.  WHERE A METABOLIC MODEL COMES FROM
+     ========================================================================== -->
+    <model_source>bigg:iJO1366</model_source>        <!-- or a local SBML path -->
+    <model_cache>input</model_cache>                 <!-- where a fetched model is kept -->
+    <model_bundle>models</model_bundle>              <!-- the three shipped models -->
+    <allow_download>false</allow_download>           <!-- network access is opt-in -->
+
+<!-- ==========================================================================
+     4.  THE LATTICE, THE FLOW, AND THE PORE SPACE
+     ========================================================================== -->
+    <LB_numerics>
+
+        <domain>
+            <nx>64</nx> <ny>64</ny> <nz>16</nz>
+            <dx>10</dx> <dy>10</dy> <dz>10</dz>      <!-- voxel size -->
+            <unit>um</unit>
+            <characteristic_length>64</characteristic_length>   <!-- for the Peclet target -->
+
+            <!-- (a) read a material map, one integer per voxel -->
+            <filename>geometry.dat</filename>
+
+            <!-- (b) OR generate one, and write it out so the run is reproducible -->
+            <generate>spheres</generate>             <!-- channel|spheres|cylinders|random|fracture|layered -->
+            <porosity>0.42</porosity>
+            <grain_radius>6</grain_radius>
+            <grain_count>40</grain_count>
+            <aperture>8</aperture>                   <!-- fracture only -->
+            <roughness>0.15</roughness>              <!-- fracture only -->
+            <layers>5</layers>                       <!-- layered only -->
+            <seed>1</seed>
+            <walls>y</walls>                         <!-- which faces are inert -->
+            <write_geometry>input/generated.dat</write_geometry>
+
+            <!-- (c) OR import a segmented CT volume -->
+            <import_raw>input/scan.raw</import_raw>
+            <raw_dtype>uint8</raw_dtype>
+            <threshold>128</threshold>
+            <invert>false</invert>
+
+            <material_numbers>
+                <pore>2</pore>
+                <solid>0</solid>                     <!-- a declared solid phase -->
+                <bounce_back>1</bounce_back>         <!-- inert wall -->
+                <microbe0>3</microbe0>               <!-- one per attached biofilm -->
+                <microbe1>4</microbe1>
+            </material_numbers>
+
+            <!-- What happens at y=0, y=ny-1, z=0 and z=nz-1. x=0 and x=nx-1 get
+                 the inlet and outlet named per substrate, further down; these four
+                 sides get nothing at all, which is not a boundary condition: the
+                 advection-diffusion lattices stream off the block wherever those
+                 faces are open pore, and read back an envelope nothing updates.
+                   open    (default) leave the geometry as written. Every open voxel
+                           on those four faces is counted and warned about at
+                           start-up.
+                   sealed  turn those voxels into inert wall before any lattice is
+                           built. Exactly conservative, but it DELETES pore, and on
+                           a slab a few voxels deep the two z faces are a large part
+                           of the domain. Read the count before choosing it.
+                 Drawing the confining wall in the geometry itself is usually the
+                 better answer than either. -->
+            <outer_faces>open</outer_faces>
+        </domain>
+
+        <delta_P>1e-6</delta_P>                      <!-- a seed; Peclet overrides it -->
+        <Peclet>10</Peclet>                          <!-- 0 = skip the flow solver entirely -->
+        <tau>0.8</tau>                               <!-- viscosity, nu = (tau - 1/2)/3 -->
+        <track_performance>false</track_performance> <!-- time the kernels, write nothing -->
+
+        <iteration>
+            <ns_max_iT1>20000</ns_max_iT1>           <!-- first flow solve -->
+            <ns_converge_iT1>1e-6</ns_converge_iT1>
+            <ns_max_iT2>2000</ns_max_iT2>            <!-- later re-solves -->
+            <ns_converge_iT2>1e-4</ns_converge_iT2>
+            <ns_update_interval>100</ns_update_interval>   <!-- re-solve the flow this often -->
+            <ns_rerun_iT0>0</ns_rerun_iT0>                <!-- restart point -->
+            <ade_update_interval>1</ade_update_interval>  <!-- rebuild diffusivities this often -->
+            <ade_max_iT>10000</ade_max_iT>
+            <ade_converge_iT>1e-8</ade_converge_iT>
+            <ade_rerun_iT0>0</ade_rerun_iT0>
+        </iteration>
+
+    </LB_numerics>
+
+<!-- ==========================================================================
+     5.  THE DISSOLVED SPECIES.  One <substrateN> block per species.
+     ========================================================================== -->
+    <chemistry>
+        <number_of_substrates>2</number_of_substrates>
+
+        <fix_concentration>no no</fix_concentration>     <!-- hold a species; one word per substrate -->
+        <fix_lower_bounds>no no</fix_lower_bounds>       <!-- clamp its FBA uptake bound to -C -->
+
+        <substrate0>
+            <name_of_substrates>acetate</name_of_substrates>
+            <initial_concentration>2.0e-3</initial_concentration>
+            <immobile>false</immobile>                   <!-- true = a mineral: reacts, never moves -->
+            <substrate_diffusion_coefficients>
+                <in_pore>5e-10</in_pore>
+                <in_biofilm>2.5e-10</in_biofilm>
+            </substrate_diffusion_coefficients>
+            <left_boundary_type>Dirichlet</left_boundary_type>   <!-- Dirichlet | Neumann | closed -->
+            <left_boundary_condition>4.0e-3</left_boundary_condition>
+            <right_boundary_type>Neumann</right_boundary_type>
+            <right_boundary_condition>0.</right_boundary_condition>
+        </substrate0>
+
+        <substrate1>
+            <name_of_substrates>o2</name_of_substrates>
+            <initial_concentration>1.0e-3</initial_concentration>
+            <substrate_diffusion_coefficients>
+                <in_pore>2e-9</in_pore>
+                <in_biofilm>1e-9</in_biofilm>
+            </substrate_diffusion_coefficients>
+            <left_boundary_type>Dirichlet</left_boundary_type>
+            <left_boundary_condition>1.5e-3</left_boundary_condition>
+            <right_boundary_type>Neumann</right_boundary_type>
+            <right_boundary_condition>0.</right_boundary_condition>
+        </substrate1>
+    </chemistry>
+
+<!-- ==========================================================================
+     6.  THE ORGANISMS.  One <microbeN> block per population.
+     ========================================================================== -->
+    <microbiology>
+        <number_of_microbes>1</number_of_microbes>
+        <maximum_biomass_density>1.0e-3</maximum_biomass_density>
+        <thrd_biofilm_fraction>0.01</thrd_biofilm_fraction>   <!-- when a voxel counts as biofilm -->
+        <CA_method>fraction</CA_method>                       <!-- fraction | half -->
+
+        <microbe0>
+            <name_of_microbes>Ecoli</name_of_microbes>
+            <solver_type>CA</solver_type>                <!-- CA | FD | LBM -->
+
+            <!-- ONE of: kinetics, glpk, cobrapy, surrogate, symbolic, graphnet,
+                 or any of those with _and_kinetics appended -->
+            <reaction_type>kinetics</reaction_type>
+
+            <initial_densities>1.0e-5</initial_densities>
+            <decay_coefficient>1.0e-6</decay_coefficient>     <!-- per second -->
+            <viscosity_ratio_in_biofilm>0</viscosity_ratio_in_biofilm>   <!-- 0 = a wall -->
+            <biomass_diffusion_coefficients>                  <!-- FD and LBM only -->
+                <in_pore>1e-13</in_pore>
+                <in_biofilm>1e-14</in_biofilm>
+            </biomass_diffusion_coefficients>
+            <left_boundary_type>Neumann</left_boundary_type>
+            <left_boundary_condition>0.</left_boundary_condition>
+            <right_boundary_type>Neumann</right_boundary_type>
+            <right_boundary_condition>0.</right_boundary_condition>
+
+            <!-- Michaelis-Menten uptake, one entry per substrate -->
+            <half_saturation_constants>5e-2 5e-3</half_saturation_constants>
+            <maximum_uptake_flux>10 20</maximum_uptake_flux>
+
+            <!-- ==== the rest of this block matters only on an FBA path ==== -->
+            <model_filename>input/e_coli_core.xml</model_filename>
+            <biomass_molar_mass>24.6</biomass_molar_mass>      <!-- gDW per mol cells -->
+            <exchange_reaction_names>EX_ac_e EX_o2_e</exchange_reaction_names>
+            <exchange_reaction_indices>-1 -1</exchange_reaction_indices>   <!-- names are safer -->
+            <fba_maximum_uptake_flux>10 20</fba_maximum_uptake_flux>
+            <substrate_lower_bounds>-10 -20</substrate_lower_bounds>
+            <substrate_upper_bounds>1000 1000</substrate_upper_bounds>
+            <objective_direction>-1</objective_direction>      <!-- -1 maximise, +1 minimise -->
+            <constraint_indices>13 27</constraint_indices>     <!-- arbitrary extra bounds -->
+            <constraint_lower_bounds>0 0</constraint_lower_bounds>
+            <constraint_upper_bounds>1000 1000</constraint_upper_bounds>
+            <equate_bounds>false</equate_bounds>
+
+            <!-- [v1.3] THE TWO REFINEMENTS OF THE LINEAR PROGRAM.
+                 Both are optional and both are off unless the block is present.
+                 A run may use at most one of them: they are two different answers
+                 to the same question, which is what an organism does when one
+                 program is not enough. Examples 21 and 22 run them. -->
+
+            <!-- Solve the program in STAGES rather than once. An earlier stage is
+                 solved, a fraction of its answer is retained as a constraint, and
+                 the next stage is solved against what is left. This is how a
+                 secondary objective is expressed without inventing a weighting
+                 between it and growth. -->
+            <multi_step>
+                <!-- at least two; one stage is ordinary flux balance analysis and
+                     the block should then be omitted -->
+                <stage_reactions>BIOMASS_Ecoli_core_w_GAM EX_ac_e</stage_reactions>
+                <!-- one per stage. How much of that stage's optimum is held for the
+                     stages after it: 1.0 holds all of it, 0.9 leaves a tenth of the
+                     objective free to be traded away later. Defaults to 1.0. -->
+                <retain_fraction>1.0 0.9</retain_fraction>
+                <!-- one per stage, max or min. Defaults to max throughout. -->
+                <stage_direction>max max</stage_direction>
+            </multi_step>
+
+            <!-- Treat the organism as a COMPETITION between growth options, one per
+                 carbon source. Each option is solved with the other sources shut,
+                 scored by how much of the limiting element it brings in, and the
+                 flux vectors are blended. Because a blend of vectors in the null
+                 space of S is itself in the null space of S, the blended answer
+                 conserves mass exactly rather than approximately. -->
+            <cybernetic>
+                <!-- at least two; with one option there is nothing to switch between -->
+                <sources>glucose acetate</sources>
+                <!-- every list below must have one entry per source -->
+                <substrate_ids>0 2</substrate_ids>          <!-- index into name_of_substrates -->
+                <carbon_number>6 2</carbon_number>          <!-- carbon atoms per molecule -->
+                <uptake_kmax>10 8</uptake_kmax>             <!-- mmol/gDW/h -->
+                <uptake_half_saturation>0.05 0.05</uptake_half_saturation>   <!-- mol/L -->
+                <!-- an option whose weight falls below this is not solved at all,
+                     which is what keeps the cost near that of a single program.
+                     Defaults to 1e-3. -->
+                <weight_floor>1e-3</weight_floor>
+            </cybernetic>
+        </microbe0>
+    </microbiology>
+
+<!-- ==========================================================================
+     7.  AQUEOUS SPECIATION.  Solved in every pore voxel, every step.
+     ========================================================================== -->
+    <equilibrium>
+        <enabled>false</enabled>
+        <components>H Fe HS</components>                  <!-- the master species -->
+        <stoichiometry>
+            <species0>1 0 0</species0>                    <!-- one row per substrate -->
+            <species1>0 1 1</species1>
+        </stoichiometry>
+        <logK>
+            <species0>0.0</species0>                      <!-- formation constant per substrate -->
+            <species1>-3.5</species1>
+        </logK>
+    </equilibrium>
+
+<!-- ==========================================================================
+     8.  THE THREE LEARNED RATE PATHS
+     ========================================================================== -->
+    <surrogate>                                  <!-- a fitted network -->
+        <enabled>false</enabled>
+        <weights_file>input/net.srg</weights_file>
+        <microbe>-1</microbe>                    <!-- -1 = every surrogate organism -->
+        <train_if_missing>false</train_if_missing>
+        <train>
+            <input0>acetate 1e-3 10 log</input0> <!-- name low high [log]; up to 3 -->
+            <input1>o2 1e-5 0.5 log</input1>
+            <samples>2000</samples>
+            <layers>10 10 10 10</layers>
+            <restarts>4</restarts>
+            <epochs>400</epochs>
+            <verify_points>200</verify_points>
+            <seed>1</seed>
+            <log_output>false</log_output>
+        </train>
+    </surrogate>
+
+    <symbolic>                                   <!-- algebra you can read -->
+        <enabled>false</enabled>
+        <expressions_file>input/growth.sym</expressions_file>   <!-- belongs to an organism -->
+        <abiotic_file>input/abiotic.sym</abiotic_file>          <!-- belongs to nobody -->
+        <microbe>-1</microbe>
+    </symbolic>
+
+    <graphnet>                                   <!-- the whole rate vector at once -->
+        <enabled>false</enabled>
+        <network_file>input/network.gnn</network_file>
+        <abiotic_file>input/abiotic.gnn</abiotic_file>
+        <microbe>-1</microbe>
+    </graphnet>
+
+<!-- ==========================================================================
+     9.  THERMODYNAMIC CONTROL.  Not a rate path: a factor between 0 and 1 that
+         multiplies whichever path each organism already uses.
+     ========================================================================== -->
+    <thermodynamics>
+        <enabled>false</enabled>
+        <energetics_file>input/aom.thm</energetics_file>
+    </thermodynamics>
+
+<!-- ==========================================================================
+     10.  GEOMETRY EVOLUTION.  The pore space as a variable, not a constant.
+     ========================================================================== -->
+    <precipitation>                              <!-- the pore closes -->
+        <enabled>false</enabled>
+        <solid_substrate>7</solid_substrate>     <!-- which immobile species accumulates -->
+        <max_precipRho>48.9</max_precipRho>      <!-- 1000 / molar volume, cm3/mol -->
+        <surface_only>1</surface_only>           <!-- heterogeneous nucleation -->
+        <perm_ratio>0.0</perm_ratio>             <!-- 0 = a filled voxel is a wall -->
+        <update_interval>500</update_interval>
+    </precipitation>
+
+    <dissolution>                                <!-- the pore opens -->
+        <enabled>false</enabled>
+        <reopen_fraction>0.9</reopen_fraction>   <!-- hysteresis, strictly between 0 and 1 -->
+        <surface_only>1</surface_only>
+        <update_interval>200</update_interval>
+        <phase0>
+            <name>calcite</name>
+            <material_number>0</material_number>
+            <substrate>13</substrate>            <!-- the immobile species it releases -->
+            <full_density>27.1</full_density>    <!-- mol/L in a completely full voxel -->
+            <initial_fill>27.1</initial_fill>
+            <is_precipitate>false</is_precipitate>   <!-- true = formed during the run -->
+        </phase0>
+    </dissolution>
+
+<!-- ==========================================================================
+     11.  DIAGNOSTICS.  Whether the run is worth believing.
+     ========================================================================== -->
+    <diagnostics>
+        <enabled>false</enabled>
+        <summary_csv>summary.csv</summary_csv>
+        <interval>500</interval>
+        <tolerance>1e-6</tolerance>
+        <conserve>Fe2+FeS</conserve>             <!-- a sum the network cannot change -->
+        <conserve>HS+FeS</conserve>
+    </diagnostics>
+
+<!-- ==========================================================================
+     12.  OUTPUT AND RESTART
+     ========================================================================== -->
+    <!-- ==========================================================================
+         PORE SCALE OUT: ONE AGGREGATE REDUCED TO A CONTINUUM RATE
+         ========================================================================== -->
+    <upscaling>
+        <enabled>false</enabled>
+        <aggregate_materials>3</aggregate_materials>  <!-- which materials are the aggregate -->
+        <species>0</species>                          <!-- whose rate defines the reaction -->
+        <radius>0</radius>                            <!-- um; 0 = from the measured volume -->
+        <diffusivity>0</diffusivity>                  <!-- m2/s; 0 = the substrate's in_biofilm -->
+        <freeze_biomass>false</freeze_biomass>       <!-- hold the catalyst while the profile relaxes -->
+    <record_csv>upscaling.csv</record_csv>
+    </upscaling>
+
+    <IO>
+        <read_NS_file>false</read_NS_file>       <!-- restart the flow from a checkpoint -->
+        <read_ADE_file>false</read_ADE_file>     <!-- restart the chemistry likewise -->
+        <ns_filename>nsLattice</ns_filename>
+        <mask_filename>maskLattice</mask_filename>
+        <subs_filename>subsLattice</subs_filename>
+        <bio_filename>bioLattice</bio_filename>
+        <save_VTK_interval>500</save_VTK_interval>
+        <save_CHK_interval>0</save_CHK_interval>
+        <debug_updRxn>0</debug_updRxn>           <!-- verbose per-voxel increment printing -->
+    </IO>
+
+</parameters>

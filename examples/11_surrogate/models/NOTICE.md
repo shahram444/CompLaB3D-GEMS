@@ -1,14 +1,16 @@
 # Bundled genome-scale models — provenance and licence
 
-These three models are **not part of CompLB3D**. They are third-party scientific
-data, bundled so that the examples run with no network access, which matters
-because cluster compute nodes generally cannot reach the internet.
+One model is bundled in this case folder, `e_coli_core.xml.gz`, and it is **not
+part of CompLB3D**. It is third-party scientific data, carried here so that the
+example runs with no network access, which matters because cluster compute nodes
+generally cannot reach the internet. The other two rows below are models
+`manifest.txt` knows about and can fetch; they are not in this folder.
 
-| file | model | metabolites × reactions | source |
-|---|---|---|---|
-| `e_coli_core.xml.gz` | *E. coli* core metabolism | 72 × 95 | BiGG |
-| `iJO1366.xml.gz` | *E. coli* K-12 MG1655 | 1805 × 2583 | BiGG |
-| `STM_v1_0.xml.gz` | *Salmonella enterica* Typhimurium LT2 | 2436 × 3357 | BiGG |
+| file | model | metabolites × reactions | source | in this folder |
+|---|---|---|---|---|
+| `e_coli_core.xml.gz` | *E. coli* core metabolism | 72 × 95 | BiGG | yes |
+| `iJO1366.xml.gz` | *E. coli* K-12 MG1655 | 1805 × 2583 | BiGG | no, manifest only |
+| `STM_v1_0.xml.gz` | *Salmonella enterica* Typhimurium LT2 | 2436 × 3357 | BiGG | no, manifest only |
 
 Obtained from the copies distributed with [cobrapy](https://github.com/opencobra/cobrapy),
 which are themselves from [BiGG Models](http://bigg.ucsd.edu/).
@@ -59,10 +61,10 @@ cost is paid once.
 Append a row to `manifest.txt`:
 
 ```
-name  nmet  nrxn  objective  hash  bytes  url
+name  raw_species  raw_reactions  met  rxn  objective  hash  bytes  url
 ```
 
-`hash` may be `0` to skip the checksum. `nmet` and `nrxn` are the important
+`hash` may be `0` to skip the checksum. `met` and `rxn` are the important
 columns: they are what lets the solver notice that a model has been revised
 under you, which silently shifts every positional `<exchange_reaction_indices>`
 entry. Set them to `0` to skip that check too, but read the warning in

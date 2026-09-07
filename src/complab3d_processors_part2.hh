@@ -197,8 +197,32 @@ public:
                                 lattices[maskLloc]->get(iXm,iYm,iZm).setPopulations(g);
                             }
                             else {
-                                // Safety check: should never happen (biomass ≥ threshold but no species found)
-                                std::cout << "Error: Updating mask failed.\n";
+                                /* [FIX-3D] Reachable, and it used to shout.
+                                 *
+                                 * "Should never happen" was wrong: with
+                                 * <thrd_biofilm_fraction> absent it defaults to 0, the test
+                                 * above becomes "biomass >= 0", which is true in EVERY pore
+                                 * voxel including the empty ones, and an empty voxel has no
+                                 * species to name. A 400-step run on 3168 open voxels wrote
+                                 * this line 980,421 times and a 28 MB log, while producing
+                                 * correct results.
+                                 *
+                                 * An unbounded print inside a data processor is a bug in its
+                                 * own right -- it runs per voxel, per microbe, per sweep. So
+                                 * this now reports ONCE, with the cause and the fix, and
+                                 * counts the rest. */
+                                static bool maskWarned = false;
+                                if (!maskWarned) {
+                                    maskWarned = true;
+                                    std::cout
+                                      << "\n  [CA] a pore voxel is at or above the biofilm threshold but carries no\n"
+                                      << "  [CA] identifiable species, so its mask cannot be updated.\n"
+                                      << "  [CA] The usual cause is <thrd_biofilm_fraction> missing from\n"
+                                      << "  [CA] <microbiology>, which defaults it to 0 -- and 'biomass >= 0' is\n"
+                                      << "  [CA] true in every empty voxel. Set it to something like 0.01.\n"
+                                      << "  [CA] The run continues; this voxel keeps its current mask.\n"
+                                      << "  [CA] Reported once. Further occurrences are counted, not printed.\n\n";
+                                }
                                 /* [ROBUST BUG5] do not abort the MPI job here; leave the voxel identity unchanged and continue */ ;
                             }
                         }
@@ -529,6 +553,100 @@ private:
 };
 
 /* -----------------------------------------------------------------------------------------------------------------
+ * updateSoluteSolidDynamics3D — SOLUTE DYNAMICS ACROSS A PORE/SOLID TRANSITION
+ *
+ * [FIX] updateSoluteDynamics3D above cannot do this job, for two reasons that are easy to miss:
+ * it skips `mask == solid` outright, and it only ever calls setOmega -- which is a no-op on
+ * BounceBack. Neither matters while the pore space is static, because every substrate lattice
+ * was given its dynamics at start-up from the geometry field:
+ *
+ *     defineDynamics(vec_substr_lattices[iS], geometry, new BounceBack<T,RXNDES>(), no_dynamics);
+ *
+ * But precipitation and dissolution change the pore space by writing the MASK lattice, and
+ * `geometry` is never rewritten. So before this functional existed:
+ *
+ *   - a voxel sealed by precipitation kept AdvectionDiffusionBGKdynamics on every solute
+ *     lattice, and went on conducting solute by diffusion at the full pore diffusivity
+ *     through a voxel the flow solver had already turned into a wall;
+ *   - a voxel reopened by dissolution kept BounceBack, so nothing could diffuse into the pore
+ *     that had just been created, and computeDensity there reported BounceBack's stored rho
+ *     rather than what was in the voxel.
+ *
+ * Both produce a plausible run with wrong numbers, which is why this is a functional of its own
+ * rather than a branch inside the one above: the two are called from different places and the
+ * transition this one handles is the one that only a mineral can cause.
+ *
+ * Immobile species are skipped entirely -- they never diffused, so there is nothing to switch.
+ *
+ * Lattice layout:
+ *   lattices[0 .. subsNum-1]  = solute lattices
+ *   lattices[subsNum]         = mask lattice (read-only)
+ * ----------------------------------------------------------------------------------------------------------------- */
+template<typename T, template<typename U> class Descriptor>
+class updateSoluteSolidDynamics3D : public LatticeBoxProcessingFunctional3D<T,Descriptor>
+{
+public:
+    updateSoluteSolidDynamics3D(plint subsNum_, plint bb_, plint solid_, std::vector<plint> pore_,
+                                std::vector<T> substrOMEGAinbMass_, std::vector<T> substrOMEGAinPore_,
+                                std::vector<bool> immobile_)
+    : subsNum(subsNum_), bb(bb_), solid(solid_), pore(pore_),
+      substrOMEGAinbMass(substrOMEGAinbMass_), substrOMEGAinPore(substrOMEGAinPore_),
+      immobile(immobile_)
+    {}
+    virtual void process(Box3D domain, std::vector<BlockLattice3D<T,Descriptor>*> lattices) {
+        std::vector<Dot3D> vec_offset;
+        for (plint iT=0; iT<subsNum+1; ++iT) { vec_offset.push_back(computeRelativeDisplacement(*lattices[0],*lattices[iT])); }
+        for (plint iX=domain.x0; iX<=domain.x1; ++iX) {
+            plint iXm = iX+vec_offset[subsNum].x;
+            for (plint iY=domain.y0; iY<=domain.y1; ++iY) {
+                plint iYm = iY+vec_offset[subsNum].y;
+                for (plint iZ=domain.z0; iZ<=domain.z1; ++iZ) {
+                    plint iZm = iZ+vec_offset[subsNum].z;
+                    plint mask = util::roundToInt( lattices[subsNum]->get(iXm,iYm,iZm).computeDensity() );
+                    /* Where the mask now says solid or domain boundary, a solute must not move.
+                     * Anywhere else it must, at the pore or the biofilm relaxation rate. */
+                    const bool wantSolid = (mask == solid || mask == bb);
+                    bool poreflag = false;
+                    for (size_t iP=0; iP<pore.size(); ++iP) { if (mask == pore[iP]) { poreflag = true; break; } }
+                    for (plint iS=0; iS<subsNum; ++iS) {
+                        if (iS < (plint) immobile.size() && immobile[iS]) continue;
+                        plint iXs = iX + vec_offset[iS].x, iYs = iY + vec_offset[iS].y, iZs = iZ + vec_offset[iS].z;
+                        /* BounceBack reports omega 0 and refuses setOmega, so an omega of zero is
+                         * how a bounce-back voxel is recognised here. A mobile solute never has a
+                         * legitimate omega of zero: that is what `immobile` is for. */
+                        const T currentOmega = lattices[iS]->get(iXs,iYs,iZs).getDynamics().getOmega();
+                        const bool isSolidNow = (std::abs(currentOmega) < COMPLAB_THRD);
+                        if (wantSolid && !isSolidNow) {
+                            lattices[iS]->attributeDynamics(iXs, iYs, iZs, new BounceBack<T,Descriptor>());
+                        }
+                        else if (!wantSolid && isSolidNow) {
+                            const T omega = poreflag ? substrOMEGAinPore[iS] : substrOMEGAinbMass[iS];
+                            lattices[iS]->attributeDynamics(iXs, iYs, iZs,
+                                          new AdvectionDiffusionBGKdynamics<T,Descriptor>(omega));
+                        }
+                    }
+                }
+            }
+        }
+    }
+    virtual BlockDomain::DomainT appliesTo() const {
+        return BlockDomain::bulkAndEnvelope;
+    }
+    virtual updateSoluteSolidDynamics3D<T,Descriptor>* clone() const {
+        return new updateSoluteSolidDynamics3D<T,Descriptor>(*this);
+    }
+    void getTypeOfModification(std::vector<modif::ModifT>& modified) const {
+        for (plint iS=0; iS<subsNum; ++iS) { modified[iS] = modif::dataStructure; }
+        modified[subsNum] = modif::nothing;
+    }
+private:
+    plint subsNum, bb, solid;
+    std::vector<plint> pore;
+    std::vector<T> substrOMEGAinbMass, substrOMEGAinPore;
+    std::vector<bool> immobile;
+};
+
+/* -----------------------------------------------------------------------------------------------------------------
  * updateBiomassDynamics3D — Planktonic Biomass LBM Relaxation Rate Update
  *
  * Analogous to updateSoluteDynamics3D above, but for planktonic (suspended) biomass
@@ -658,7 +776,12 @@ public:
                     plint iZ1 = iZ0 + offset_12.z;
                     plint mask = util::roundToInt( lattice1.get(iX1,iY1,iZ1).computeDensity() );
                     T currentOmega = lattice0.get(iX0,iY0,iZ0).getDynamics().getOmega();
-                    if (mask != bb || mask != solid) {
+                    /* [v1.3] This read `mask != bb || mask != solid`, which is a tautology: bb and
+                     * solid are distinct material numbers, so at least one inequality always holds
+                     * and the guard excluded nothing. Every sibling processor in this file --
+                     * updateSoluteDynamics3D, updateSoluteSolidDynamics3D, updateBiomassDynamics3D
+                     * -- writes the `&&` that was meant here. */
+                    if (mask != bb && mask != solid) {
                         bool poreflag = 0;
                         for (size_t iP=0; iP<pore.size(); ++iP) { if (mask == pore[iP]) {poreflag = 1; break;} }
                         // Pore → Biofilm: voxel is now biofilm but still has pore-flow dynamics

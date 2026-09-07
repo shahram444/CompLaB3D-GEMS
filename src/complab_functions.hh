@@ -51,13 +51,18 @@
 #include <string>
 #include <vector>
 
+#include "complab3d_configpath.hh"   /* complab_input::configPath(), set from argv in main() */
+
 
 using namespace plb;
+
 typedef double T;
 
 // [UPD_RXN] debug-print toggle, defined in complab3d_processors_part1.hh.
 //   Set here from CompLaB.xml <IO><debug_updRxn> during initialize_complab().
 extern bool g_updRxn_debug;
+
+
 
 #define NSDES descriptors::D3Q19Descriptor // Cs2 = 1/3
 #define RXNDES descriptors::AdvectionDiffusionD3Q7Descriptor // Cs2 = 1/3
@@ -295,65 +300,7 @@ void NSdomainSetup(MultiBlockLattice3D<T,NSDES>& lattice, OnLatticeBoundaryCondi
 
 void soluteDomainSetup( MultiBlockLattice3D<T,RXNDES> &lattice, OnLatticeAdvectionDiffusionBoundaryCondition3D<T, RXNDES>* boundaryCondition, MultiScalarField3D<int>& geometry,
                         T substr_bMassOmega, T substrOmega, std::vector<plint> pore, plint bounceback, plint nodymcs, std::vector<std::vector<plint>> bio_dynamics,
-                        T rho0, bool left_btype, bool right_btype, T left_BC, T right_BC,
-                        bool immobile = false )
-{
-    const plint nx = lattice.getNx();
-    const plint ny = lattice.getNy();
-    const plint nz = lattice.getNz();
-
-    Box3D west   (0,0, 0,ny-1, 0,nz-1);
-    Box3D east   (nx-1,nx-1, 0,ny-1, 0,nz-1);
-    plint processorLevelBC = 1;
-
-    // default. initialize the entire domain. may be redundant
-    defineDynamics(lattice, lattice.getBoundingBox(), new AdvectionDiffusionBGKdynamics<T,RXNDES>(substrOmega));
-
-    // pore space
-    for (size_t iP=0; iP<pore.size(); ++iP) {
-        if (pore[iP] > 0) { defineDynamics(lattice, geometry, new AdvectionDiffusionBGKdynamics<T,RXNDES>(substrOmega), pore[iP]); }
-    }
-    // bounceback boundary
-    if (bounceback > 0) { defineDynamics(lattice, geometry, new BounceBack<T,RXNDES>(), bounceback); }
-    // no dynamics
-    //   [FIX] ... except for an IMMOBILE substrate.  Palabos NoDynamics::computeDensity()
-    //   returns its stored rho, which defaults to zero, so a solid voxel of a NoDynamics lattice
-    //   reads back as 0 whatever was written into its populations.  For a transported solute that
-    //   is correct -- there is no solute inside a grain.  For a mineral inventory it is fatal:
-    //   seeding a grain phase appeared to work, every later read returned 0, the phase could never
-    //   dissolve, and the reopen test (mineral < reopen_fraction * full_density) was satisfied at
-    //   iteration 0 for every voxel of the phase, so the whole declared grain pack turned to pore
-    //   on the first step.
-    //
-    //   An immobile substrate is never collided and never streamed, so leaving BGK dynamics on its
-    //   solid voxels costs nothing and is what makes the stored value readable.
-    if (nodymcs >= 0 && !immobile) { defineDynamics(lattice, geometry, new NoDynamics<T,RXNDES>(),nodymcs); }
-    // microbial material number
-    for (size_t iM = 0; iM < bio_dynamics.size(); ++iM) {
-        for (size_t iB = 0; iB < bio_dynamics[iM].size(); ++iB) {
-            if (bio_dynamics[iM][iB] > 0) { defineDynamics(lattice, geometry, new AdvectionDiffusionBGKdynamics<T,RXNDES>(substr_bMassOmega), bio_dynamics[iM][iB]); }
-        }
-    }
-
-    // Set the boundary-conditions
-    boundaryCondition->addTemperatureBoundary0N(west, lattice);
-    if (left_btype == 0) { setBoundaryDensity(lattice, west, left_BC); }
-    else { integrateProcessingFunctional(new FlatAdiabaticBoundaryFunctional3D<T,RXNDES, 0, -1>, west, lattice, processorLevelBC); }
-    boundaryCondition->addTemperatureBoundary0P(east, lattice);
-    if (right_btype == 0) { setBoundaryDensity(lattice, east, right_BC); }
-    else { integrateProcessingFunctional(new FlatAdiabaticBoundaryFunctional3D<T,RXNDES, 0, +1>, east, lattice, processorLevelBC); }
-
-    // Init lattice
-    Array<T,3> u0(0., 0., 0.);
-    initializeAtEquilibrium(lattice, lattice.getBoundingBox(), rho0, u0);
-
-    lattice.initialize();
-    delete boundaryCondition;
-}
-
-void soluteDeltaSetup( MultiBlockLattice3D<T,RXNDES> &lattice, OnLatticeAdvectionDiffusionBoundaryCondition3D<T, RXNDES>* boundaryCondition, MultiScalarField3D<int>& geometry,
-                        T substr_bMassOmega, T substrOmega, std::vector<plint> pore, plint bounceback, plint nodymcs, std::vector<std::vector<plint>> bio_dynamics,
-                        T rho0, bool left_btype, bool right_btype, T left_BC, T right_BC )
+                        T rho0, plint left_btype, plint right_btype, T left_BC, T right_BC )
 {
     const plint nx = lattice.getNx();
     const plint ny = lattice.getNy();
@@ -381,17 +328,165 @@ void soluteDeltaSetup( MultiBlockLattice3D<T,RXNDES> &lattice, OnLatticeAdvectio
         }
     }
 
-    // Set the boundary-conditions
-    boundaryCondition->addTemperatureBoundary0N(west, lattice);
-    if (left_btype == 0) { setBoundaryDensity(lattice, west, left_BC); }
-    else { integrateProcessingFunctional(new FlatAdiabaticBoundaryFunctional3D<T,RXNDES, 0, -1>, west, lattice, processorLevelBC); }
-    boundaryCondition->addTemperatureBoundary0P(east, lattice);
-    if (right_btype == 0) { setBoundaryDensity(lattice, east, right_BC); }
-    else { integrateProcessingFunctional(new FlatAdiabaticBoundaryFunctional3D<T,RXNDES, 0, +1>, east, lattice, processorLevelBC); }
+    /* Set the boundary-conditions.
+     *
+     * THREE KINDS, AND THE THIRD ONE IS NEW.
+     *
+     *   0  Dirichlet -- the plane is held at a value. An inlet.
+     *   1  Neumann   -- the plane is set to its neighbour's density every step. An OUTFLOW.
+     *   2  closed    -- bounce-back. No flux crosses. Exactly conservative.
+     *
+     * Neumann and closed are not the same thing, and treating them as one is what made a closed
+     * species fail its own mass balance. FlatAdiabaticBoundaryFunctional3D calls defineDensity()
+     * on the boundary plane with the density of the layer inside it, which DISCARDS whatever the
+     * plane was holding and replaces it. For a field at steady state that is harmless. For a
+     * field that is rising -- a dissolution product accumulating in water that started clean --
+     * the plane is topped up from nothing every step, and then streams that into the domain.
+     *
+     * Measured on example 14, where calcium starts at zero and can only come from calcite:
+     * dissolution released 4.3026 mol/L of calcium, the mineral inventory fell by exactly
+     * 4.3026, and the calcium in the water rose by 5.66. The extra 1.36 -- 32% -- was
+     * manufactured by the two Neumann planes. With them closed, the two changes cancel.
+     *
+     * Bounce-back costs nothing here: readGeometry() duplicates the first and last slice of the
+     * geometry file into x = 0 and x = nx-1, and every reduction in this program already measures
+     * x = 1 .. nx-2. The planes being made into walls are outside the measured domain to begin
+     * with.
+     *
+     * `Neumann` remains the default and remains right for what it says: an open outflow. Use
+     * `closed` when the species must not leave. */
+    if (left_btype != 2) {
+        boundaryCondition->addTemperatureBoundary0N(west, lattice);
+        if (left_btype == 0) { setBoundaryDensity(lattice, west, left_BC); }
+        else { integrateProcessingFunctional(new FlatAdiabaticBoundaryFunctional3D<T,RXNDES, 0, -1>, west, lattice, processorLevelBC); }
+    }
+    if (right_btype != 2) {
+        boundaryCondition->addTemperatureBoundary0P(east, lattice);
+        if (right_btype == 0) { setBoundaryDensity(lattice, east, right_BC); }
+        else { integrateProcessingFunctional(new FlatAdiabaticBoundaryFunctional3D<T,RXNDES, 0, +1>, east, lattice, processorLevelBC); }
+    }
 
     // Init lattice
     Array<T,3> u0(0., 0., 0.);
     initializeAtEquilibrium(lattice, lattice.getBoundingBox(), rho0, u0);
+
+    /* THE CLOSED PLANES GO IN AFTER THE FIELD IS INITIALISED, NOT BEFORE.
+     *
+     * initializeAtEquilibrium() writes a cell through its dynamics, and BounceBack's
+     * computeEquilibrium returns zero for every population, so a cell that is ALREADY
+     * bounce-back cannot be reached by it. Installed first, these two planes would hold
+     * all-zero populations -- which, in the deviation form the advection-diffusion
+     * descriptors use, reads as density 1 -- and would then push that into the domain.
+     *
+     * That is not hypothetical. On example 14 in a fully closed box, where the only
+     * thing that can move mass is the reaction, protons rose by 1.34 mol/L while the
+     * reaction consumed 0.23. Installed here, after the field is set, defineDynamics
+     * keeps the populations the cells already have, and the plane starts at the
+     * background like everything else.
+     *
+     * The value handed to BounceBack is what computeDensity() will report for these
+     * cells. The physics does not use it -- bounce-back reflects populations and never
+     * consults it -- but the diagnostics do, and a plane reporting its own background
+     * is the honest answer. */
+    if (left_btype  == 2) defineDynamics(lattice, west, new BounceBack<T,RXNDES>(left_BC));
+    if (right_btype == 2) defineDynamics(lattice, east, new BounceBack<T,RXNDES>(right_BC));
+
+    lattice.initialize();
+    delete boundaryCondition;
+}
+
+void soluteDeltaSetup( MultiBlockLattice3D<T,RXNDES> &lattice, OnLatticeAdvectionDiffusionBoundaryCondition3D<T, RXNDES>* boundaryCondition, MultiScalarField3D<int>& geometry,
+                        T substr_bMassOmega, T substrOmega, std::vector<plint> pore, plint bounceback, plint nodymcs, std::vector<std::vector<plint>> bio_dynamics,
+                        T rho0, plint left_btype, plint right_btype, T left_BC, T right_BC )
+{
+    const plint nx = lattice.getNx();
+    const plint ny = lattice.getNy();
+    const plint nz = lattice.getNz();
+
+    Box3D west   (0,0, 0,ny-1, 0,nz-1);
+    Box3D east   (nx-1,nx-1, 0,ny-1, 0,nz-1);
+    plint processorLevelBC = 1;
+
+    // default. initialize the entire domain. may be redundant
+    defineDynamics(lattice, lattice.getBoundingBox(), new AdvectionDiffusionBGKdynamics<T,RXNDES>(substrOmega));
+
+    // pore space
+    for (size_t iP=0; iP<pore.size(); ++iP) {
+        if (pore[iP] > 0) { defineDynamics(lattice, geometry, new AdvectionDiffusionBGKdynamics<T,RXNDES>(substrOmega), pore[iP]); }
+    }
+    // bounceback boundary
+    if (bounceback > 0) { defineDynamics(lattice, geometry, new BounceBack<T,RXNDES>(), bounceback); }
+    // no dynamics
+    if (nodymcs >= 0) { defineDynamics(lattice, geometry, new NoDynamics<T,RXNDES>(),nodymcs); }
+    // microbial material number
+    for (size_t iM = 0; iM < bio_dynamics.size(); ++iM) {
+        for (size_t iB = 0; iB < bio_dynamics[iM].size(); ++iB) {
+            if (bio_dynamics[iM][iB] > 0) { defineDynamics(lattice, geometry, new AdvectionDiffusionBGKdynamics<T,RXNDES>(substr_bMassOmega), bio_dynamics[iM][iB]); }
+        }
+    }
+
+    /* Set the boundary-conditions.
+     *
+     * THREE KINDS, AND THE THIRD ONE IS NEW.
+     *
+     *   0  Dirichlet -- the plane is held at a value. An inlet.
+     *   1  Neumann   -- the plane is set to its neighbour's density every step. An OUTFLOW.
+     *   2  closed    -- bounce-back. No flux crosses. Exactly conservative.
+     *
+     * Neumann and closed are not the same thing, and treating them as one is what made a closed
+     * species fail its own mass balance. FlatAdiabaticBoundaryFunctional3D calls defineDensity()
+     * on the boundary plane with the density of the layer inside it, which DISCARDS whatever the
+     * plane was holding and replaces it. For a field at steady state that is harmless. For a
+     * field that is rising -- a dissolution product accumulating in water that started clean --
+     * the plane is topped up from nothing every step, and then streams that into the domain.
+     *
+     * Measured on example 14, where calcium starts at zero and can only come from calcite:
+     * dissolution released 4.3026 mol/L of calcium, the mineral inventory fell by exactly
+     * 4.3026, and the calcium in the water rose by 5.66. The extra 1.36 -- 32% -- was
+     * manufactured by the two Neumann planes. With them closed, the two changes cancel.
+     *
+     * Bounce-back costs nothing here: readGeometry() duplicates the first and last slice of the
+     * geometry file into x = 0 and x = nx-1, and every reduction in this program already measures
+     * x = 1 .. nx-2. The planes being made into walls are outside the measured domain to begin
+     * with.
+     *
+     * `Neumann` remains the default and remains right for what it says: an open outflow. Use
+     * `closed` when the species must not leave. */
+    if (left_btype != 2) {
+        boundaryCondition->addTemperatureBoundary0N(west, lattice);
+        if (left_btype == 0) { setBoundaryDensity(lattice, west, left_BC); }
+        else { integrateProcessingFunctional(new FlatAdiabaticBoundaryFunctional3D<T,RXNDES, 0, -1>, west, lattice, processorLevelBC); }
+    }
+    if (right_btype != 2) {
+        boundaryCondition->addTemperatureBoundary0P(east, lattice);
+        if (right_btype == 0) { setBoundaryDensity(lattice, east, right_BC); }
+        else { integrateProcessingFunctional(new FlatAdiabaticBoundaryFunctional3D<T,RXNDES, 0, +1>, east, lattice, processorLevelBC); }
+    }
+
+    // Init lattice
+    Array<T,3> u0(0., 0., 0.);
+    initializeAtEquilibrium(lattice, lattice.getBoundingBox(), rho0, u0);
+
+    /* THE CLOSED PLANES GO IN AFTER THE FIELD IS INITIALISED, NOT BEFORE.
+     *
+     * initializeAtEquilibrium() writes a cell through its dynamics, and BounceBack's
+     * computeEquilibrium returns zero for every population, so a cell that is ALREADY
+     * bounce-back cannot be reached by it. Installed first, these two planes would hold
+     * all-zero populations -- which, in the deviation form the advection-diffusion
+     * descriptors use, reads as density 1 -- and would then push that into the domain.
+     *
+     * That is not hypothetical. On example 14 in a fully closed box, where the only
+     * thing that can move mass is the reaction, protons rose by 1.34 mol/L while the
+     * reaction consumed 0.23. Installed here, after the field is set, defineDynamics
+     * keeps the populations the cells already have, and the plane starts at the
+     * background like everything else.
+     *
+     * The value handed to BounceBack is what computeDensity() will report for these
+     * cells. The physics does not use it -- bounce-back reflects populations and never
+     * consults it -- but the diagnostics do, and a plane reporting its own background
+     * is the honest answer. */
+    if (left_btype  == 2) defineDynamics(lattice, west, new BounceBack<T,RXNDES>(left_BC));
+    if (right_btype == 2) defineDynamics(lattice, east, new BounceBack<T,RXNDES>(right_BC));
 
     lattice.initialize();
     delete boundaryCondition;
@@ -399,7 +494,7 @@ void soluteDeltaSetup( MultiBlockLattice3D<T,RXNDES> &lattice, OnLatticeAdvectio
 
 void bmassDomainSetup(MultiBlockLattice3D<T,RXNDES> &lattice, OnLatticeAdvectionDiffusionBoundaryCondition3D<T, RXNDES>* boundaryCondition,
                     MultiScalarField3D<int>& geometry, T bioOmegaPore, T bioOmegaFilm, std::vector<plint> pore, plint bounceback, plint nodymcs, std::vector<std::vector<plint>> bio_dynamics,
-                    bool left_btype, bool right_btype, T left_BC, T right_BC )
+                    plint left_btype, plint right_btype, T left_BC, T right_BC )
 {
     const plint nx = lattice.getNx();
     const plint ny = lattice.getNy();
@@ -427,17 +522,68 @@ void bmassDomainSetup(MultiBlockLattice3D<T,RXNDES> &lattice, OnLatticeAdvection
         }
     }
 
-    // Set the boundary-conditions
-    boundaryCondition->addTemperatureBoundary0N(west, lattice);
-    if (left_btype == 0) { setBoundaryDensity(lattice, west, left_BC); }
-    else { integrateProcessingFunctional(new FlatAdiabaticBoundaryFunctional3D<T,RXNDES, 0, -1>, west, lattice, processorLevelBC); }
-    boundaryCondition->addTemperatureBoundary0P(east, lattice);
-    if (right_btype == 0) { setBoundaryDensity(lattice, east, right_BC); }
-    else { integrateProcessingFunctional(new FlatAdiabaticBoundaryFunctional3D<T,RXNDES, 0, +1>, east, lattice, processorLevelBC); }
+    /* Set the boundary-conditions.
+     *
+     * THREE KINDS, AND THE THIRD ONE IS NEW.
+     *
+     *   0  Dirichlet -- the plane is held at a value. An inlet.
+     *   1  Neumann   -- the plane is set to its neighbour's density every step. An OUTFLOW.
+     *   2  closed    -- bounce-back. No flux crosses. Exactly conservative.
+     *
+     * Neumann and closed are not the same thing, and treating them as one is what made a closed
+     * species fail its own mass balance. FlatAdiabaticBoundaryFunctional3D calls defineDensity()
+     * on the boundary plane with the density of the layer inside it, which DISCARDS whatever the
+     * plane was holding and replaces it. For a field at steady state that is harmless. For a
+     * field that is rising -- a dissolution product accumulating in water that started clean --
+     * the plane is topped up from nothing every step, and then streams that into the domain.
+     *
+     * Measured on example 14, where calcium starts at zero and can only come from calcite:
+     * dissolution released 4.3026 mol/L of calcium, the mineral inventory fell by exactly
+     * 4.3026, and the calcium in the water rose by 5.66. The extra 1.36 -- 32% -- was
+     * manufactured by the two Neumann planes. With them closed, the two changes cancel.
+     *
+     * Bounce-back costs nothing here: readGeometry() duplicates the first and last slice of the
+     * geometry file into x = 0 and x = nx-1, and every reduction in this program already measures
+     * x = 1 .. nx-2. The planes being made into walls are outside the measured domain to begin
+     * with.
+     *
+     * `Neumann` remains the default and remains right for what it says: an open outflow. Use
+     * `closed` when the species must not leave. */
+    if (left_btype != 2) {
+        boundaryCondition->addTemperatureBoundary0N(west, lattice);
+        if (left_btype == 0) { setBoundaryDensity(lattice, west, left_BC); }
+        else { integrateProcessingFunctional(new FlatAdiabaticBoundaryFunctional3D<T,RXNDES, 0, -1>, west, lattice, processorLevelBC); }
+    }
+    if (right_btype != 2) {
+        boundaryCondition->addTemperatureBoundary0P(east, lattice);
+        if (right_btype == 0) { setBoundaryDensity(lattice, east, right_BC); }
+        else { integrateProcessingFunctional(new FlatAdiabaticBoundaryFunctional3D<T,RXNDES, 0, +1>, east, lattice, processorLevelBC); }
+    }
 
     // Init lattice
     Array<T,3> u0(0., 0., 0.);
     initializeAtEquilibrium(lattice, lattice.getBoundingBox(), 0., u0);
+
+    /* THE CLOSED PLANES GO IN AFTER THE FIELD IS INITIALISED, NOT BEFORE.
+     *
+     * initializeAtEquilibrium() writes a cell through its dynamics, and BounceBack's
+     * computeEquilibrium returns zero for every population, so a cell that is ALREADY
+     * bounce-back cannot be reached by it. Installed first, these two planes would hold
+     * all-zero populations -- which, in the deviation form the advection-diffusion
+     * descriptors use, reads as density 1 -- and would then push that into the domain.
+     *
+     * That is not hypothetical. On example 14 in a fully closed box, where the only
+     * thing that can move mass is the reaction, protons rose by 1.34 mol/L while the
+     * reaction consumed 0.23. Installed here, after the field is set, defineDynamics
+     * keeps the populations the cells already have, and the plane starts at the
+     * background like everything else.
+     *
+     * The value handed to BounceBack is what computeDensity() will report for these
+     * cells. The physics does not use it -- bounce-back reflects populations and never
+     * consults it -- but the diagnostics do, and a plane reporting its own background
+     * is the honest answer. */
+    if (left_btype  == 2) defineDynamics(lattice, west, new BounceBack<T,RXNDES>(left_BC));
+    if (right_btype == 2) defineDynamics(lattice, east, new BounceBack<T,RXNDES>(right_BC));
 
     lattice.initialize();
     delete boundaryCondition;
@@ -637,8 +783,8 @@ int initialize_complab( char *&main_path, char *&src_path, char *&input_path, ch
     T &thrd_bFilmFrac, std::vector<T> &vec_permRatio, T &max_bMassRho, std::vector<plint> &pore_dynamics, plint &bounce_back, plint &no_dynamics, std::vector< std::vector<plint> > &bio_dynamics,
     plint &num_of_microbes, plint &num_of_substrates, std::vector<std::string> &vec_subs_names, std::vector<std::string>& vec_microbes_names, std::vector<plint> &solver_type, plint &fd_count,
     plint &lb_count, plint &ca_count, plint &bfilm_count, plint &bfree_count, plint &kns_count, std::vector<plint> &reaction_type,  // ADDED
-    std::vector<T> &vec_c0, std::vector<bool> &left_btype, std::vector<bool> &right_btype, std::vector<T> &vec_leftBC, std::vector<T> &vec_rightBC, std::vector< std::vector<T> > &vec_b0_all,
-    std::vector<bool> &bio_left_btype, std::vector<bool> &bio_right_btype, std::vector<T> &bio_leftBC, std::vector<T> &bio_rightBC,
+    std::vector<T> &vec_c0, std::vector<plint> &left_btype, std::vector<plint> &right_btype, std::vector<T> &vec_leftBC, std::vector<T> &vec_rightBC, std::vector< std::vector<T> > &vec_b0_all,
+    std::vector<plint> &bio_left_btype, std::vector<plint> &bio_right_btype, std::vector<T> &bio_leftBC, std::vector<T> &bio_rightBC,
     std::vector< std::vector<T> > &vec_Kc, std::vector< std::vector<T> > &vec_Kc_kns,
     std::vector<T> &vec_mu, std::vector<T> &vec_mu_kns,
     std::vector<bool> &bmass_type, std::vector<T> &vec_b0_free, std::vector< std::vector<T> > &vec_b0_film,
@@ -658,7 +804,7 @@ int initialize_complab( char *&main_path, char *&src_path, char *&input_path, ch
 
 
     try {
-        std::string fin("CompLaB.xml");
+        std::string fin(complab_input::configPath());
         XMLreader doc(fin);
 
         // ════════════════════════════════════════════════════════════════════════════
@@ -794,12 +940,16 @@ int initialize_complab( char *&main_path, char *&src_path, char *&input_path, ch
                 std::transform(tmp0.begin(), tmp0.end(), tmp0.begin(), [](unsigned char c){ return std::tolower(c); });
                 if (tmp0.compare("dirichlet")==0) { left_btype.push_back(0); }
                 else if (tmp0.compare("neumann")==0) { left_btype.push_back(1); }
-                else { pcout << "left_boundary_type (" << tmp0 << ") should be either Dirichlet or Neumann. Terminating the simulation.\n"; return -1; }
+                else if (tmp0.compare("closed")==0 || tmp0.compare("noflux")==0
+                         || tmp0.compare("no_flux")==0 || tmp0.compare("wall")==0) { left_btype.push_back(2); }
+                else { pcout << "left_boundary_type (" << tmp0 << ") should be Dirichlet, Neumann or closed. Terminating the simulation.\n"; return -1; }
                 doc["parameters"]["chemistry"][chemname]["right_boundary_type"].read(tmp1);
                 std::transform(tmp1.begin(), tmp1.end(), tmp1.begin(), [](unsigned char c){ return std::tolower(c); });
                 if (tmp1.compare("dirichlet")==0) { right_btype.push_back(0); }
                 else if (tmp1.compare("neumann")==0) { right_btype.push_back(1); }
-                else { pcout << "right_boundary_type (" << tmp1 << ") should be either Dirichlet or Neumann. Terminating the simulation.\n"; return -1; }
+                else if (tmp1.compare("closed")==0 || tmp1.compare("noflux")==0
+                         || tmp1.compare("no_flux")==0 || tmp1.compare("wall")==0) { right_btype.push_back(2); }
+                else { pcout << "right_boundary_type (" << tmp1 << ") should be Dirichlet, Neumann or closed. Terminating the simulation.\n"; return -1; }
                 doc["parameters"]["chemistry"][chemname]["left_boundary_condition"].read(bc0); vec_leftBC.push_back(bc0);
                 doc["parameters"]["chemistry"][chemname]["right_boundary_condition"].read(bc1); vec_rightBC.push_back(bc1);
             }
@@ -920,39 +1070,39 @@ int initialize_complab( char *&main_path, char *&src_path, char *&input_path, ch
             doc["parameters"]["path"]["src_path"].read(item);
             src_path = (char *) calloc(item.size()+1,sizeof(char));
             for (size_t i = 0; i < item.size(); ++i) { src_path[i] = item[i]; }
-            src_path[item.size()+1] = '\0';
+            src_path[item.size()] = '\0';
         }
         catch (PlbIOException& exception) {
             std::string item = "src";
             src_path = (char *) calloc(item.size()+1,sizeof(char));
             for (size_t i = 0; i < item.size(); ++i) { src_path[i] = item[i]; }
-            src_path[item.size()+1] = '\0';
+            src_path[item.size()] = '\0';
         }
         try {
             std::string item;
             doc["parameters"]["path"]["input_path"].read(item);
             input_path = (char *) calloc(item.size()+1,sizeof(char));
             for (size_t i = 0; i < item.size(); ++i) { input_path[i] = item[i]; }
-            input_path[item.size()+1] = '\0';
+            input_path[item.size()] = '\0';
         }
         catch (PlbIOException& exception) {
             std::string item = "input";
             input_path = (char *) calloc(item.size()+1,sizeof(char));
             for (size_t i = 0; i < item.size(); ++i) { input_path[i] = item[i]; }
-            input_path[item.size()+1] = '\0';
+            input_path[item.size()] = '\0';
         }
         try {
             std::string item;
             doc["parameters"]["path"]["output_path"].read(item);
             output_path = (char *) calloc(item.size()+1,sizeof(char));
             for (size_t i = 0; i < item.size(); ++i) { output_path[i] = item[i]; }
-            output_path[item.size()+1] = '\0';
+            output_path[item.size()] = '\0';
         }
         catch (PlbIOException& exception) {
             std::string item = "output";
             output_path = (char *) calloc(item.size()+1,sizeof(char));
             for (size_t i = 0; i < item.size(); ++i) { output_path[i] = item[i]; }
-            output_path[item.size()+1] = '\0';
+            output_path[item.size()] = '\0';
         }
 
         // LB_numerics
@@ -1108,6 +1258,8 @@ int initialize_complab( char *&main_path, char *&src_path, char *&input_path, ch
                 std::transform(tmp0.begin(), tmp0.end(), tmp0.begin(), [](unsigned char c){ return std::tolower(c); });
                 if (tmp0.compare("dirichlet")==0) { bio_left_btype.push_back(0); }
                 else if (tmp0.compare("neumann")==0) { bio_left_btype.push_back(1); }
+                else if (tmp0.compare("closed")==0 || tmp0.compare("noflux")==0
+                         || tmp0.compare("no_flux")==0 || tmp0.compare("wall")==0) { bio_left_btype.push_back(2); }
                 else { pcout << "left_boundary_type (" << tmp1 << ") should be either Dirichlet or Neumann. Terminating the simulation.\n"; return -1; }
             }
             catch (PlbIOException& exception) { bio_left_btype.push_back(1); }
@@ -1117,6 +1269,8 @@ int initialize_complab( char *&main_path, char *&src_path, char *&input_path, ch
                 std::transform(tmp0.begin(), tmp0.end(), tmp0.begin(), [](unsigned char c){ return std::tolower(c); });
                 if (tmp0.compare("dirichlet")==0) { bio_right_btype.push_back(0); }
                 else if (tmp0.compare("neumann")==0) { bio_right_btype.push_back(1); }
+                else if (tmp0.compare("closed")==0 || tmp0.compare("noflux")==0
+                         || tmp0.compare("no_flux")==0 || tmp0.compare("wall")==0) { bio_right_btype.push_back(2); }
                 else { pcout << "right_boundary_type (" << tmp1 << ") should be either Dirichlet or Neumann. Terminating the simulation.\n"; return -1; }
             }
             catch (PlbIOException& exception) { bio_right_btype.push_back(1); }
@@ -1150,7 +1304,11 @@ int initialize_complab( char *&main_path, char *&src_path, char *&input_path, ch
                 if ( solver_type[iT]==1 ) { pcout << exception.what() << " for microbe" << iT << ". It must be defined when solver_type is Finite Difference. Terminating the simulation.\n"; return -1; }
                 else { bMass_bFilmD.push_back(-99); }
             }
-            if ( (bMass_poreD[iT]>0&&bMass_poreD[iT]>0) && (std::abs(bMass_poreD[iT]-bMass_bFilmD[iT])>COMPLAB_THRD) ) { bmassDindex = 1; }
+            /* [v1.3] The second term tested bMass_poreD twice; it was meant to be bMass_bFilmD.
+             * The sentinel for "absent" is -99, so a microbe with <in_pore> given and <in_biofilm>
+             * absent passed the guard and |D_pore - (-99)| > 1e-14 was then trivially true, which
+             * switched on the separate-biomass-diffusivity path with omega 0 for that microbe. */
+            if ( (bMass_poreD[iT]>0&&bMass_bFilmD[iT]>0) && (std::abs(bMass_poreD[iT]-bMass_bFilmD[iT])>COMPLAB_THRD) ) { bmassDindex = 1; }
             try {
                 T nu0;
                 doc["parameters"]["microbiology"][bioname]["viscosity_ratio_in_biofilm"].read(nu0);
@@ -1163,7 +1321,12 @@ int initialize_complab( char *&main_path, char *&src_path, char *&input_path, ch
             try {
                 std::vector<T> tmp;
                 doc["parameters"]["microbiology"][bioname]["half_saturation_constants"].read(tmp);
-                if (tmp.size()!=(unsigned)num_of_substrates) { pcout << "The length of half_saturation_constants should be equal to the number_of_substates. Terminating the simulation.\n"; }
+                /* [v1.3] This branch printed "Terminating the simulation" and then did not
+                 * terminate, and it is the one branch that also does not push a row. vec_Kc was
+                 * left shorter than num_of_microbes, and the copy at the bottom of this function
+                 * indexes vec_Kc[iT] for every microbe with no bound check -- copy-constructing a
+                 * std::vector from past the end. Every sibling size check here returns -1. */
+                if (tmp.size()!=(unsigned)num_of_substrates) { pcout << "The length of half_saturation_constants should be equal to the number_of_substates. Terminating the simulation.\n"; return -1; }
                 else { vec_Kc.push_back(tmp); }
             }
             catch (PlbIOException& exception) {
@@ -1186,7 +1349,11 @@ int initialize_complab( char *&main_path, char *&src_path, char *&input_path, ch
 
         try { doc["parameters"]["microbiology"]["maximum_biomass_density"].read(max_bMassRho); }
         catch (PlbIOException& exception) {
-            if (ca_count==1 ) { pcout << exception.what() << " It must be defined when solver_type is Cellular Automata. Terminating the simulation.\n"; return -1; }
+            /* [v1.3] ca_count==1 meant this required-with-CA check did nothing for a run with two
+             * or more CA microbes; the paired <thrd_biofilm_fraction> check ten lines up uses the
+             * correct predicate. Such a run silently got max_bMassRho = 1e9 kg/m3, so the CA never
+             * fired and biomass accumulated past capacity in a single voxel for the whole run. */
+            if (ca_count>0 ) { pcout << exception.what() << " It must be defined when solver_type is Cellular Automata. Terminating the simulation.\n"; return -1; }
             else { max_bMassRho = 999999999.; }
         }
         try {
@@ -1215,13 +1382,13 @@ int initialize_complab( char *&main_path, char *&src_path, char *&input_path, ch
             doc["parameters"]["IO"]["ns_filename"].read(item);
             ns_filename = (char *) calloc(item.size()+1,sizeof(char));
             for (size_t i = 0; i < item.size(); ++i) { ns_filename[i] = item[i]; }
-            ns_filename[item.size()+1] = '\0';
+            ns_filename[item.size()] = '\0';
         }
         catch (PlbIOException& exception) {
             std::string item = "nsLattice";
             ns_filename = (char *) calloc(item.size()+1,sizeof(char));
             for (size_t i = 0; i < item.size(); ++i) { ns_filename[i] = item[i]; }
-            ns_filename[item.size()+1] = '\0';
+            ns_filename[item.size()] = '\0';
         }
         try { doc["parameters"]["IO"]["mask_filename"].read(mask_filename); }
         catch (PlbIOException& exception) { mask_filename="maskLattice"; }

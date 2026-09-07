@@ -14,7 +14,9 @@
 # Each step is also runnable on its own, and each is a file you can read:
 #
 #     preprocess.py    builds the pore space
-#     offline.sh       sweep the linear program, fit the network, verify it, install it
+#     offline.sh       sweep the linear program, fit the network, verify it. It does
+#                      NOT install the fitted header: the case keeps running on the
+#                      one that ships with the repository until you copy it over.
 #     CompLaB.xml      what the solver reads
 #     postprocess.py   says whether the run is worth believing
 #
@@ -34,8 +36,25 @@ python3 preprocess.py
 # 2. OFFLINE       ->  what has to exist before the solver starts
 # ---------------------------------------------------------------------------
 echo
-echo "== offline: sweep the linear program, fit the network, verify it, install it"
-./offline.sh
+# [v1.3] This step used to run unconditionally. offline.sh sweeps the linear
+# program through training/generateTrainingData.py, which exits with an error
+# when COBRApy is not installed, and with `set -euo pipefail` above that aborted
+# the pipeline before the build. The case was therefore unrunnable without
+# COBRApy, contradicting this case's own README, which says of offline.sh "Not
+# needed to run the case, a fitted header ships with the repository". The step
+# is now opt in: set RETRAIN=1 in the environment, or pass --retrain as the
+# first argument, to refit the network.
+RETRAIN="${RETRAIN:-0}"
+if [ "${1:-}" = "--retrain" ]; then RETRAIN=1; fi
+
+if [ "$RETRAIN" = "1" ]; then
+    echo "== offline: sweep the linear program, fit the network, verify it. The fitted"
+    echo "   header is not installed; the run below uses the shipped one."
+    ./offline.sh
+else
+    echo "== offline: skipped. Using the fitted network that ships with the case."
+    echo "   Set RETRAIN=1 (or pass --retrain) to refit it, which needs COBRApy."
+fi
 
 # ---------------------------------------------------------------------------
 # 3. BUILD
@@ -53,7 +72,7 @@ echo "== running. READ THE START-UP LINES: the geometry, the enabled features"
 echo "   and each organism's rate path are echoed before the first step. If any"
 echo "   of it is not what you meant, stop now rather than in a fortnight."
 mkdir -p output
-./build/complab CompLaB.xml 2>&1 | tee output/run.log
+./complab CompLaB.xml 2>&1 | tee output/run.log
 
 # ---------------------------------------------------------------------------
 # 5. POST-PROCESS  ->  a verdict on the run

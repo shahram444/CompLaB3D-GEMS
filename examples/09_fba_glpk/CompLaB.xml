@@ -56,8 +56,8 @@
     <LB_numerics>
         <domain>
             <nx>24</nx>
-            <ny>24</ny>
-            <nz>6</nz>
+            <ny>26</ny>
+            <nz>8</nz>
             <dx>10</dx>
             <unit>um</unit>
             <characteristic_length>24</characteristic_length>
@@ -125,9 +125,9 @@
                 <in_pore>5e-10</in_pore>
                 <in_biofilm>5e-10</in_biofilm>
             </substrate_diffusion_coefficients>
-            <left_boundary_type>Neumann</left_boundary_type>
+            <left_boundary_type>closed</left_boundary_type>
             <left_boundary_condition>0.</left_boundary_condition>
-            <right_boundary_type>Neumann</right_boundary_type>
+            <right_boundary_type>closed</right_boundary_type>
             <right_boundary_condition>0.</right_boundary_condition>
         </substrate2>
 
@@ -172,9 +172,9 @@
             <!-- grams dry weight per mole of cells: converts CompLB3D's molar
                  biomass into the gDW a metabolic model expects. -->
             <biomass_molar_mass>24.6</biomass_molar_mass>
-            <left_boundary_type>Neumann</left_boundary_type>
+            <left_boundary_type>closed</left_boundary_type>
             <left_boundary_condition>0.</left_boundary_condition>
-            <right_boundary_type>Neumann</right_boundary_type>
+            <right_boundary_type>closed</right_boundary_type>
             <right_boundary_condition>0.</right_boundary_condition>
         </microbe0>
 
@@ -191,6 +191,17 @@
     <dissolution>
         <enabled>false</enabled>
     </dissolution>
+
+    <!-- The run's own scalar record: one row per interval with the total,
+         mean, min and max of every field, plus the mass held where
+         computeDensity cannot see it. Without this the case runs but
+         nothing about it can be checked afterwards. -->
+    <diagnostics>
+        <enabled>true</enabled>
+        <summary_csv>summary.csv</summary_csv>
+        <interval>50</interval>
+        <tolerance>1e-6</tolerance>
+    </diagnostics>
 
     <IO>
         <read_NS_file>false</read_NS_file>

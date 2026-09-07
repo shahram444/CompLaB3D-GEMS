@@ -39,6 +39,7 @@
 
 #include "complab3d_metabolic.hh"   /* MetabolicConfig: useTotals and the tableau */
 #include "complab3d_symbolic.hh"
+#include "complab3d_thermo.hh"      /* the F_T gate; a no-op unless <thermodynamics> is on */
 
 namespace plb {
 
@@ -82,6 +83,8 @@ public:
 
         /* scratch for the expression evaluator, allocated once for the whole sweep */
         std::vector<double> vars, out;
+        std::vector<double> tconc;                 /* the gate's view of the same chemistry */
+        const bool gated = complab_thermo::enabled();
 
         complab_sym::Runtime &RT = complab_sym::runtime();
 
@@ -119,6 +122,10 @@ public:
                     for (plint iS = 0; iS < subsNum; ++iS)
                         avail[iS] = cfg->useTotals ? cfg->totals.total(conc, iS) : conc[iS];
 
+                    /* The gate reads the same vector the rate law reads, so the energy it computes
+                     * is the energy of the chemistry the law was handed.  See complab3d_thermo.hh. */
+                    if (gated) complab_thermo::fillConc(avail, (int) subsNum, tconc);
+
                     /* ---- evaluate one expression set per organism present ------------------- */
                     for (size_t k = 0; k < bLoc.size(); ++k) {
                         const plint iB = bLoc[k];
@@ -138,11 +145,16 @@ public:
                         complab_sym::evaluate(*B.prog, vars, out, true, &RT.clamped);
                         ++RT.evaluations;
 
+                        /* The thermodynamic gate.  One number in [0,1] for this organism at this
+                         * composition; 1 when <thermodynamics> is off or this organism has no
+                         * block, in which case the arithmetic below is unchanged. */
+                        const T ft = gated ? (T) complab_thermo::gateFor((int) gM, tconc) : (T) 1;
+
                         /* mol/L/s and 1/s, both already scaled by the file's <units> */
                         for (size_t r = 0; r < out.size() && r < B.subsOfRate.size(); ++r) {
                             const int iS = B.subsOfRate[r];
-                            if (iS >= 0) req[iS] += (T) out[r] * dt;              /* signed increment */
-                            else         dB[iB] += (T) out[r] * bmass[iB] * dt;   /* growth */
+                            if (iS >= 0) req[iS] += (T) out[r] * ft * dt;              /* signed increment */
+                            else         dB[iB] += (T) out[r] * ft * bmass[iB] * dt;   /* growth */
                         }
                     }
 

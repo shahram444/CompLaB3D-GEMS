@@ -2,10 +2,12 @@
 #
 # 12_mixed_reaction_types  --  OFFLINE STEP
 #
-# Prepare the metabolic model for the ONE population that uses the linear program.
+# Prepare the metabolic model for the linear program.
 #
-# The other population takes its rate from defineKinetics.hh and needs nothing
-# prepared at all.
+# This case has ONE population, Toybug, on <reaction_type>glpk_and_kinetics</reaction_type>:
+# one organism on two rate paths. The linear program needs the model prepared
+# here; the other half of its rate comes from defineKinetics.hh and needs
+# nothing prepared at all.
 #
 # Run before the solver. pipeline.sh does it for you.
 
@@ -32,7 +34,7 @@ if [[ -z "$MODEL" ]]; then
 Nothing to prepare: this case ships input/toy_model.xml, already in the flat
 form the solver reads.
 
-    grep -c '<reaction' input/toy_model.xml     # four reactions, readable in full
+    cat input/toy_model.xml     # <nrxn> is 4, one column of <S> each, readable in full
 
 To convert a model of your own instead:
 

@@ -65,16 +65,26 @@ def main():
     np.savetxt(os.path.join(tmp, "samples.csv"), np.hstack([X, Y]),
                delimiter=",", header=hdr, comments="", fmt="%.17g")
 
-    gnn = os.path.join(tmp, "net.gnn")
-    rc = subprocess.run([sys.executable, os.path.join(TOOLS, "train_graphnet.py"),
-                         "--stoich", os.path.join(tmp, "stoich.csv"),
-                         "--data", os.path.join(tmp, "samples.csv"),
-                         "--out", gnn, "--width", "4", "--rounds", "2",
-                         "--epochs", "0", "--units", "per_hour",
-                         "--da", "1.0,0.35,2.5,0.7"],
-                        capture_output=True, text=True)
-    if rc.returncode:
-        print(rc.stdout, rc.stderr); return 1
+    # BOTH readouts are checked, not only the default.
+    #
+    # The species readout is what every .gnn written before the extent readout existed means, and
+    # those files must keep evaluating to exactly what they always did. A cross-check that only
+    # covers the new mode would let the old one drift silently, and the drift would surface as
+    # someone's year-old network quietly returning different numbers.
+    gnns = {}
+    for mode in ("extent", "species"):
+        g = os.path.join(tmp, "net_%s.gnn" % mode)
+        rc = subprocess.run([sys.executable, os.path.join(TOOLS, "train_graphnet.py"),
+                             "--stoich", os.path.join(tmp, "stoich.csv"),
+                             "--data", os.path.join(tmp, "samples.csv"),
+                             "--out", g, "--width", "4", "--rounds", "2",
+                             "--epochs", "0", "--units", "per_hour",
+                             "--readout", mode,
+                             "--da", "1.0,0.35,2.5,0.7"],
+                            capture_output=True, text=True)
+        if rc.returncode:
+            print(rc.stdout, rc.stderr); return 1
+        gnns[mode] = g
 
     src = os.path.join(tmp, "driver.cpp")
     open(src, "w").write(DRIVER)
@@ -86,31 +96,50 @@ def main():
     if cc.stderr.strip():
         print("compiler had something to say:\n" + cc.stderr)
 
-    net, M = tg.read_gnn(gnn)
-    # half inside the training box, half well outside it
-    C = np.vstack([rng.uniform(M["trainmin"], M["trainmax"], size=(30, nS)),
-                   rng.uniform(-1.0, 4.0, size=(20, nS))])
-    inp = os.path.join(tmp, "inputs.txt")
-    np.savetxt(inp, C, fmt="%.17g")
+    ok = True
+    for mode in ("extent", "species"):
+        gnn = gnns[mode]
+        net, M = tg.read_gnn(gnn)
+        # half inside the training box, half well outside it
+        C = np.vstack([rng.uniform(M["trainmin"], M["trainmax"], size=(30, nS)),
+                       rng.uniform(-1.0, 4.0, size=(20, nS))])
+        inp = os.path.join(tmp, "inputs_%s.txt" % mode)
+        np.savetxt(inp, C, fmt="%.17g")
 
-    Ypy = tg.predict(net, M, C)
-    run = subprocess.run([exe, gnn, inp], capture_output=True, text=True)
-    if run.returncode or not run.stdout.strip():
-        print(run.stdout, run.stderr); return 1
-    Ycc = np.array([[float(v) for v in ln.split()] for ln in run.stdout.strip().split("\n")])
+        Ypy = tg.predict(net, M, C)
+        run = subprocess.run([exe, gnn, inp], capture_output=True, text=True)
+        if run.returncode or not run.stdout.strip():
+            print(run.stdout, run.stderr); return 1
+        Ycc = np.array([[float(v) for v in ln.split()] for ln in run.stdout.strip().split("\n")])
 
-    if Ycc.shape != Ypy.shape:
-        print("shape mismatch: C++ %s, python %s" % (Ycc.shape, Ypy.shape)); return 1
+        if Ycc.shape != Ypy.shape:
+            print("shape mismatch: C++ %s, python %s" % (Ycc.shape, Ypy.shape)); return 1
 
-    d = np.abs(Ycc - Ypy)
-    scale = max(np.abs(Ypy).max(), 1e-300)
-    print("  %d inputs x %d outputs" % Ycc.shape)
-    print("  typical output magnitude   %.6e" % np.abs(Ypy).mean())
-    print("  largest absolute disagreement %.6e" % d.max())
-    print("  as a fraction of the largest output %.3e" % (d.max() / scale))
+        d = np.abs(Ycc - Ypy)
+        scale = max(np.abs(Ypy).max(), 1e-300)
+        print("  readout %s: %d inputs x %d outputs" % ((mode,) + Ycc.shape))
+        print("    typical output magnitude   %.6e" % np.abs(Ypy).mean())
+        print("    largest absolute disagreement %.6e" % d.max())
+        print("    as a fraction of the largest output %.3e" % (d.max() / scale))
 
-    ok = d.max() / scale < 1e-12
-    print("\n%s" % ("the two implementations agree to machine precision"
+        if mode == "extent":
+            # The claim of this readout, checked on the C++ side rather than the Python one: the
+            # rates it returns must lie in the column space of S, at every input including the
+            # ones outside the training box.
+            Sp = np.linalg.pinv(S)
+            R = Ycc[:, :nS]
+            off = R - (R @ Sp.T) @ S.T
+            den = float(np.sum(R ** 2))
+            dev = float(np.sqrt(np.sum(off ** 2) / den)) if den > 0 else 0.0
+            print("    off the stoichiometric subspace: %.3e of the rate norm" % dev)
+            if dev > 1e-12:
+                print("    ** extent mode is not stoichiometrically exact in the C++ evaluator **")
+                ok = False
+
+        if d.max() / scale >= 1e-12:
+            ok = False
+
+    print("\n%s" % ("the two implementations agree to machine precision, in both readouts"
                     if ok else "** THE TWO IMPLEMENTATIONS DISAGREE **"))
     return 0 if ok else 1
 

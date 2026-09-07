@@ -1,3 +1,0 @@
-vars a
-rate acetate = 0.3*growth
-rate growth = a

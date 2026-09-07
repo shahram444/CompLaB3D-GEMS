@@ -22,9 +22,22 @@
  *   is working.
  *
  * MASS BALANCE
- *   One A plus one B makes exactly one C, so at every step
+ *   One A plus one B makes exactly one C, so at every step the reaction
+ *   INCREMENTS satisfy
  *       dA + dC = 0   and   dB + dC = 0
- *   Any drift in that sum is a bug, not chemistry. runAllExamples.sh checks it.
+ *   Any drift in that sum is a bug, not chemistry.
+ *
+ *   [v1.3] Those sums are over the increments, meaning the amounts this law
+ *   adds to and removes from each field in one time step, and NOT over the
+ *   reported totals. Earlier text here said the totals must satisfy them.
+ *   They cannot: CompLaB.xml starts A and B at 0 and holds each at 1.0 on one
+ *   face with a Dirichlet condition, that is, a boundary that fixes the
+ *   concentration, so both are supplied from outside the domain and all three
+ *   totals rise. The checkable quantities are that C rises, C being the only
+ *   closed species, and that the increments balance. Naming A or B in a
+ *   <conserve> sum would guarantee a mass-balance FAIL that means nothing.
+ *   postprocess.py prints the change in each field after a run, which is where
+ *   you read it off.
  * ============================================================================= */
 #ifndef DEFINE_ABIOTIC_KINETICS_HH
 #define DEFINE_ABIOTIC_KINETICS_HH

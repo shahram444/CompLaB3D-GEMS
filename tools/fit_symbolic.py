@@ -384,12 +384,9 @@ def main():
     if args.out:
         lo, hi = X.min(axis=0), X.max(axis=0)
         with open(args.out, "w") as f:
-            # 'provenance' lines are kept by the loader and printed in the run log, so a
-            # result carries the fit that produced it.  '#' lines are plain comments and are
-            # dropped -- which is why the explanation below is a comment and these two are not.
-            f.write("provenance discovered by fit_symbolic.py on %s from %s\n"
+            f.write("# discovered by fit_symbolic.py on %s from %s\n"
                     % (datetime.date.today().isoformat(), args.data))
-            f.write("provenance %d nodes; typical error %.2f%%, worst %.2f%%, over %d samples (%s loss)\n"
+            f.write("# %d nodes; typical error %.2f%%, worst %.2f%%, over %d samples (%s loss)\n"
                     % (knee[0], knee[1], knee[2], X.shape[0], args.loss))
             f.write("# THE SUBSTRATE LINES ARE NOT WRITTEN FOR YOU. Add them by hand from the\n"
                     "# reaction stoichiometry, as multiples of this rate, so they stay in exact\n"
