@@ -5,3 +5,22 @@ output/
 *.pyc
 __pycache__/
 tests/t[0-9]*
+
+# ---------------------------------------------------------------------------
+# [v1.3.1] Run output never goes in the repository.
+#
+# `output/` above only catches a run made where the case expects it. A case run
+# somewhere else -- examples/03_abiotic_kinetics/Case3/, say, which is how it
+# actually happens -- was not covered, and 6 MB of .vti sat there waiting to be
+# committed by the next "commit all".
+#
+# These are results. They are reproducible from the code and the configuration,
+# they are large, and git stores every version of them forever. The geometry
+# files are the exception and stay tracked: *.dat is deliberately NOT listed
+# here, because 26 of them are inputs that cases need in order to run at all.
+# ---------------------------------------------------------------------------
+*.vti
+*.chk
+*.out
+*.err
+*.log

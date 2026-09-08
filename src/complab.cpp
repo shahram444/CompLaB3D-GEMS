@@ -2145,15 +2145,37 @@ int main(int argc, char **argv) {
             // Biomass status
             if (bfilm_count > 0) {
                 pcout << "║ BIOMASS:\n";
+                /* [v1.3.1] THE PEAK IS NOT GROWTH, and this line said it was.
+                 *
+                 * The closing report was corrected in v1.3 -- see the note beside
+                 * finalBmax in PHASE 7 -- and this per-iteration line, which computes the
+                 * same quantity from the same variable, was left behind. So example 06
+                 * printed "(-3.2699% growth)" every interval for a population whose total
+                 * biomass was rising the whole time: the patch spreads from 108 voxels to
+                 * 876, which lowers the peak and raises the total. A reader watching the
+                 * run would have concluded the organism was dying.
+                 *
+                 * Both numbers are printed now, each labelled for what it is, and the
+                 * average comes with them -- it was already being computed and thrown
+                 * away, which is also what the two unused-variable warnings on this block
+                 * were about. */
                 for (plint iM = 0; iM < bfilm_count; ++iM) {
-                    T bMin = computeMin(*computeDensity(vec_bFilm_lattices[iM]));
                     T bMax = computeMax(*computeDensity(vec_bFilm_lattices[iM]));
                     T bAvg = computeAverage(*computeDensity(vec_bFilm_lattices[iM]));
-                    T growth = (diag_initial_biomass > 0) ? ((bMax - diag_initial_biomass) / diag_initial_biomass * 100.0) : 0.0;
-                    pcout << "║   " << vec_microbes_names[iM] << ": max=" << std::scientific << bMax 
-                          << "/" << max_bMassRho << std::fixed << " (" << growth << "% growth)";
+                    T peakChange = (diag_initial_biomass > 0)
+                                 ? ((bMax - diag_initial_biomass) / diag_initial_biomass * 100.0) : 0.0;
+                    pcout << "║   " << vec_microbes_names[iM] << ": peak=" << std::scientific << bMax
+                          << "/" << max_bMassRho << " avg=" << bAvg
+                          << std::fixed << " (peak " << peakChange << "%)";
                     if (bMax > max_bMassRho) pcout << " [>Bmax!]";
                     pcout << "\n";
+                }
+                {
+                    const T runningTotal = complab_total_biomass(vec_bFilm_lattices, vec_bFree_lattices);
+                    const T totalChange = (diag_initial_total_biomass > 0)
+                                        ? ((runningTotal - diag_initial_total_biomass) / diag_initial_total_biomass * 100.0) : 0.0;
+                    pcout << "║   TOTAL biomass=" << std::scientific << runningTotal
+                          << std::fixed << " (" << totalChange << "%, THIS is the growth)\n";
                 }
                 pcout << "║   CA: triggers=" << diag_ca_triggers << " redistributions=" << diag_ca_redistributions << "\n";
             }
