@@ -138,7 +138,11 @@ def scan(outdir, info=None):
         if not m:
             continue
         name, it = m.group("name"), int(m.group("it"))
-        if name in known or name in ("mask", "maskLattice", "ageLattice", "nsLattice"):
+        # [v1.3.1] "rate_A" is already a final name. Without this it fell through to
+        # the index form below and came back as "rate_A0", the same mangling the
+        # v1.3 note above describes for concentrations.
+        if (name in known or name.startswith("rate_")
+                or name in ("mask", "maskLattice", "ageLattice", "nsLattice")):
             key = (name, -1)                     # -1: the name is already final
         else:
             mi = pat_idx.match(fn)
@@ -334,6 +338,13 @@ def main():
     lines.append("Sanity checks")
     for c in cols:
         if c.endswith("_min"):
+            # [v1.3.1] A rate field is SIGNED by construction: negative wherever the
+            # species is consumed, which for a substrate is everywhere the reaction
+            # runs. Counting that as "not physical" failed every reacting run the
+            # moment rate fields started being written -- the check is for
+            # concentrations, which cannot go below zero, and rate_* is not one.
+            if c.startswith("rate_"):
+                continue
             worst = min(r[c] for r in rows if c in r)
             if worst < -1e-9:
                 lines.append("  %-28s went NEGATIVE: %.3e  <- not physical"

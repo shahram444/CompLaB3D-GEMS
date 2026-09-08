@@ -532,7 +532,11 @@ inline bool prepareSurrogate(const Config &cfg, complab_srg::Network &net,
              * outputnames are exchange reaction ids (EX_ac_e), not substrate names, and nothing
              * maps one to the other. The compiled path in surrogateModel.hh can already use them,
              * because there a human writes that mapping out by hand. */
-            char nb[512];
+            /* [v1.3.1] 512 was 40 bytes short of the message, so GCC's -Wformat-truncation
+             * caught the last line ("evalAll and writes Fout), and rebuild.") being cut off
+             * at run time. The advisory only prints for a multi-output <weights_file>, which
+             * is why no test saw it. */
+            char nb[1024];
             std::snprintf(nb, sizeof(nb),
                           "  [SRG] this network returns growth and %d exchange flux(es), but the\n"
                           "  [SRG] run-time <weights_file> path USES ONLY THE GROWTH OUTPUT. The\n"

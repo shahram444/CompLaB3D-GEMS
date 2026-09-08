@@ -447,6 +447,22 @@ composition and fits the curve.
 Fields are written as VTI — velocity, every substrate, every microbe, and the
 material map — named from your own `<name_of_substrates>` rather than by index.
 
+**[v1.3.1] The reaction rate is written as a field too**, `rate_<species>_*.vti`,
+one per substrate on the same interval and the same box as the concentrations, in
+mol L⁻¹ s⁻¹: positive where the species is produced, negative where it is
+consumed. Until now a run recorded what the concentrations were, and how much
+reacted over the whole domain, but never *where* — and "the reaction is slow
+everywhere" and "the reaction is fast in a shell two voxels thick" have the same
+domain total. Every rate path feeds it, because they all accumulate into the same
+increment lattices: compiled kinetics, abiotic kinetics, the linear program on
+either back end, the surrogate, the symbolic law, the graph network, and mineral
+dissolution, each already multiplied by the thermodynamic factor where the gate is
+on. Runs with no reaction write nothing, so a diffusion-only case is unchanged,
+and `<track_performance>` suppresses these with every other field. Equilibrium
+speciation is deliberately excluded: it moves a total between complexes rather
+than creating or destroying it, and folding it in would put a large number in a
+field labelled "rate" for something that is not a reaction.
+
 The summary CSV gets one row per interval: porosity, and the total, mean, minimum
 and maximum of every substrate and microbe, **over open voxels only**, so a run
 that seals pore space is not divided by a moving denominator. Totals run over

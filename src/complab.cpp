@@ -1388,6 +1388,17 @@ int main(int argc, char **argv) {
     }
     dC0=dC;
 
+    /* [v1.3.1] Somewhere to keep the reaction rate so it can be written as a field.
+     *
+     *  dC[] is the increment lattice every rate path writes into, but it is RESET
+     *  twice per step -- once before the biotic block and again before the abiotic
+     *  one -- so at no single moment does it hold the whole step's reaction. These
+     *  accumulate across both, are zeroed once per step, and are written on the VTI
+     *  interval. One scalar field per substrate: 8 bytes a voxel, which is a fifth
+     *  of what the D3Q7 lattice beside it already costs. */
+    std::vector< MultiScalarField3D<T> > rateField(num_of_substrates,
+                                                   MultiScalarField3D<T>(nx, ny, nz, (T)0.));
+
     // Create biomass lattices
     pcout << "  [ADE] Creating " << bfilm_count << " biofilm + " << bfree_count << " planktonic lattices...\n";
     MultiBlockLattice3D<T,RXNDES> initbFilmLattice(nx, ny, nz, new AdvectionDiffusionBGKdynamics<T,RXNDES>(0.));
@@ -2052,6 +2063,47 @@ int main(int argc, char **argv) {
     for (plint iM = 0; iM < num_of_microbes; ++iM) pcout << "│   " << vec_microbes_names[iM] << "_*.vti\n";
     pcout << "└────────────────────────────────────────────────────────────────────────┘\n\n";
 
+    /* [v1.3.1] Whether this run has a rate worth mapping.
+     *
+     *  "If applicable" is the whole point: a diffusion-only case has substrates and
+     *  no reaction, and writing a file of zeros for it every interval would double
+     *  the output volume to say nothing. So the field is written when at least one
+     *  rate path is actually running -- biotic or abiotic, hand-written or learned,
+     *  a linear program or a dissolving mineral. All of them accumulate into the
+     *  same dC[] lattices, which is exactly why one accumulator catches every one
+     *  of them and no path had to be modified to be included.
+     *
+     *  <track_performance> already suppresses VTI output altogether; this follows it. */
+    bool rateFieldsOn = (num_of_substrates > 0) && (track_performance == 0) &&
+        (   (enable_kinetics && kns_count > 0)
+         || enable_abiotic_kinetics
+         || dissolCfg.enabled
+         || complab_sym::haveAbiotic() || complab_gnn::haveAbiotic()
+         || (mmcfg.enable_symbolic && mmcfg.sym_count > 0)
+         || (mmcfg.enable_graphnet && mmcfg.gnn_count > 0)
+         || (mmcfg.enable_surrogate && mmcfg.srg_count > 0)
+#ifdef COMPLAB_ENABLE_GLPK
+         || (mmcfg.enable_fba_glpk && mmcfg.glpk_count > 0)
+#endif
+#ifdef COMPLAB_ENABLE_COBRAPY
+         || (mmcfg.enable_fba_cobrapy && mmcfg.cpy_count > 0)
+#endif
+        );
+
+    /* Add whatever is sitting in dC[] right now into the step's accumulator. Called
+     * after each of the three apply processors, because dC[] is reset between them
+     * and the file is meant to carry the whole step's reaction, not its last third. */
+    auto accumulateRates = [&]() {
+        if (!rateFieldsOn) return;
+        for (plint iS = 0; iS < num_of_substrates; ++iS)
+            addInPlace(rateField[iS], *computeDensity(dC[iS], rateField[iS].getBoundingBox()));
+    };
+
+    if (rateFieldsOn) {
+        pcout << "│ Rate fields ON: rate_<species>_*.vti, mol/L/s, one per VTI interval\n";
+        pcout << "│   positive = produced, negative = consumed, same box as every other field\n";
+    }
+
     global::timer("ade").restart();
     util::ValueTracer<T> ns_convg2(1.0,1000.0,ns_converge_iT2);
     bool ns_saturate=0, percolationFlag=0;
@@ -2199,6 +2251,13 @@ int main(int argc, char **argv) {
 
         // Kinetics (biotic - only if enable_kinetics is true and biotic_mode)
         dC=dC0; dBp=dBp0; dBf=dBf0;
+        /* [v1.3.1] The rate accumulator is zeroed HERE, once, and not again until the
+         * next step -- unlike dC[] below it, which is reset a second time before the
+         * abiotic block. That is the whole difference between the two, and the reason
+         * the accumulator exists. */
+        if (rateFieldsOn)
+            for (plint iS = 0; iS < num_of_substrates; ++iS)
+                setToConstant(rateField[iS], rateField[iS].getBoundingBox(), (T)0.);
         if (enable_kinetics && kns_count > 0) {
             if (track_performance == 1) global::timer("kns").restart();
             applyProcessingFunctional(new run_kinetics<T,RXNDES>(nx, num_of_substrates, kns_count, ade_dt, vec_Kc_kns, vec_mu_kns, no_dynamics, bounce_back),
@@ -2301,6 +2360,7 @@ int main(int argc, char **argv) {
             if (track_performance == 1) global::timer("rxn").restart();
             applyProcessingFunctional(new update_rxnLattices<T,RXNDES>(nx, num_of_substrates, num_of_microbes, no_dynamics, bounce_back),
                                       reactionBox, ptr_update_rxnLattices);
+            accumulateRates();   /* [v1.3.1] the biotic share, before dC[] is reset below */
             if (track_performance == 1) { T rxntime=global::timer("rxn").getTime(); global::timer("rxn").stop(); if (kns_count>0) knstime+=rxntime; }
         }
 
@@ -2373,6 +2433,7 @@ int main(int argc, char **argv) {
             // Apply concentration changes
             applyProcessingFunctional(new update_abiotic_rxnLattices<T,RXNDES>(nx, num_of_substrates, no_dynamics, bounce_back, vec_immobile),
                                       reactionBox, ptr_abiotic_kns_lattices);
+            accumulateRates();   /* [v1.3.1] the abiotic share, added on top of the biotic one */
             if (track_performance == 1) { knstime += global::timer("abiotic_kns").getTime(); global::timer("abiotic_kns").stop(); }
         }
 
@@ -2391,6 +2452,25 @@ int main(int argc, char **argv) {
                                       reactionBox, ptr_dissol);
             applyProcessingFunctional(new update_abiotic_rxnLattices<T,RXNDES>(nx, num_of_substrates, no_dynamics, bounce_back, vec_immobile),
                                       reactionBox, ptr_abiotic_kns_lattices);
+            accumulateRates();   /* [v1.3.1] dissolution on its own, when the abiotic block is off */
+        }
+
+        /* [v1.3.1] The rate snapshot.
+         *
+         *  Written HERE, at the end of the reaction section, rather than up in the VTI
+         *  block with the concentrations. The VTI block runs BEFORE the reaction, so a
+         *  rate written there would be the PREVIOUS step's -- one interval stale, and
+         *  identically zero in the very first file. Written here it carries the rate of
+         *  the step whose number is in its filename, and it lands beside the
+         *  concentrations of that same iteration because both use `iT`.
+         *
+         *  Equilibrium speciation is deliberately not counted. It redistributes a total
+         *  between complexes rather than creating or destroying it, so folding it in
+         *  would put a large number in a field labelled "reaction rate" for something
+         *  that is not a reaction. */
+        if (rateFieldsOn && ade_VTI_iTer > 0 && iT % ade_VTI_iTer == 0) {
+            for (plint iS = 0; iS < num_of_substrates; ++iS)
+                writeRateVTI(rateField[iS], iT, "rate_" + vec_subs_names[iS] + "_", (T)1./ade_dt);
         }
 
         // Equilibrium chemistry (runs regardless of enable_kinetics - controlled separately)
@@ -3108,6 +3188,13 @@ int main(int argc, char **argv) {
             saveBinaryBlock(vec_substr_lattices[iS], str_outputDir+ade_filename+std::to_string(iS)+"_"+std::to_string(iT)+".chk");
             pcout << "    [OK] " << vec_subs_names[iS] << " saved\n";
         }
+        /* [v1.3.1] The closing rate snapshot, so every concentration file has a rate
+         * file beside it at the same iteration. This one carries the rate of the LAST
+         * step the loop ran, which is the most recent one there is -- the loop has
+         * already exited, so there is no step numbered iT to take it from. */
+        if (rateFieldsOn)
+            for (plint iS = 0; iS < num_of_substrates; ++iS)
+                writeRateVTI(rateField[iS], iT, "rate_" + vec_subs_names[iS] + "_", (T)1./ade_dt);
         tmpIT0=0; tmpIT1=0;
         for (plint iM = 0; iM < num_of_microbes; ++iM) {
             if (bmass_type[iM]==1) {

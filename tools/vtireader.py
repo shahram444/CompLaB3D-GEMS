@@ -153,8 +153,17 @@ def _read_with_vtk(path):
         a = pd.GetArray(i)
         if a is None:
             continue
+        # [v1.3.1] A VECTOR array has one tuple per point and several components
+        # per tuple, so its flat length is 3*nx*ny*nz and the scalar reshape below
+        # raised ValueError: cannot reshape array of size 14976 into shape
+        # (8,26,24). Every run with flow writes one -- nsLattice_*.vti carries
+        # "velocity" beside "velocityNorm" -- so postprocess.py crashed on any case
+        # with Pe > 0 the moment it reached that file, which is most of them.
+        # Components are kept as a trailing axis: (nz, ny, nx, nComp).
+        v = vtk_to_numpy(a)
+        nc = a.GetNumberOfComponents()
         arrays[a.GetName() or ("array%d" % i)] = \
-            vtk_to_numpy(a).reshape((nz, ny, nx))
+            v.reshape((nz, ny, nx) if nc == 1 else (nz, ny, nx, nc))
     return (nx, ny, nz), img.GetSpacing(), img.GetOrigin(), arrays
 
 

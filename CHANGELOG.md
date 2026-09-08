@@ -1,5 +1,66 @@
 # Changelog
 
+## v1.3.1: the reaction rate becomes a field
+
+Until now a run recorded WHAT the concentrations were, and in the log and
+summary.csv HOW MUCH reacted over the whole domain, but never WHERE. Those are
+not the same question: "the reaction is slow everywhere" and "the reaction is
+fast in a shell two voxels thick and absent elsewhere" produce the same domain
+total and mean completely different things about a pore.
+
+### Added
+
+- **`rate_<species>_*.vti`**, one per substrate, written on the same interval and
+  the same box as the concentrations, in mol L^-1 s^-1: positive where the
+  species is produced, negative where it is consumed. Every rate path feeds it
+  and none had to be modified to be included, because they all already accumulate
+  into the same `dC[]` increment lattices: compiled kinetics, abiotic kinetics,
+  GLPK, COBRApy, the surrogate, the symbolic law, the graph network, and mineral
+  dissolution, each carrying the thermodynamic factor where the gate is on.
+
+  The one thing that needed building is the accumulator. `dC[]` is reset TWICE
+  per step, once before the biotic block and again before the abiotic one, so at
+  no single moment does it hold the whole step's reaction; a scalar field per
+  substrate is zeroed once per step and added to after each of the three apply
+  processors. It costs 8 bytes a voxel, a fifth of the D3Q7 lattice beside it.
+
+  Written at the END of the reaction section rather than in the VTI block with
+  the concentrations, because that block runs BEFORE the reaction: a rate written
+  there would be the previous step's, one interval stale and identically zero in
+  the first file.
+
+  Runs with no reaction write nothing, so a diffusion-only case is byte-for-byte
+  what it was. Verified on example 03: `rate_C / rate_A` is exactly -1.000000 in
+  every reacting voxel, which is that case's A + B -> C stoichiometry, and
+  example 02 produces no rate file at all.
+
+  Equilibrium speciation is deliberately excluded. It redistributes a total
+  between complexes rather than creating or destroying it, and folding it in
+  would put a large number in a field labelled "rate" for something that is not
+  a reaction.
+
+### Fixed
+
+- **`tools/vtireader.py` crashed on any run that wrote a flow field.** A vector
+  array has several components per point, so its flat length is `3*nx*ny*nz` and
+  the scalar reshape raised `cannot reshape array of size 14976 into shape
+  (8,26,24)`. Every run with `Pe > 0` writes `nsLattice_*.vti`, which carries
+  `velocity` beside `velocityNorm`, so `tools/postprocess.py` died the moment it
+  reached that file -- on most of the shipped cases. Components are now kept as a
+  trailing axis, which is the shape `postprocess.py` was already written to
+  expect: it has handled `a.ndim == 4` by taking the norm since v1.2, and that
+  branch had never once been reachable.
+- **A start-up advisory was truncated by 40 bytes.** The multi-output surrogate
+  message in `complab3d_integration.hh` is 552 bytes and its buffer was 512, so
+  its last line never printed. GCC's `-Wformat-truncation` had been reporting it
+  all along.
+- **`postprocess.py` failed every reacting run once rate fields existed.** Its
+  always-on sanity check flags any field that goes negative as "not physical",
+  which is right for a concentration and wrong for a signed rate: a substrate's
+  rate is negative wherever it is consumed. `rate_*` is now excluded from that
+  check, and recognised as a final field name rather than mangled to `rate_A0`.
+
+
 ## v1.3: a correctness pass over the whole tree
 
 No new capability in this pass. What follows is the result of reading every

@@ -119,6 +119,33 @@ void writeAdvVTI(MultiBlockLattice3D<T,RXNDES>& lattice, plint iter, std::string
     vtkOut.writeData<T>(*computeDensity(lattice, Box3D(1,nx-2,0,ny-1,0,nz-1)), "Density", 1.);
 }
 
+/* [v1.3.1] One snapshot of the per-voxel reaction rate for one substrate.
+ *
+ *  Until now a run recorded WHAT the concentrations were and, in the log and in
+ *  summary.csv, HOW MUCH reacted over the whole domain -- but never WHERE. A map
+ *  of the rate is the one field that separates "the reaction is slow" from "the
+ *  reaction is fast in a shell two voxels thick and absent everywhere else",
+ *  and those two have the same domain total.
+ *
+ *  The field passed in holds the increment accumulated over one reaction step,
+ *  in mol/L. `scale` is 1/dt, so what lands in the file is mol/L/s: positive
+ *  where the species is produced, negative where it is consumed. It is written
+ *  on the same box as every other field so the files overlay voxel for voxel.
+ *
+ *  This costs nothing to compute. The increments already exist -- the reaction
+ *  processors accumulate them into the dC lattices and the update processors
+ *  apply them -- so all that was missing was somewhere to keep the sum and a
+ *  writer for it. */
+void writeRateVTI(MultiScalarField3D<T>& field, plint iter, std::string nameid, T scale)
+{
+    const plint nx = field.getNx();
+    const plint ny = field.getNy();
+    const plint nz = field.getNz();
+
+    VtkImageOutput3D<T> vtkOut(createFileName(nameid, iter, 7), 1.);
+    vtkOut.writeData<T>(*extractSubDomain(field, Box3D(1,nx-2,0,ny-1,0,nz-1)), "Rate", scale);
+}
+
 void writeScalarVTI(MultiScalarField3D<int>& field)
 {
     const plint nx = field.getNx();
