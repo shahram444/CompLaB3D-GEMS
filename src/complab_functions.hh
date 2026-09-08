@@ -136,14 +136,28 @@ void writeAdvVTI(MultiBlockLattice3D<T,RXNDES>& lattice, plint iter, std::string
  *  processors accumulate them into the dC lattices and the update processors
  *  apply them -- so all that was missing was somewhere to keep the sum and a
  *  writer for it. */
-void writeRateVTI(MultiScalarField3D<T>& field, plint iter, std::string nameid, T scale)
+/* [v1.3.2] One writer for every derived scalar field. The x range starts at 1 and stops at nx-2
+ * because column 0 and column nx-1 are the inlet and outlet planes, which hold boundary values
+ * rather than computed ones -- the same crop writeAdvVTI uses, so a derived field lines up voxel
+ * for voxel with the concentration file of the same iteration in ParaView.
+ *
+ * `arrayName` is what ParaView shows in its field list. It is deliberately NOT the file name:
+ * rate_A_0000900.vti and dG_MIC1_0000900.vti carry arrays called "Rate" and "DeltaG", so a
+ * colour bar keeps its meaning when the user steps from one species to the next. */
+void writeFieldVTI(MultiScalarField3D<T>& field, plint iter, std::string nameid,
+                   T scale, std::string arrayName)
 {
     const plint nx = field.getNx();
     const plint ny = field.getNy();
     const plint nz = field.getNz();
 
     VtkImageOutput3D<T> vtkOut(createFileName(nameid, iter, 7), 1.);
-    vtkOut.writeData<T>(*extractSubDomain(field, Box3D(1,nx-2,0,ny-1,0,nz-1)), "Rate", scale);
+    vtkOut.writeData<T>(*extractSubDomain(field, Box3D(1,nx-2,0,ny-1,0,nz-1)), arrayName, scale);
+}
+
+void writeRateVTI(MultiScalarField3D<T>& field, plint iter, std::string nameid, T scale)
+{
+    writeFieldVTI(field, iter, nameid, scale, "Rate");
 }
 
 void writeScalarVTI(MultiScalarField3D<int>& field)

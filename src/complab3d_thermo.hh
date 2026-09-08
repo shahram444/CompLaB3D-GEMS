@@ -691,6 +691,41 @@ inline double gateFor(int globalMicrobe, const std::vector<double> &conc, double
     return F;
 }
 
+/* ------------------------------------------------------------------------------------------------
+ *  [v1.3.2]  THE SAME ARITHMETIC, WITHOUT THE COUNTERS
+ *
+ *  The energy snapshot walks every fluid voxel once per output interval and asks for dG and F_T
+ *  there.  It must not go through gateFor().  That call feeds the end-of-run line
+ *
+ *      [THM] N gate evaluations, mean F_T ..., range ...
+ *
+ *  which is meant to describe the reaction over the run.  A snapshot pass would add millions of
+ *  evaluations that no rate law ever used, and the mean would then depend on how often the user
+ *  asked for output -- a statistic about the write schedule wearing the name of a statistic about
+ *  the chemistry.  So these two do the identical arithmetic and touch no counter.
+ *
+ *  specOf() also answers "does this organism have a block in the .thm file at all", which is what
+ *  decides whether a pair of energy fields is allocated for it.
+ * ---------------------------------------------------------------------------------------------- */
+inline int specOf(int globalMicrobe)
+{
+    Runtime &R = runtime();
+    if (!R.active) return -1;
+    if (globalMicrobe < 0 || globalMicrobe >= (int) R.specOfMicrobe.size()) return -1;
+    return R.specOfMicrobe[(size_t) globalMicrobe];
+}
+
+/* false when this organism is ungated, in which case dGout and ftOut are left alone. */
+inline bool gateProbe(int globalMicrobe, const std::vector<double> &conc,
+                      double &dGout, double &ftOut)
+{
+    const int si = specOf(globalMicrobe);
+    if (si < 0) return false;
+    Runtime &R = runtime();
+    ftOut = factor(R.model.specs[(size_t) si], R.model, conc, &dGout);
+    return true;
+}
+
 /* The energy yield for one organism, or a negative number when this organism has no yield block --
  * which the caller reads as "keep whatever yield you were going to use". */
 inline double yieldFor(int globalMicrobe, const std::vector<double> &conc)

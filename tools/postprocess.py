@@ -141,7 +141,8 @@ def scan(outdir, info=None):
         # [v1.3.1] "rate_A" is already a final name. Without this it fell through to
         # the index form below and came back as "rate_A0", the same mangling the
         # v1.3 note above describes for concentrations.
-        if (name in known or name.startswith("rate_")
+        # [v1.3.2] dG_<microbe> and FT_<microbe> are final names for the same reason.
+        if (name in known or name.startswith(("rate_", "dG_", "FT_"))
                 or name in ("mask", "maskLattice", "ageLattice", "nsLattice")):
             key = (name, -1)                     # -1: the name is already final
         else:
@@ -343,7 +344,10 @@ def main():
             # runs. Counting that as "not physical" failed every reacting run the
             # moment rate fields started being written -- the check is for
             # concentrations, which cannot go below zero, and rate_* is not one.
-            if c.startswith("rate_"):
+            # [v1.3.2] dG_* is negative wherever the reaction yields any energy at all,
+            # which is the whole point of it, so it is exempt for the same reason.
+            # FT_* is bounded to [0,1] by construction and never trips this anyway.
+            if c.startswith(("rate_", "dG_", "FT_")):
                 continue
             worst = min(r[c] for r in rows if c in r)
             if worst < -1e-9:

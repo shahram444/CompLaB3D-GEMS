@@ -60,6 +60,7 @@
 #include "complab3d_integration.hh"
 #include "complab3d_outerfaces.hh"     // the four faces nobody gave a boundary condition
 #include "complab3d_upscale.hh"        // one aggregate -> an effectiveness factor
+#include "complab3d_energyfield.hh"   // dG and F_T as fields, when <thermodynamics> is on
 #include "complab3d_srgtrain_glpk.hh"  // [NEW] the LP callback that in-run surrogate training uses
 #include <algorithm>
 #include <cctype>
@@ -2104,6 +2105,59 @@ int main(int argc, char **argv) {
         pcout << "│   positive = produced, negative = consumed, same box as every other field\n";
     }
 
+    /* [v1.3.2] THE ENERGY FIELDS.
+     *
+     *  Allocated only for organisms that have a block in the .thm file, and only when VTI
+     *  output is on at all.  Two fields per gated organism, recomputed from the standing
+     *  concentrations at each write, so the steps in between cost nothing.  See
+     *  complab3d_energyfield.hh for why this is a snapshot and the rate field is not. */
+    const std::vector<int> gatedMic = complab_efield::gatedMicrobes((int) num_of_microbes);
+    const bool energyFieldsOn = !gatedMic.empty() && (track_performance == 0)
+                             && (num_of_substrates > 0) && (ade_VTI_iTer > 0);
+
+    std::vector< MultiScalarField3D<T> > dGField(
+        energyFieldsOn ? gatedMic.size() : 0, MultiScalarField3D<T>(nx, ny, nz, (T)0.));
+    std::vector< MultiScalarField3D<T> > ftField(
+        energyFieldsOn ? gatedMic.size() : 0, MultiScalarField3D<T>(nx, ny, nz, (T)0.));
+
+    /* One block list per gated organism: [C.., mask, dG, F_T], the order
+     * computeEnergyField3D::processGenericBlocks() expects. */
+    std::vector< std::vector<MultiBlock3D*> > ptr_energy;
+    if (energyFieldsOn) {
+        for (size_t k = 0; k < gatedMic.size(); ++k) {
+            std::vector<MultiBlock3D*> v;
+            for (plint iS = 0; iS < num_of_substrates; ++iS) v.push_back(&vec_substr_lattices[iS]);
+            v.push_back(&maskLattice);
+            v.push_back(&dGField[k]);
+            v.push_back(&ftField[k]);
+            ptr_energy.push_back(v);
+        }
+        pcout << "│ Energy fields ON: dG_<microbe>_*.vti (kJ/mol) and FT_<microbe>_*.vti (0..1)\n";
+        pcout << "│   dG is the energy the reaction yields at the LOCAL composition, negative\n";
+        pcout << "│   when it yields anything; F_T is the factor the rate was multiplied by.\n";
+        pcout << "│   Zero in either file means solid, bounce-back or an outer column, not a\n";
+        pcout << "│   reaction sitting exactly at equilibrium.\n";
+        pcout << "│   Basis: lattice concentrations scaled by <concentration_scale>. An FBA path\n";
+        pcout << "│   set to a TOTAL basis gated on speciated totals, so its field and its gate\n";
+        pcout << "│   agree only where complexation is weak.\n";
+        for (size_t k = 0; k < gatedMic.size(); ++k)
+            pcout << "│   [" << gatedMic[k] << "] " << vec_microbes_names[gatedMic[k]] << "\n";
+    }
+
+    /* Recompute both fields from the concentrations standing right now, then write them. */
+    auto writeEnergyFields = [&](plint iter) {
+        if (!energyFieldsOn) return;
+        for (size_t k = 0; k < gatedMic.size(); ++k) {
+            applyProcessingFunctional(
+                new complab_efield::computeEnergyField3D<T,RXNDES>(
+                        nx, num_of_substrates, gatedMic[k], no_dynamics, bounce_back),
+                dGField[k].getBoundingBox(), ptr_energy[k]);
+            const std::string nm = vec_microbes_names[gatedMic[k]];
+            writeFieldVTI(dGField[k], iter, "dG_" + nm + "_", (T)1., "DeltaG");
+            writeFieldVTI(ftField[k], iter, "FT_" + nm + "_", (T)1., "F_T");
+        }
+    };
+
     global::timer("ade").restart();
     util::ValueTracer<T> ns_convg2(1.0,1000.0,ns_converge_iT2);
     bool ns_saturate=0, percolationFlag=0;
@@ -2218,6 +2272,13 @@ int main(int argc, char **argv) {
                     else { writeAdvVTI(vec_bFree_lattices[tmpIT1], iT, vec_microbes_names[iM]+"_"); ++tmpIT1; }
                 }
                 if (Pe > thrd) writeNsVTI(nsLattice, iT, "nsLattice_");
+                /* [v1.3.2] Written HERE, beside the concentrations, and not down in the rate
+                 * block. dG and F_T are functions of the concentrations at one instant, so
+                 * they belong with the file that holds those concentrations: a voxel's dG in
+                 * this file is exactly the number its own species files at the same iteration
+                 * produce. The rate field is an interval average and is written after the
+                 * reaction for the opposite reason. */
+                writeEnergyFields(iT);
             }
             adetime += global::timer("ade").getTime();
             pcout << "  Wall clock: " << global::timer("ade").getTime() << " s\n";
@@ -3217,6 +3278,8 @@ int main(int argc, char **argv) {
         if (rateFieldsOn)
             for (plint iS = 0; iS < num_of_substrates; ++iS)
                 writeRateVTI(rateField[iS], iT, "rate_" + vec_subs_names[iS] + "_", (T)1./ade_dt);
+        /* [v1.3.2] and the closing energy snapshot, from the concentrations just written. */
+        writeEnergyFields(iT);
         tmpIT0=0; tmpIT1=0;
         for (plint iM = 0; iM < num_of_microbes; ++iM) {
             if (bmass_type[iM]==1) {

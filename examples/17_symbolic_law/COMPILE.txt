@@ -1,0 +1,110 @@
+===========================================================================
+ 17_symbolic_law  --  HOW TO COMPILE ON SAPELO2
+===========================================================================
+
+ A rate law read from a symbolic expression file instead of compiled in.
+
+ Compiling is done ONCE, by hand, in an interactive session. The solver run
+ itself is a batch job: see run.sh in this folder, submitted with sbatch.
+
+ Copy the commands below one block at a time. Lines starting with # are
+ explanation, not commands.
+
+---------------------------------------------------------------------------
+ STEP 1.  GET AN INTERACTIVE NODE
+---------------------------------------------------------------------------
+
+ # Never compile on the login node: it is shared, and a parallel build will
+ # be killed. Ask for a node with a few cores and half an hour.
+
+   interact -c 8 --mem 16gb --time 1:00:00
+
+---------------------------------------------------------------------------
+ STEP 2.  LOAD THE MODULES
+---------------------------------------------------------------------------
+
+ # These must be the SAME modules run.sh loads, or the executable will not
+ # find its libraries at run time.
+
+   ml purge
+   ml foss/2022a                              # GCC 11.3 and OpenMPI
+   ml CMake/3.23.1-GCCcore-11.3.0             # cmake is not on the default PATH
+   ml HDF5/1.12.2-gompi-2022a                 # Palabos links against it
+   ml ImageMagick/7.1.0-37-GCCcore-11.3.0     # only used by Palabos image output
+   ml SciPy-bundle/2022.05-foss-2022a         # provides python3
+
+---------------------------------------------------------------------------
+ STEP 3.  GO TO THE CASE FOLDER
+---------------------------------------------------------------------------
+
+ # Adjust the path to wherever you unpacked the repository.
+
+   cd /scratch/$USER/Complab3D-GEM/examples/17_symbolic_law
+
+---------------------------------------------------------------------------
+ STEP 4.  THE OFFLINE STEP  (optional, runs once)
+---------------------------------------------------------------------------
+
+ # This case ships with its trained model already in place, so you can skip
+ # this. Run it only if you want to regenerate that model yourself. It needs
+ # Python packages that the solver itself does not.
+
+   ./offline.sh
+
+---------------------------------------------------------------------------
+ STEP 5.  CONFIGURE
+---------------------------------------------------------------------------
+
+ # cmake finds the compiler, MPI and Palabos, and writes a build/ directory.
+ # PALABOS_ROOT must point at your Palabos v2.3.0 SOURCE tree, the one that
+ # has a src/ directory inside it.
+
+   cmake -B build -S . \
+         -DCMAKE_BUILD_TYPE=Release \
+         -DPALABOS_ROOT=/scratch/$USER/palabos-v2.3.0
+
+ # This case needs no optional solver. For reference, cases 09, 12, 21 and 22
+ # add -DENABLE_GLPK=ON here, and case 10 adds -DENABLE_COBRAPY=ON.
+
+---------------------------------------------------------------------------
+ STEP 6.  COMPILE
+---------------------------------------------------------------------------
+
+ # -j8 compiles eight files at once, which is why we asked for 8 cores above.
+ # Plain "make" would use one core and take roughly eight times as long.
+
+   cmake --build build -j8
+
+ # When it finishes you should have an executable called complab in this
+ # folder. Check it:
+
+   ls -l complab
+
+---------------------------------------------------------------------------
+ WHEN YOU MUST COME BACK AND RECOMPILE
+---------------------------------------------------------------------------
+
+ # Almost never, for this case. Everything it reads is data:
+ #
+ #   edit CompLaB.xml                  ->  no recompile
+ #   edit input/geometry.dat           ->  no recompile
+ #   edit anything in input/           ->  no recompile
+ #
+ # You only recompile if you change a solver source under src/, or if you
+ # need to turn a different optional path on or off with a cmake flag.
+
+---------------------------------------------------------------------------
+ STEP 7.  LEAVE THE INTERACTIVE SESSION AND SUBMIT
+---------------------------------------------------------------------------
+
+   exit                                       # give the interactive node back
+   cd /scratch/$USER/Complab3D-GEM/examples/17_symbolic_law
+   sbatch run.sh                              # queue the solver run
+   squeue -u $USER                            # watch it
+
+ # When it finishes, the two files worth reading first are:
+ #
+ #   output/run.log       the whole run, including the start-up echo
+ #   output/checks.log    postprocess.py saying whether to believe it
+
+===========================================================================

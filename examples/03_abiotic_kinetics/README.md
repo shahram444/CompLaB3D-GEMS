@@ -1,153 +1,249 @@
-# 03 — a chemical reaction with no organisms in it
+# 03 - Abiotic kinetics: a chemical reaction with no organisms in it
 
-## 1. What this example does
+## 1. The scenario
 
-This is the first case with a reaction. Three species diffuse through the pore
-space and two of them combine to make the third:
+Two dissolved species enter a pore space from opposite sides. They diffuse
+toward each other, meet somewhere in the middle, and where they overlap they
+react to make a third species that cannot leave.
 
-**A + B → C**
+If you have ever set up a counter-diffusion experiment in a gel plug or a
+diffusion cell, this is that experiment. A reactive-transport modeller will
+recognise it as the simplest possible reactive mixing problem: two solutes
+supplied from fixed-concentration reservoirs at either end, a second-order
+reaction where they overlap, and a product that accumulates in a band.
 
-The rate is second order, one order in each reactant, coded in
-`kinetics/defineAbioticKinetics.hh`:
+Nothing is alive here. No biomass field is allocated, no organism appears in any
+equation, and the pore space never changes shape. This is the case to read first
+if your chemistry is mineral reactions, redox couples, or sorption rather than
+microbiology.
+
+## 2. The picture
 
 ```
-    R   =   k · [A] · [B]              k = 5.0e-2  L mol-1 s-1
+   24 x 26 x 8 voxels at 10 um per voxel  =  240 x 260 x 80 um
 
-    dA/dt = -R        dB/dt = -R        dC/dt = +R
+   x=0                                                      x=23
+    |                                                         |
+ A  |>>>>>>>>>>>>>>>>>>  ####  <<<<<<<<<<<<<<<<<<<<<<<<<<<<<< | B
+ 1.0|>>>>>>>>>>>>>>>>>>  ####  <<<<<<<<<<<<<<<<<<<<<<<<<<<<<< |1.0
+ held|>>>>>>>>>>>>>>>  ########  <<<<<<<<<<<<<<<<<<<<<<<<<<<< |held
+    |                                                         |
+    +---------------------------------------------------------+
+      A diffuses right  ->        <-  B diffuses left
+                        C is made where they overlap
+
+      #### = solid grains        porosity 0.6346, 3168 open voxels
 ```
 
-There are no organisms. `<biotic_mode>` is false, so no biomass field is
-allocated at all and no rate path involving a microbe is compiled into the step.
-This is the abiotic route: `<enable_abiotic_kinetics>` and one header you write
-yourself, for mineral reactions, redox couples, sorption — anything that happens
-in water whether or not something is alive.
+Only the two end faces `x = 0` and `x = 23` carry boundary conditions. The other
+four faces are an inert wall, drawn by `preprocess.py`, because the solver gives
+those faces nothing at all and a face with no condition reads back values that
+nothing updates.
 
-**What makes it checkable.** The stoichiometry is 1:1:1, so every mole of A
-consumed by the reaction appears as a mole of C, and the reaction takes A and B
-away in equal measure. **[v1.3]** That constraint applies to the per step
-*reaction increments*, the amounts the rate law adds to and removes from each
-field in one time step, and not to the reported totals. A and B are each held at
-a Dirichlet boundary, meaning a boundary that holds the concentration at a fixed
-value, so both are fed from outside the domain and all three totals rise. This
-case also leaves the checking to `postprocess.py`: its `<diagnostics>` block has
-`<enabled>`, `<summary_csv>`, `<interval>` and `<tolerance>` but no `<conserve>`
-entry, and the solver only checks a sum that a `<conserve>` tag creates, so
-nothing is checked every interval here. Earlier text claimed `<diagnostics>`
-checked these sums every interval; it does not.
-
-## 2. What is simulated
+## 3. What goes in
 
 | | |
 |---|---|
-| **Geometry** | 24 x 26 x 8 voxels at 10 um, 3168 open (porosity 0.6346) |
-| **Flow** | **not solved** — `<Peclet>0</Peclet>`, so transport is pure diffusion |
-| **Solute transport** | D3Q7 advection-diffusion, one lattice per species — 3 of them: `A`, `B`, `C` |
-| **Abiotic reaction** | `defineAbioticKinetics.hh`, compiled in |
-| **Biotic reaction** | none — `<biotic_mode>false</biotic_mode>` |
-| **Biomass** | none; no biomass field is allocated |
-| **Geometry evolution** | none — the pore space is fixed |
-| **Run length** | 1500 advection-diffusion steps |
+| **Domain** | 24 x 26 x 8 voxels, dx = 10 um, 3168 open voxels, porosity 0.6346 |
+| **Flow** | none. `<Peclet>0</Peclet>`, so transport is pure diffusion |
+| **Transport** | D3Q7 advection-diffusion lattice Boltzmann, one lattice per species |
+| **Diffusivity** | 5e-10 m2/s for all three species, in pore and in biofilm alike |
+| **Chemistry** | `kinetics/defineAbioticKinetics.hh`, compiled into the executable |
+| **Biology** | none. `<biotic_mode>false</biotic_mode>`, no biomass field allocated |
+| **Geometry change** | none. The pore space is fixed for the whole run |
+| **Run length** | 1500 advection-diffusion steps, output every 200 |
 
-Everything above is read from `CompLaB.xml` and `input/geometry.dat`; nothing in
-that table is a description that can drift from the case.
+Boundary conditions, which are the whole experiment:
 
-## 3. Where the reaction is allowed to happen
+| Species | Left face (x = 0) | Right face (x = 23) | Initial |
+|---|---|---|---|
+| **A** | Dirichlet, held at 1.0 | Neumann, zero gradient | 0 |
+| **B** | Neumann, zero gradient | Dirichlet, held at 1.0 | 0 |
+| **C** | closed | closed | 0 |
 
-The rate law's first line is a guard, and it is the one thing to copy when you
-write your own:
+*Dirichlet* means the concentration at that face is pinned to a value no matter
+what the interior does, which is a reservoir. *Neumann with a zero gradient*
+means nothing flows across that face, which is an open outlet the species never
+reaches. *Closed* means the same thing on both ends: C is made inside the domain
+and stays there.
+
+## 4. The reaction
+
+One second-order reaction, one order in each reactant:
+
+**A + B -> C**
+
+```
+    R  =  k · [A] · [B]                  k = 5.0e-2  L mol-1 s-1
+
+    dA/dt = -R          dB/dt = -R          dC/dt = +R
+```
+
+That is the entire chemistry, and it is fifteen lines of C++ in
+`kinetics/defineAbioticKinetics.hh`:
 
 ```cpp
     if (C.size() < 3 || subsR.size() < 3) return;   // a short substrate list
     if (mask < 2) return;                           // solid or wall voxel
+
+    const double A = std::max(C[0], 0.0);           // floor tiny negatives
+    const double B = std::max(C[1], 0.0);
+    const double R = ExampleAbiotic::k_AB * A * B;  // mol/L/s
+
+    subsR[0] = -R;   subsR[1] = -R;   subsR[2] = +R;
 ```
 
-The first stops the law reading past the end of a concentration vector shorter
-than it expects — `tests/check_kinetics_bounds.py` compiles every shipped rate
-law under AddressSanitizer and calls it with substrate lists from length 0 to 5
-to prove this holds. The second keeps chemistry out of walls and grains.
+The first two lines are guards and are the part to copy when you write your own
+rate law. The first stops the law reading past the end of a concentration vector
+shorter than it expects. The second keeps chemistry out of solid grains and
+walls. The floor at zero matters because the transport solver can leave a value
+fractionally below zero, and a rate law that multiplies two such values turns a
+rounding artefact into a reaction.
 
-The concentrations are also floored at zero before use. The advection–diffusion
-solver can leave a value fractionally below zero, and a rate law that squares or
-multiplies such a value turns a rounding artefact into a reaction.
+## 5. What happens each step
 
-## 4. What to check
+The solver repeats this 1500 times:
 
-1. **[v1.3] all three totals rise, and C rises.** Earlier text told you to check
-   that "A and B fall together" and that "C rises by the same amount A fell".
-   Neither can happen in this case. `CompLaB.xml` gives A and B an
-   `<initial_concentration>` of 0 and holds each at 1.0 on one face with a
-   Dirichlet condition, so both are supplied from outside the domain and both
-   totals *rise*. The 1:1:1 stoichiometry constrains the per step reaction
-   increments, not the reported totals. What a reader can actually check is that
-   C rises, since C is the only closed species here, and that the increments
-   balance;
-2. **the balance is reported by `postprocess.py`, not by the solver.** This case
-   declares no `<conserve>` line, so it is `postprocess.py` that reports the
-   change in the closed species; the tag exists and is documented in
-   [`../../config/CompLaB.everything.xml`](../../config/CompLaB.everything.xml)
-   if you want the solver to check a closed sum too. **[v1.3] Do not name A or B
-   in a `<conserve>` sum.** A species fed from a Dirichlet boundary is not
-   conserved and never will be, so such a sum would guarantee a mass-balance FAIL
-   that means nothing;
-3. **[v1.3] no `[NEG!]` warnings.** Earlier text said every increment is clamped
-   as ΔC = max(RΔt, −C) before it is applied. There is no such clamp on the path
-   this case uses. `run_abiotic_kinetics` in `src/complab3d_processors_part1.hh`
-   computes `dC = subs_rate[iS] * dt` and applies it as computed, with no
-   comparison against the local concentration; a positivity clamp exists only on
-   the flux-balance and learned-law paths, neither of which is active here. So a
-   time step or a rate constant large enough to consume more than a voxel holds
-   *will* drive that voxel negative. The solver reports it as a `[NEG!]` warning,
-   and the fix is to reduce `<ade_dt>` or the rate constant `k`. Checking for
-   `[NEG!]` is still the right check; only the reason given for it was wrong;
-4. **the reaction stops where the reactants run out**, not at a fixed time.
+1. **Stream and collide** each species on its own D3Q7 lattice, which advances
+   diffusion by one step.
+2. **Apply the boundary conditions**, so A is re-pinned to 1.0 at the left face
+   and B at the right.
+3. **Evaluate the rate law** in every open voxel: read A and B there, compute
+   `R = k·A·B`, and write the three increments into the change lattices.
+4. **Add the increments** to the concentrations, as `C += R·dt`.
 
-## 5. What this case does not do
+Step 4 is an explicit update with no clamp against what is actually available in
+the voxel. That is the stability limit of this case, and it is worth knowing:
+if `k·[A]·dt` approaches 1, a voxel can be driven negative. The solver reports
+that as a `[NEG!]` warning, and the fix is a smaller time step or a smaller `k`.
 
-No flow, no organisms, no geometry change. Example 13 uses the same abiotic route
-to precipitate a mineral and seal the pore space; example 14 to dissolve one.
+## 6. What comes out
 
+```
+output/
+  A_0000200.vti  ...  A_0001500.vti        concentration of A
+  B_*.vti  C_*.vti                          the other two species
+  rate_A_*.vti  rate_B_*.vti  rate_C_*.vti  the reaction rate as a field, mol/L/s
+  summary.csv                               one row every 100 steps
+  run.log                                   the whole run, including the checks
+```
 
-## Everything this case needs is in this folder
+Numbers to expect, as orders of magnitude rather than exact values:
 
-No cross-referencing, nothing to fetch.
+| Quantity | What it should do |
+|---|---|
+| Total A, total B | Both **rise** from 0, because both are fed from a reservoir |
+| Total C | Rises from 0 and keeps rising; C is the only closed species |
+| `rate_C` peak | Positive, largest in the mixing band near the middle |
+| `rate_A` / `rate_C` | **Exactly -1.000000** in every voxel, from the 1:1:1 stoichiometry |
+| Minimum of any species | Zero or above. A negative value is a real failure |
+| Wall clock | Seconds on one core. This is a small case on purpose |
+
+The stoichiometry ratio is the sharpest check in the whole example set: it is
+recovered from the output fields alone, with no knowledge of the rate law, and
+it comes out exact to six decimals.
+
+## 7. What to check
+
+1. **All three totals rise, and C rises.** A and B are each fed from a
+   reservoir, so the 1:1:1 stoichiometry constrains the per-step reaction
+   increments, not the reported totals. C is the only closed species, so C is
+   the total whose rise is entirely the reaction.
+2. **No `[NEG!]` warnings** in `run.log`. One means the time step or the rate
+   constant is too large for this chemistry.
+3. **`rate_A` divided by `rate_C` is -1** wherever the reaction runs. This is
+   the stoichiometry read straight out of the output.
+4. **The reaction stops where the reactants run out**, not at a fixed time. Look
+   at where the `rate_C` band sits and confirm it is where A and B overlap.
+
+`postprocess.py` runs checks 1, 2 and 4 for you and prints a verdict. Note that
+this case declares no `<conserve>` tag, so the solver itself checks no closed
+sum. If you add one, do not name A or B in it: a species fed from a Dirichlet
+boundary is not conserved and never will be, so such a sum would guarantee a
+mass-balance failure that means nothing.
+
+## 8. What this case demonstrates
+
+**The abiotic reaction path.** One switch, `<enable_abiotic_kinetics>`, and one
+header file you write yourself. It fires in every open voxel whether or not
+anything is alive there, which is what distinguishes it from the biotic path
+where a rate is proportional to the biomass present.
+
+It also demonstrates the two things every reaction case in this set relies on:
+that the rate is a field you can look at rather than a number in a log, and that
+a case can be checked against its own stoichiometry without trusting the solver.
+
+**What it deliberately leaves out:** flow, organisms, and any change to the pore
+space. Example 13 uses this same abiotic path to precipitate a mineral and seal
+the pore space; example 14 to dissolve one. Example 06 is the equivalent case
+with an organism in it.
+
+## 9. How to build and run
+
+Two files do this, and they are deliberately separate because compiling and
+running belong in different places on a cluster.
+
+| File | What it is | Where you run it |
+|---|---|---|
+| `COMPILE.txt` | The interactive session that builds `./complab`, step by step | Once, by hand, on an interactive node |
+| | `run.sh` | The SLURM batch job: modules, pre-processing, the solver, the checks. Submit with `sbatch run.sh`. |
+| | `COMPILE.txt` | The interactive session that builds `./complab`, one step at a time. |
+
+**First time in this case folder,** open `COMPILE.txt` and follow it. It asks
+for an interactive node, loads the modules, runs cmake with the flags this case
+actually needs, and compiles. It also says exactly when you have to come back
+and recompile, which for most cases is almost never.
+
+**Every run after that** is one command:
+
+```bash
+sbatch run.sh
+squeue -u $USER                 # watch it
+tail -f output/run.log          # read it while it runs
+```
+
+`run.sh` carries a comment on every line: the SLURM header, the module loads
+that must match what you compiled with, the pre-processing, the solver call and
+the post-processing checks. It runs on one rank on purpose, and the note at the
+bottom of the file says why.
+
+To work in a scratch copy instead of dirtying this folder:
 
 ```bash
 ./scripts/setup_case.sh 03_abiotic_kinetics run/mycase
 cd run/mycase
-./pipeline.sh
 ```
 
-### The pipeline
+### On a laptop instead of the cluster
+
+
+**Build requirements for this case:** a C++11 compiler, CMake 3.5 or newer, and
+Palabos v2.3.0. No optional solver is needed. Cases 09 to 12 and 16 additionally
+need GLPK or Python with COBRApy; this one does not, so the plain cmake line is
+enough:
+
+```bash
+cmake -B build -S . -DCMAKE_BUILD_TYPE=Release -DPALABOS_ROOT=/path/to/palabos-v2.3.0
+cmake --build build -j
+```
+
+**When you must recompile.** The chemistry in this case is a C++ header
+compiled into the executable, not data read at start-up. So editing
+`defineAbioticKinetics.hh`, including changing `k_AB`, means rebuilding. Editing
+`CompLaB.xml` or `input/geometry.dat` does not.
+
+### The files
 
 | | File | What it does |
 |---|---|---|
-| **pre** | `preprocess.py` | Builds the pore space and reports porosity, refusing to continue if it does not percolate. Standard library only. |
-| **run** | `CompLaB.xml` | What the solver reads. Every tag is documented once, in [`../../config/CompLaB.reference.xml`](../../config/CompLaB.reference.xml). |
-| **post** | `postprocess.py` | Reads `output/summary.csv` and the log, reports every field's change, flags negatives, and runs this case's checks. Standard library only. |
-|  | `pipeline.sh` | Runs the steps above in order. |
+| **pre** | `preprocess.py` | Builds the pore space, reports porosity, refuses to continue if it does not percolate. Standard library only. |
+| **build** | `kinetics/defineAbioticKinetics.hh` | This case's chemistry, compiled in. |
+| **run** | `CompLaB.xml` | What the solver reads. Every tag is documented once in [`../../config/CompLaB.reference.xml`](../../config/CompLaB.reference.xml). |
+| | `input/geometry.dat` | The pore space. `preprocess.py` rebuilds it; this copy is here so the case runs before you have run anything. |
+| **post** | `postprocess.py` | Reads `output/summary.csv` and the log, reports every field's change, flags negatives, runs this case's checks. Standard library only. |
+| | `run.sh` | All of the above in order, one comment per line. |
+| | `pipeline.sh` | The older, terser version of the same chain. |
 
-### What the solver reads
-
-| File | What it is |
-|---|---|
-| `input/geometry.dat` | The pore space. `preprocess.py` rebuilds it; this copy is here so the case runs before you have run anything. |
-| `kinetics/defineAbioticKinetics.hh` | This case's own chemistry: the A + B -> C rate law above, compiled in. |
-
-### What it inherits
-
-Only the two shared kinetics headers, from
-[`../../config/kinetics/`](../../config/kinetics/), and the solver sources.
+Only two things are inherited: the shared kinetics defaults in
+[`../../config/kinetics/`](../../config/kinetics/) and the solver sources.
 `setup_case.sh` lays those down and copies this folder whole on top.
-
-### A note on the domain
-
-`x = 0` and `x = nx-1` carry the boundary conditions named per substrate. The
-solver gives the other four faces nothing — not a wall, not a symmetry plane, not
-periodicity — so `preprocess.py` draws an inert wall there, and `NY` and `NZ` are
-two larger than the pore space they hold. The layers are **added**, not taken out
-of the pore space, so porosity and every count are what the case declares.
-
-> **Why shared code is copied here rather than referenced.** So that this folder
-> *is* the procedure. The cost is real and worth stating: a fix to a shared tool
-> has to be applied to every case that carries it, and `tests/check_repo.sh`
-> fails if a copy drifts from `tools/`.

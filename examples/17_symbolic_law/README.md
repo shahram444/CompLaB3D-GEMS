@@ -1,12 +1,12 @@
-# 17 — a rate law you can read, in a file rather than the binary
+# 17 - Symbolic law: a rate law read from a text file instead of compiled in
 
-## 1. What this example does
+## 1. The scenario
 
-This is example 05's colony — the same aerobic organism, the same cellular
-automaton spreading its biomass — with one thing changed: **the rate law is not
-compiled into the program**. It is four lines of algebra in a text file, read at
-start-up, printed into the log, and evaluated as an expression tree in every
-voxel at every step.
+This is example 05's colony, the same aerobic organism, the same cellular
+automaton spreading its biomass, with one thing changed: the rate law is not
+compiled into the program. It is four lines of algebra in a text file, read
+at start-up, printed into the log, and evaluated as an expression tree in
+every voxel at every step.
 
 The reaction is aerobic respiration of acetate:
 
@@ -27,192 +27,323 @@ and the law itself, `input/growth.sym`:
     range   o2      1e-6 2.0e-3
 ```
 
-That is a **dual-Monod** law: growth is limited by acetate and by oxygen
-independently, and the product of the two saturation terms means whichever is
-scarcer controls the rate. `0.35 h⁻¹` is the maximum specific growth rate;
-`0.05` and `0.01 mol L⁻¹` are the half-saturation constants for the donor and
-the acceptor.
+That is a dual-Monod law: growth is limited by acetate and by oxygen
+independently (Monod is the microbial-growth form of Michaelis-Menten
+saturation kinetics), and the product of the two saturation terms means
+whichever substrate is scarcer controls the rate. `0.35` per hour is the
+maximum specific growth rate; `0.05` and `0.01` mol/L are the half-saturation
+constants for the donor and the acceptor, the concentration at which growth
+runs at half its maximum. The two substrate lines are written as multiples of
+`growth` rather than fitted separately: `-2.5` is one over a yield of 0.4 mol
+biomass per mol acetate, and `-5.0` is two moles of oxygen per mole of
+acetate, straight from the reaction above. Writing them this way means the
+stoichiometry cannot drift; change the growth expression and the substrate
+draws follow it exactly.
 
-The two substrate lines are written as multiples of `growth`, not fitted
-separately. `-2.5` is one over a yield of 0.4 mol biomass per mol acetate;
-`-5.0` is two oxygen per acetate, straight from the reaction above. Writing them
-this way means the **stoichiometry cannot drift**: change the growth expression
-and the substrate draws follow it exactly.
+Why it matters that this is a file rather than a header: in example 05, a
+different rate law is a rebuild. Here, a different rate law is a different
+file, which makes it practical to run the same case against several
+candidate laws, to ship a law alongside a dataset, or to use a law that came
+out of a fitting procedure rather than out of a modeller's judgement about
+which functional form to assume.
 
-Why it matters that this is a file rather than a header. In example 05 a
-different rate law is a rebuild. Here a different rate law is a different file —
-which makes it practical to run the same case against several candidate laws, to
-ship a law alongside a dataset, and to have a law come out of a fitting procedure
-rather than out of a person's judgement about which form to assume.
+## 2. The picture
 
-## 2. What is simulated
+```
+   24 x 26 x 8 voxels at 10 um per voxel  =  240 x 260 x 80 um
+
+   x=0                                                      x=23
+    |                                                         |
+    |....................  ####  ..........................  |
+acet|...................  ####  ..........................  |zero
+4e-3|@@@@@@@@@@..........  ########  ......................  |gradient
+o2  |@@@@@@@@@@..........                                     |
+1.5e-3                                                        |
+held|                                                         |
+    +---------------------------------------------------------+
+      no flow: Peclet = 0. acetate and o2 diffuse in from x=0
+      @@@@@ = the seeded biomass patch, 108 of the 3168 open voxels,
+              against the wall blocks at x % 4 == 0
+
+      #### = solid grains        porosity 0.6346, 3168 open voxels
+```
+
+Only the two end faces `x = 0` and `x = 23` carry a boundary condition. The
+other four faces are an inert wall, drawn by `preprocess.py`. The biomass
+patch sits on material number 3, at every `x` where `x % 4 == 0`, in the
+three voxel rows next to the wall block there, through the full depth in z:
+108 voxels in total, carved out of open pore rather than added to it, so the
+porosity is unchanged from the abiotic cases.
+
+## 3. What goes in
 
 | | |
 |---|---|
-| **Geometry** | 24 x 26 x 8 voxels at 10 um, 3168 open (porosity 0.6346) |
-| **Flow** | **not solved** — `<Peclet>0</Peclet>`, so transport is pure diffusion |
-| **Solute transport** | D3Q7 advection-diffusion, one lattice per species — 2 of them: `acetate`, `o2` |
-| **Abiotic reaction** | none |
-| **Biotic reaction** | `Bug` — a symbolic rate law read from a `.sym` file |
-| **Biomass** | `Bug` — attached biofilm (seeded on its own material number), cellular automaton — biomass stays put until a voxel fills, then spills into neighbours |
-| **Geometry evolution** | none — the pore space is fixed |
-| **Run length** | 1000 advection-diffusion steps |
+| **Domain** | 24 x 26 x 8 voxels, dx = 10 um, 3168 open voxels, porosity 0.6346 |
+| **Flow** | none. `<Peclet>0</Peclet>`, so transport is pure diffusion |
+| **Transport** | D3Q7 advection-diffusion lattice Boltzmann, two species: `acetate`, `o2` |
+| **Diffusivity** | 5e-10 m2/s for `acetate`; 2e-9 m2/s in pore and 1e-9 m2/s in biofilm for `o2` |
+| **Chemistry** | none compiled in; a symbolic expression read from `input/growth.sym` |
+| **Biology** | `Bug`, one population, seeded on material 3 at initial density 1.0e-5, cellular automaton biomass movement, rate routed through the symbolic path |
+| **Geometry change** | none. The pore space is fixed for the whole run |
+| **Run length** | 1000 advection-diffusion steps, output every 200 |
 
-Everything above is read from `CompLaB.xml` and `input/geometry.dat`; nothing in
-that table is a description that can drift from the case.
+Boundary conditions:
 
-## 3. How the file is bound to the simulation
+| Species | Left face (x = 0) | Right face (x = 23) | Initial |
+|---|---|---|---|
+| **acetate** | Dirichlet, held at 4.0e-3 | Neumann, zero gradient | 2.0e-3 |
+| **o2** | Dirichlet, held at 1.5e-3 | Neumann, zero gradient | 1.0e-3 |
+| **Bug** (biomass) | closed | closed | 1.0e-5 in the seeded patch, 0 elsewhere |
 
-**The variable names are the binding.** Every name on the `vars` line must match
-a `<name_of_substrates>` or the organism's `<name_of_microbes>` exactly:
+*Dirichlet* means the concentration at that face is pinned to a value no
+matter what the interior does, a reservoir that keeps the colony fed.
+*Neumann with a zero gradient* means nothing flows across that face, an open
+outlet neither substrate reaches. *Closed* means the same thing on both
+ends: biomass, which this solver moves only voxel to voxel, never crosses a
+domain face at all.
+
+## 4. The reaction
+
+**The variable names are the binding.** Every name on the `vars` line in
+`growth.sym` must match a `<name_of_substrates>` or the organism's
+`<name_of_microbes>` exactly:
 
 ```xml
     <name_of_substrates>acetate</name_of_substrates>       vars acetate
     <name_of_substrates>o2</name_of_substrates>            vars o2
-    <name_of_microbes>Bug</name_of_microbes>               vars Bug
+    <name_of_microbes>Bug</name_of_microbes>                vars Bug
 ```
 
-A mismatch stops the run at start-up and names the offending variable. It does
-not bind to the wrong lattice and it does not quietly evaluate to zero — which
-is the failure the positional index conventions elsewhere in this code are
-vulnerable to, and the reason names are worth the parser.
+A mismatch stops the run at start-up and names the offending variable. It
+does not bind to the wrong lattice and it does not quietly evaluate to zero,
+which is the failure a positional convention would be vulnerable to and the
+reason names are worth the parser.
 
-`<half_saturation_constants>` in `CompLaB.xml` is **unused** on this path and is
-set to `0 0` to say so. The `.sym` file carries its own constants; there is one
-place a half-saturation constant lives and it is the expression.
+`<half_saturation_constants>` in `CompLaB.xml` is unused on this path and is
+set to `0 0` to say so: the `.sym` file carries its own constants, so there
+is exactly one place a half-saturation constant lives, the expression.
 
-**The ranges are enforced, not advisory.** Every evaluation clamps each input to
-its `range` line, and the closing report says how many evaluations were clamped.
-A law fitted on a range means nothing outside it, and this is the one path in
-the repository where that limit is written down beside the law itself and
-checked at run time. The inlet concentrations here — `4.0e-3` acetate,
-`1.5e-3` oxygen — sit inside the fitted ranges deliberately.
+**The ranges are enforced, not advisory.** Every evaluation clamps each
+input to its `range` line, and the closing report says how many evaluations
+were clamped. A law fitted on a range means nothing outside it, and this is
+the one path in the repository where that limit is written down beside the
+law itself and checked at run time. The inlet concentrations in section 3,
+`4.0e-3` acetate and `1.5e-3` oxygen, sit inside the fitted ranges
+deliberately.
 
 | tag | value | what it does |
 |---|---|---|
 | `<symbolic><enabled>` | `true` | builds and enables the expression-tree path |
 | `<expressions_file>` | `input/growth.sym` | which law to read |
-| `<reaction_type>` | `symbolic` | routes *this organism* through it |
+| `<reaction_type>` | `symbolic` | routes this organism through it |
 | `<solver_type>` | `CA` | biomass spreads by cellular automaton, as in example 05 |
 | `<decay_coefficient>` | `0.0` | no decay, so growth is the only biomass term |
 
-## 4. Where a law like this comes from
+## 5. What happens each step
 
-The case ships `input/growth.sym`, so `offline.sh` is optional. It is how you
-would find a law from data of your own.
+The solver repeats this 1000 times:
 
-`training/fit_symbolic.py` is a **symbolic regression**: it searches over the
-*form* of the expression, not over the constants in a form you chose. Ordinary
-fitting starts from an assumption — you decide the law is Monod and the computer
-finds the three numbers. If the truth is not Monod you get the best Monod there
-is, and no hint that you asked the wrong question. This builds expressions out
-of `+ - * /` and your variables, breeds the ones that fit, and returns the
-expression. Nobody tells it about Monod; if the data is Monod it finds Monod.
+1. **Stream and collide** `acetate` and `o2` on their D3Q7 lattices, which
+   advances diffusion by one step. There is no velocity field to advect them
+   with.
+2. **Apply the boundary conditions**, re-pinning `acetate` to 4.0e-3 and
+   `o2` to 1.5e-3 at the left face.
+3. **Evaluate the symbolic expression tree** in every open voxel that holds
+   biomass: clamp each input to its declared range, evaluate `growth` and
+   the two substrate lines, and write the increments for `acetate`, `o2`
+   and `Bug`.
+4. **Apply the biomass increment** in place.
+5. **Run the cellular-automaton rule.** Wherever a voxel's biomass now
+   exceeds `<maximum_biomass_density>`, spill the excess into an open
+   neighbouring voxel.
 
-**What comes back is a Pareto set, not an answer.** One expression per node
-count, from a crude two-term form up to a long one that fits better. The choice
-among them is yours, and the shortest expression whose accuracy you can live
-with is almost always right: a longer expression that fits marginally better is
-usually fitting noise and will not survive extrapolation.
+The stability caveat is on step 3: the expression has no stoichiometry
+enforcing non-negativity, so the increment is applied as evaluated, with no
+positivity clamp. A time step too large for the local concentrations
+produces a `[NEG!]` warning exactly as the compiled kinetics paths do.
+
+## 6. What comes out
+
+```
+output/
+  acetate_0000200.vti  ...  acetate_0001000.vti     concentration of acetate
+  o2_*.vti                                            concentration of oxygen
+  Bug_*.vti                                            biomass density of the colony
+  rate_acetate_*.vti  rate_o2_*.vti                    the reaction rate as a field, mol/L/s
+  summary.csv                                          one row every 100 steps
+  run.log                                              the whole run, including the [SYM] block
+```
+
+Numbers to expect, as orders of magnitude and directions rather than exact
+values:
+
+| Quantity | What it should do |
+|---|---|
+| Total biomass | Rises from the seeded patch and levels off as growth and the maximum density balance |
+| Total acetate | Falls near the colony, replenished from the left boundary |
+| Total o2 | Falls near the colony, replenished from the left boundary |
+| `rate_acetate` | Negative wherever the colony is active; zero elsewhere |
+| Clamp count in the `[SYM]` block | Low, since the inlet values sit inside the ranges deliberately |
+| Minimum of either substrate | Zero or above. A negative value is a real failure |
+| Wall clock | Seconds on one core. This is a small case on purpose |
+
+## 7. What to check
+
+1. **The law is echoed at start-up.** The parsed expressions are printed in
+   the `[SYM]` block; read them and confirm they are the law you meant. This
+   is the cheapest check available.
+2. **Growth is co-limited.** Lower the acetate inlet and growth falls; lower
+   the oxygen inlet and it falls too. A law responding to only one input has
+   a mis-bound variable or a saturation term that never engages.
+3. **The clamp count stays low.** A large number of range clamps means the
+   simulation is asking the law about conditions it was never fitted for.
+4. **Acetate and oxygen are drawn 1 : 2.** That ratio is written into the two
+   substrate lines and nothing in the run can change it.
+5. **No `[NEG!]` warnings.**
+
+`postprocess.py` reports the change in every field's total and flags any
+negative minimum, covering checks 4 and 5 indirectly through the totals, and
+5 directly. It also greps `run.log` for the `[SYM]` block and prints it, so
+checks 1 and 3 are read straight off that output. Check 2 needs two runs
+with different inlet values, which is outside what a single `postprocess.py`
+pass can do. This case declares no `<conserve>` tag: both substrates are fed
+from a Dirichlet boundary, so no total here is closed, and naming either in
+a mass-balance check would guarantee a failure that means nothing.
+
+## 8. What this case demonstrates
+
+**A rate law read from a file at start-up, rather than compiled in, and
+produced by symbolic regression rather than assumed by hand.** The variable
+names are the binding between the file and the simulation, the ranges are
+enforced rather than advisory, and the same organism, geometry and boundary
+conditions as example 05 now run on a law that lives outside the executable
+entirely.
+
+Where a law like this comes from: the case ships `input/growth.sym`, so
+`offline.sh` is optional. It shows how you would find a law from data of
+your own.
+
+`training/fit_symbolic.py` performs a **symbolic regression**: it searches
+over the *form* of the expression, not over the constants in a form you
+chose. Ordinary curve fitting starts from an assumption, you decide the law
+is Monod and the computer finds the three numbers; if the truth is not
+Monod, you get the best Monod there is and no hint that you asked the wrong
+question. This search instead builds expressions out of `+ - * /` and your
+variables, breeds the ones that fit the data best, and returns the
+expression it converged on. Nobody tells it about Monod; if the data is
+Monod-shaped, it finds Monod.
+
+**What comes back is a Pareto set, not one answer.** One expression per node
+count, from a crude two-term form up to a long one that fits better. The
+choice among them is yours, and the shortest expression whose accuracy you
+can live with is almost always right: a longer expression that fits only
+marginally better is usually fitting noise and will not survive
+extrapolation.
 
 ```
     1.  fit        search over expression forms      -> a Pareto set
     2.  choose     take the elbow, not the best fit
-    3.  finish     write the substrate lines by hand as multiples of the
-                   fitted rate, so stoichiometry cannot drift
+    3.  finish     write the other substrate lines by hand as multiples of
+                   the fitted rate, so stoichiometry cannot drift
     4.  bound      add one range line per variable
 ```
 
-Steps 3 and 4 are yours because the search cannot do them: it fits **one output
-column** and knows nothing about your stoichiometry, your units, or which
-variable is a concentration and which a biomass.
+Steps 3 and 4 are yours because the search cannot do them: it fits one
+output column and knows nothing about your stoichiometry, your units, or
+which variable is a concentration and which a biomass.
 
-`training/growth_samples.csv` ships with the case — 400 points drawn from the
-same dual-Monod law with 2% noise on the growth column, so the search has
-something realistic to work on. The search writes
-`input/growth_discovered.sym` and does **not** install it; compare it against the
-shipped law before copying it over.
+`training/growth_samples.csv` ships with the case, 400 points drawn from the
+same dual-Monod law with 2 percent noise on the growth column, so the search
+has something realistic to work on. Running `offline.sh` writes
+`input/growth_discovered.sym` and does not install it: compare it against
+the shipped law before copying it over.
 
-For production work PySR searches harder and is a published tool people know.
-`fit_symbolic.py` is here so the loop is complete without a Julia install.
+This tool is here so the loop is complete without a separate install; a
+published symbolic-regression tool would generally search harder for
+production work.
 
-## 5. What to check
+**What it deliberately leaves out.** No flow, no abiotic reaction, no
+geometry evolution, and no thermodynamic control on the rate: the law is
+exactly what the file says, with no pH dependence, no temperature
+dependence and no inhibition term, because none was written. Example 05 is
+the same colony with the law compiled in, which is faster per evaluation;
+example 18 is the same idea with a graph network in place of the
+expression; example 19 multiplies a rate law of this shape by a
+thermodynamic factor.
 
-1. **the law is echoed at start-up.** The parsed expressions are printed; read
-   them and confirm they are the law you meant. This is the cheapest check in
-   the repository;
-2. **growth is co-limited.** Lower the acetate inlet and growth falls; lower the
-   oxygen inlet and it falls too. A law responding to only one input has a
-   mis-bound variable or a saturation term that never engages;
-3. **the clamp count stays low.** A large number of range clamps means the
-   simulation is asking the law about conditions it was never fitted for;
-4. **acetate and oxygen are drawn 1 : 2.** That ratio is written into the two
-   substrate lines and nothing in the run can change it;
-5. **no `[NEG!]` warnings.** The expression has no stoichiometry enforcing
-   non-negativity, so the increment is clamped against what is locally present
-   before it is applied.
+## 9. How to build and run
 
-## 6. What this case does not do
+Two files do this, and they are deliberately separate because compiling and
+running belong in different places on a cluster.
 
-No flow, no abiotic reaction, no geometry evolution, no thermodynamic control on
-the rate. The law is exactly what the file says — there is no pH dependence, no
-temperature dependence, and no inhibition term, because none was written.
+| File | What it is | Where you run it |
+|---|---|---|
+| `COMPILE.txt` | The interactive session that builds `./complab`, step by step | Once, by hand, on an interactive node |
+| | `run.sh` | The SLURM batch job: modules, pre-processing, the solver, the checks. Submit with `sbatch run.sh`. |
+| | `COMPILE.txt` | The interactive session that builds `./complab`, one step at a time. |
 
-Example 05 is the same colony with the law compiled in, which is faster per
-evaluation; example 18 is the same idea with a graph network in place of the
-expression; example 19 multiplies a rate law of this shape by a thermodynamic
-factor.
+**First time in this case folder,** open `COMPILE.txt` and follow it. It asks
+for an interactive node, loads the modules, runs cmake with the flags this case
+actually needs, and compiles. It also says exactly when you have to come back
+and recompile, which for most cases is almost never.
 
+**Every run after that** is one command:
 
-## Everything this case needs is in this folder
+```bash
+sbatch run.sh
+squeue -u $USER                 # watch it
+tail -f output/run.log          # read it while it runs
+```
 
-No cross-referencing, nothing to fetch.
+`run.sh` carries a comment on every line: the SLURM header, the module loads
+that must match what you compiled with, the pre-processing, the solver call and
+the post-processing checks. It runs on one rank on purpose, and the note at the
+bottom of the file says why.
+
+To work in a scratch copy instead of dirtying this folder:
 
 ```bash
 ./scripts/setup_case.sh 17_symbolic_law run/mycase
 cd run/mycase
-./pipeline.sh
 ```
 
-### The pipeline
+### On a laptop instead of the cluster
+
+
+**Build requirements for this case:** a C++11 compiler, CMake 3.5 or newer,
+and Palabos v2.3.0. No optional solver is needed. Cases 09, 12, 21 and 22
+additionally need GLPK, and case 10 needs Python with COBRApy; this one
+needs neither, so the plain cmake line is enough:
+
+```bash
+cmake -B build -S . -DCMAKE_BUILD_TYPE=Release -DPALABOS_ROOT=/path/to/palabos-v2.3.0
+cmake --build build -j
+```
+
+**When you must recompile.** This case has no chemistry compiled in: the law
+lives in `input/growth.sym`, read at start-up. Editing that file, or
+`CompLaB.xml`, or `input/geometry.dat`, never needs a rebuild. A rebuild is
+only needed if you change the solver source itself, such as the expression
+parser in `src/`.
+
+### The files
 
 | | File | What it does |
 |---|---|---|
-| **pre** | `preprocess.py` | Builds the pore space and reports porosity, refusing to continue if it does not percolate. Standard library only. |
-| **offline** | `offline.sh` | Optional. Searches for a rate law from a data table and writes a candidate `.sym`. The case ships a law, so nothing has to be fitted before running it. |
-| **run** | `CompLaB.xml` | What the solver reads. Every tag is documented once, in [`../../config/CompLaB.reference.xml`](../../config/CompLaB.reference.xml). |
-| **post** | `postprocess.py` | Reads `output/summary.csv` and the log, reports every field's change, flags negatives, and runs this case's checks. Standard library only. |
-|  | `pipeline.sh` | Runs the steps above in order. |
+| **pre** | `preprocess.py` | Builds the pore space and the seeded biomass patch, reports porosity, refuses to continue if it does not percolate. Standard library only. |
+| **offline** | `offline.sh` | Optional. Searches for a rate law from a data table and writes a candidate `.sym`. The case ships a law, so nothing has to be fitted before running it. Runs once, before the build. |
+| **run** | `CompLaB.xml` | What the solver reads. Every tag is documented once in [`../../config/CompLaB.reference.xml`](../../config/CompLaB.reference.xml). |
+| | `input/growth.sym` | The rate law of section 1. Read at start-up, echoed into the log, evaluated per voxel. |
+| | `input/geometry.dat` | The pore space and the patch. `preprocess.py` rebuilds it; this copy is here so the case runs before you have run anything. |
+| **post** | `postprocess.py` | Reads `output/summary.csv` and the log, reports every field's change, flags negatives, runs this case's checks. Standard library only. |
+| | `run.sh` | All of the above in order, one comment per line. |
+| | `pipeline.sh` | The older, terser version of the same chain. |
+| **train** | `training/fit_symbolic.py` | The symbolic regression of section 8. Searches over expression forms and returns a Pareto set. |
+| | `training/growth_samples.csv` | 400 sample points with 2 percent noise, so the search has something to work on out of the box. |
 
-### What the solver reads
-
-| File | What it is |
-|---|---|
-| `input/geometry.dat` | The pore space. `preprocess.py` rebuilds it; this copy is here so the case runs before you have run anything. |
-| `input/growth.sym` | The rate law of section 1. Read at start-up, echoed into the log, evaluated per voxel. |
-
-### What it inherits
-
-Only the two shared kinetics headers, from
-[`../../config/kinetics/`](../../config/kinetics/), and the solver sources.
-`setup_case.sh` lays those down and copies this folder whole on top.
-
-### The offline code this case ships
-
-| File | What it is |
-|---|---|
-| `training/fit_symbolic.py` | The symbolic regression of section 4. Searches over expression forms and returns a Pareto set. |
-| `training/growth_samples.csv` | 400 sample points with 2% noise, so the search has something to work on out of the box. |
-
-### A note on the domain
-
-`x = 0` and `x = nx-1` carry the boundary conditions named per substrate. The
-solver gives the other four faces nothing — not a wall, not a symmetry plane, not
-periodicity — so `preprocess.py` draws an inert wall there, and `NY` and `NZ` are
-two larger than the pore space they hold. The layers are **added**, not taken out
-of the pore space, so porosity and every count are what the case declares.
-
-> **Why shared code is copied here rather than referenced.** So that this folder
-> *is* the procedure. The cost is real and worth stating: a fix to a shared tool
-> has to be applied to every case that carries it, and `tests/check_repo.sh`
-> fails if a copy drifts from `tools/`.
+Only two things are inherited: the shared kinetics defaults in
+[`../../config/kinetics/`](../../config/kinetics/) and the solver sources.
+`setup_case.sh` lays those down and copies this folder whole on top; this
+case does not ship a `kinetics/` header of its own, since its rate law comes
+from `input/growth.sym` instead.
