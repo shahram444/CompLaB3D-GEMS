@@ -189,31 +189,3 @@ cd run/mycase
 | File | What it is |
 |---|---|
 | `input/geometry.dat` | The pore space. `preprocess.py` rebuilds it; this copy is here so the case runs before you have run anything. |
-
-### What it inherits
-
-Only the two shared kinetics headers, from
-[`../../config/kinetics/`](../../config/kinetics/), and the solver sources.
-`setup_case.sh` lays those down and copies this folder whole on top.
-
-### The rate laws this case ships
-
-`kinetics/defineAbioticKinetics.hh` **replaces** the shared header for this
-case: `setup_case.sh` copies it to `defineAbioticKinetics.hh` at the case root,
-over the default it laid down there. Unlike
-examples 13 and 14, **both** of its entry points do work — the homogeneous
-reaction and the surface reaction of section 3 — which is what makes this the
-case where their interaction can go wrong.
-
-### A note on the domain
-
-`x = 0` and `x = nx-1` carry the boundary conditions named per substrate. The
-solver gives the other four faces nothing — not a wall, not a symmetry plane, not
-periodicity — so `preprocess.py` draws an inert wall there, and `NY` and `NZ` are
-two larger than the pore space they hold. The layers are **added**, not taken out
-of the pore space, so porosity and every count are what the case declares.
-
-> **Why shared code is copied here rather than referenced.** So that this folder
-> *is* the procedure. The cost is real and worth stating: a fix to a shared tool
-> has to be applied to every case that carries it, and `tests/check_repo.sh`
-> fails if a copy drifts from `tools/`.
