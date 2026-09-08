@@ -1,0 +1,12 @@
+# discovered by fit_symbolic.py on 2026-09-08 from training\growth_samples.csv
+# 5 nodes; typical error 3.95%, worst 16.72%, over 400 samples (relative loss)
+# THE SUBSTRATE LINES ARE NOT WRITTEN FOR YOU. Add them by hand from the
+# reaction stoichiometry, as multiples of this rate, so they stay in exact
+# ratio -- a separate fit per species would not.
+units  per_hour
+vars   acetate o2
+
+rate   growth = ((647.606 * acetate) * o2)
+
+range  acetate    1.00199e-06 0.00494884
+range  o2         1.02206e-06 0.0019628
