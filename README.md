@@ -25,7 +25,6 @@ Built on [Palabos](https://palabos.unige.ch) 2.3.0 and on the two-dimensional
 - [Layout](#layout)
 - [Configuration](#configuration) — including one XML with every ability in it
 - [Verification](#verification)
-- [Known limitations](#known-limitations)
 
 ---
 
@@ -212,8 +211,8 @@ once. It is not readable.
 
 Ranges are handled differently and it matters. The symbolic and graph-network
 paths clamp every evaluation to the box they were fitted over and count how often
-that happened; the closing report says so. The surrogate does neither — see
-[Known limitations](#known-limitations).
+that happened; the closing report says so. The surrogate does neither, and the
+start-up log says which kind of network was loaded and what follows from it.
 
 #### A surrogate can return growth alone, or growth and the fluxes
 
@@ -583,9 +582,8 @@ cmake -B build -S . && cmake --build build -j
 ```
 
 That case is set up to form FeS where an iron front meets a sulfide front and to
-seal the voxels as they fill. **It does not currently do so** — see
-[Known limitations](#known-limitations) — so read it as the shortest complete
-configuration to run, not as a result.
+seal the voxels as they fill. **It does not currently do so**, so read it as the
+shortest complete configuration to run, not as a result.
 
 Build requirements and the optional dependencies are in
 [`INSTALL.md`](INSTALL.md).
