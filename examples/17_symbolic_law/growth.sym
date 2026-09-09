@@ -1,10 +1,10 @@
 # discovered by fit_symbolic.py on 2026-09-09 from training\growth_samples.csv
 # 5 nodes; typical error 3.95%, worst 16.72%, over 400 samples (relative loss)
-# search: --pop 600 --gens 60 --depth 6 --seed 1; chosen by the biggest drop in error per extra piece, which is a rule of thumb rather than an answer
+# search: --pop 400 --gens 30 --depth 6 --seed 1; chosen by the biggest drop in error per extra piece, which is a rule of thumb rather than an answer
 # threads: COMPLAB_THREADS=1  (1 is what makes the seed enough)
 # versions: python 3.10.11, numpy 2.2.6, scipy 1.15.3, torch 2.13.0+cpu
 # to reproduce:
-#   C:\Users\shahr\OneDrive\Desktop\Shahram Files\JOSS\paper\Github\CompLaB3D-GEMS\examples\17_symbolic_law\training\fit_symbolic.py --data training\growth_samples.csv --target growth --inputs acetate,o2 --reaction acetate -1  o2 -2 --units per_hour --rate-name growth --pop 600 --gens 60 --depth 6 --seed 1 --out input\growth_discovered.sym --yield acetate 0.4 --biomass Bug --verify
+#   C:\Users\shahr\OneDrive\Desktop\Shahram Files\JOSS\paper\Github\CompLaB3D-GEMS\examples\17_symbolic_law\training\fit_symbolic.py --data training\growth_samples.csv --target growth --inputs acetate,o2 --reaction acetate -1  o2 -2 --units per_hour --rate-name growth --pop 400 --gens 30 --depth 6 --seed 1 --out growth.sym --yield acetate 0.4 --biomass Bug --verify
 # The reaction below was given on the command line, not fitted. The solver
 # writes one substrate line per species from it at start-up, so their
 # ratios are arithmetic rather than typing and cannot disagree with the

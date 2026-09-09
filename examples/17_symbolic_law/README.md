@@ -253,6 +253,69 @@ Steps 3 and 4 are yours because the search cannot do them: it fits one
 output column and knows nothing about your stoichiometry, your units, or
 which variable is a concentration and which a biomass.
 
+### Letting the solver write the substrate lines instead
+
+Step 3 above is the dangerous one, because those two lines carry a ratio that
+nothing checks:
+
+```
+rate    acetate = -2.5 * growth * Bug
+rate    o2      = -5.0 * growth * Bug
+```
+
+5.0 over 2.5 is two oxygen per acetate, which **is** the reaction. Mistype one
+digit and the run still finishes, the fields still look smooth, and the model
+creates or destroys oxygen every step for twelve thousand steps. Nothing in the
+output can tell you, because a rate law is entitled to whatever numbers it was
+given.
+
+So the file can state the chemistry instead and let the solver do the
+arithmetic. `input/growth_stoich.sym` ships beside `input/growth.sym` and is the
+same law written this way:
+
+```
+reaction  acetate -1   o2 -2      the balanced reaction, negative consumed
+yield     acetate 0.4             biomass made per unit of acetate
+biomass   Bug                     which variable is the organism itself
+
+rate      growth = 0.35 * acetate / (0.05 + acetate) * o2 / (0.01 + o2)
+```
+
+At start-up the solver writes one substrate line per species in the reaction:
+
+```
+    coefficient  =  ( stoichiometry / |stoichiometry of the yield species| ) / yield
+
+    acetate:  -(1 / 1) / 0.4  =  -2.5
+    o2:       -(2 / 1) / 0.4  =  -5.0
+```
+
+and prints both in the log marked `<- from the reaction, not the file`. Their
+ratio is now arithmetic rather than typing, so it cannot disagree with the
+chemistry. `tests/test_sym_stoich.cpp` proves the two files give bit-identical
+rates at 40 different compositions, and that every way of writing the block
+wrongly stops the run instead of being guessed at.
+
+To use it, point the configuration at the other file:
+
+```xml
+<expressions_file>input/growth_stoich.sym</expressions_file>
+```
+
+Three rules keep it honest. A species may have a `rate` line **or** a place in
+the `reaction` line, never both, since two sources of truth for one number is
+what this removes. Species outside the reaction keep their hand-written lines,
+so a law can be partly derived. And omitting all three keywords changes nothing,
+so every `.sym` file written before this existed still loads untouched.
+
+The same reasoning already governs example 18: its graph network predicts one
+extent per reaction and forms the species rates from the stoichiometry, which is
+why that file records a stoichiometric residual of exactly zero.
+
+**The rule underneath all of it:** fit what you do not know, declare what you do.
+You do not know the growth law, so let the search find it. You do know the
+stoichiometry, so state it and never let a fit near it.
+
 `training/growth_samples.csv` ships with the case, 400 points drawn from the
 same dual-Monod law with 2 percent noise on the growth column, so the search
 has something realistic to work on. Running `offline.sh` writes
@@ -262,6 +325,129 @@ the shipped law before copying it over.
 This tool is here so the loop is complete without a separate install; a
 published symbolic-regression tool would generally search harder for
 production work.
+
+### What the search actually finds here, and what it takes
+
+The defaults in `offline.sh`, `--pop 200 --gens 15`, finish in under a minute
+and return
+
+```
+    growth = 647.6 x acetate x o2                       about 4% error
+```
+
+a plain product with no saturation in it. That is not a failure of the search.
+The samples span acetate up to 5e-3 mol/L against a half-saturation constant of
+0.05, and oxygen up to 2e-3 against 0.01, so every point sits in the linear part
+of both Monod terms and the product is the correct answer for the data it was
+shown. The saturation shoulder is simply not in the training range.
+
+A longer search does reach it:
+
+```bash
+POP=600 GENS=60 ./offline.sh
+```
+
+and the list then contains expressions carrying **0.010** and **0.050** inside
+them, which are the true oxygen and acetate half-saturation constants, recovered
+without the search ever being told the law is Monod. Rearranged into the Monod
+normal form, one such expression came out as
+
+```
+    found   7.03 x a x o / (0.01005 + o + 0.187 a + ...)
+    true    7.00 x a x o / (0.01000 + o + 0.200 a + ...)
+```
+
+The automatic pick will not choose it. It takes the steepest gain per node,
+which lands on the crude bilinear form, so read the list and use `--pick`.
+
+### Reproducibility
+
+A seed alone was not enough, and the reason is worth stating because it is not
+the obvious one.
+
+`fit_symbolic.py` ranks candidate expressions by how well their constants fit.
+Those constants come from a least-squares fit, and the last digits of a
+least-squares fit are not repeatable: a threaded BLAS adds its terms in whatever
+order the threads finish in, and even on one thread a generated expression is
+often over-parameterised, so the fit has a whole valley of equally good answers
+rather than one. A difference of one part in 10^10 then decided which candidate
+survived a tournament, and by the third generation two runs of the same command
+were exploring different regions entirely. The same command with the same
+`--seed` returned a different rate law.
+
+Four changes fix it, and they are worth knowing about because the same failure
+can appear in any fitting code:
+
+1. **The thread pools are pinned to one** before numpy loads, so reductions add
+   in a fixed order. `COMPLAB_THREADS` overrides it and says so on stderr.
+2. **Each expression gets its own random stream**, derived from the expression
+   itself and the run's seed, so fitting an expression no longer depends on when
+   during the search it was first seen.
+3. **Every comparison is quantised** to six significant digits and every tie is
+   broken by the expression itself, so noise below the noise floor cannot
+   reorder two candidates.
+4. **A tiny penalty on the size of the constants** makes an over-parameterised
+   fit well posed: among all the constant vectors that fit equally well it
+   prefers the smallest, which is one point rather than a valley.
+
+**What was measured, rather than assumed.** With those four changes, three
+separate runs of
+
+```bash
+python3 training/fit_symbolic.py --data training/growth_samples.csv \
+        --target growth --inputs acetate,o2 --pop 150 --gens 10 --seed 1 --out a.sym
+```
+
+produced byte-identical files. The graph-network trainer of example 18 and the
+surrogate trainer of example 11 were checked the same way and were already
+reproducible once the threads were pinned.
+
+**What is still not guaranteed, and why.** A much longer search, `--pop 600
+--gens 60`, did not always agree with itself. The reason is arithmetic rather
+than logic: `scipy.optimize.least_squares` is not bit-reproducible on a
+rank-deficient problem even on a single thread, a long search makes tens of
+thousands of comparisons, and it only takes one of them landing on a rounding
+boundary to send two runs down different paths. No environment variable fixes
+that, and neither does a fifth change to this script.
+
+So the claim this case makes is a checked one rather than a promised one.
+`offline.sh` runs the search twice and compares, and the comparison is on what
+the expressions **compute**, not on how they are spelled. That distinction
+matters: the search regularly returns the same law written two ways, `647.606 x
+acetate x o2` in one run and `acetate x o2 / 0.00154415` in the other, and
+calling that a reproducibility failure would be wrong twice over. It is the same
+function, and crying wolf teaches a reader to ignore the warning that counts.
+
+Three outcomes, and the check says which one you got:
+
+```
+  the two runs agree, expression for expression and character for character.
+```
+
+```
+  the two runs found the SAME LAW at every complexity: the expressions compute
+  identical values on every sample. Some are written differently.
+```
+
+```
+  PARTLY REPRODUCIBLE.
+    same law in both runs at 1, 3, 5 nodes.
+    DIFFERENT law at 7, 9, 11, 13, 15, 17, 19, 21 nodes.
+```
+
+The third is the common one on a long search, and the pattern in it is not
+random: the short expressions repeat and the long ones do not. That is the same
+rank-deficiency again. A long expression carries more constants than 400 samples
+can pin down, so its fit has no unique answer, so it is exactly the part of the
+list that cannot repeat. It is also the part you should not be quoting. The
+elbow is the answer, and when the elbow sits in the agreeing set, the expression
+you would actually use is reproducible.
+
+Set `VERIFY=0` to skip the check. Every `.sym` the search writes carries the
+command, the seed, the thread setting and the library versions in its header,
+because a fitted law whose provenance has been lost is not a result, while one
+that cannot be re-derived on somebody else's machine still is, provided the file
+itself is kept and cited.
 
 **What it deliberately leaves out.** No flow, no abiotic reaction, no
 geometry evolution, and no thermodynamic control on the rate: the law is

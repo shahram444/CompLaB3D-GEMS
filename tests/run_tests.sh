@@ -2,10 +2,12 @@
 # Every check in one command.  Needs g++ and python3 with numpy.  Does NOT need Palabos.
 set -e
 cd "$(dirname "$0")"
-rm -f t13 t1 t2 t3 t4 t5 t6 t7 t8 t9 t10 t11 t12 2>/dev/null || true
+rm -f t13 t14 t1 t2 t3 t4 t5 t6 t7 t8 t9 t10 t11 t12 2>/dev/null || true
 echo "### the expression language"
 g++ -O2 -Wall -Wextra -std=c++11 -I../src        -o t1 test_sym.cpp                  && ./t1
 g++ -O2 -Wall -Wextra -std=c++11 -I../src        -o t2 test_file.cpp                 && ./t2
+echo "### the .sym reaction block: the solver writes the substrate lines"
+g++ -O2 -Wall -Wextra -std=c++11 -I../src        -o t14 test_sym_stoich.cpp          && ./t14
 echo "### the surrogate: more than growth out of one network"
 g++ -O2 -Wall -Wextra -std=c++11 -I../src        -o t8 test_surrogate_multi.cpp && ./t8
 echo "### the surrogate: the run-time and compiled paths agree"
@@ -36,6 +38,6 @@ echo "### every shipped rate law survives a substrate list shorter than it wants
 python3 check_kinetics_bounds.py
 echo "### the shipped example rate laws load"
 g++ -O2 -Wall -Wextra -std=c++11 -I../src -o t7 check_examples.cpp && ./t7
-rm -f t13 t1 t2 t3 t4 t5 t6 t7 t8 t9 t10 t11 t12 b*.sym *.thm *_test.srg 2>/dev/null || true          # test_file.cpp leaves its malformed samples behind
+rm -f t13 t14 t1 t2 t3 t4 t5 t6 t7 t8 t9 t10 t11 t12 sym_*.sym b*.sym *.thm *_test.srg 2>/dev/null || true          # test_file.cpp leaves its malformed samples behind
 echo
 echo "everything passed"

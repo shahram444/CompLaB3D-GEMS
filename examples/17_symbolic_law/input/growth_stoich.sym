@@ -1,0 +1,57 @@
+# =============================================================================
+#  growth_stoich.sym  --  the same law as growth.sym, with the chemistry declared
+#
+#  This file and input/growth.sym describe exactly the same reaction and produce
+#  bit-identical rates. They differ only in who writes the two substrate lines.
+#
+#  growth.sym writes them by hand:
+#
+#      rate acetate = -2.5 * growth * Bug
+#      rate o2      = -5.0 * growth * Bug
+#
+#  and 5.0 over 2.5 is two oxygen per acetate, which is the reaction. Nothing
+#  checks that. Mistype one digit and the run finishes, the fields look smooth,
+#  and the model creates or destroys oxygen every step for twelve thousand steps.
+#
+#  This file states the chemistry instead and lets the solver do the arithmetic.
+#  The ratio is then exact by construction rather than by careful typing, and the
+#  log prints both derived lines marked as derived so you can see what it did.
+#
+#  To use it, point CompLaB.xml at this file instead:
+#
+#      <expressions_file>input/growth_stoich.sym</expressions_file>
+#
+#  tests/test_sym_stoich.cpp proves the two files agree at 40 compositions.
+# =============================================================================
+
+version 1
+units   per_hour
+vars    acetate o2 Bug
+
+# ---- the chemistry ----------------------------------------------------------
+# The balanced reaction. Negative is consumed, positive is produced. One acetate
+# with two oxygen, which is aerobic oxidation of acetate.
+reaction  acetate -1   o2 -2
+
+# How much biomass one unit of acetate makes. The other 0.6 leaves as CO2 and
+# pays for the work. This is the number a measurement gives you.
+yield     acetate 0.4
+
+# Which variable on the vars line is this organism's own biomass. A substrate
+# rate is the growth rate times how much biomass is present, so the solver has
+# to know which one that is.
+biomass   Bug
+
+# From those three lines the solver writes, before the first step:
+#
+#     acetate:  -(1 / 1) / 0.4  =  -2.5   x growth x Bug
+#     o2:       -(2 / 1) / 0.4  =  -5.0   x growth x Bug
+
+# ---- the fitted law ---------------------------------------------------------
+# This is the only line that came from data. Everything above is chemistry, and
+# chemistry is not something to fit.
+rate    growth  = 0.35 * acetate / (0.05 + acetate) * o2 / (0.01 + o2)
+
+# ---- where the fit is entitled to be believed --------------------------------
+range   acetate 1e-6 5.0e-3
+range   o2      1e-6 2.0e-3

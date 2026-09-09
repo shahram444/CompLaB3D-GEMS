@@ -7,6 +7,7 @@
 
 static const char* SYMS[] = {
     "../examples/17_symbolic_law/input/growth.sym",
+    "../examples/17_symbolic_law/input/growth_stoich.sym",
     "../pipelines/B_offline_models/B3_symbolic_law/expected/ecoli.sym",
     "../pipelines/B_offline_models/B3_symbolic_law/expected/ecoli_discovered.sym",
     "../pipelines/B_offline_models/B3_symbolic_law/expected/abiotic.sym",

@@ -43,6 +43,44 @@
  *  line, so a stoichiometric ratio can be written as one.  Expressions are evaluated in file order
  *  and a forward reference is a hard error, not a zero.
  *
+ *  ------------------------------------------------------------------------------------------------
+ *  [v1.3.2] LETTING THE SOLVER WRITE THE SUBSTRATE LINES
+ *
+ *  The form above asks you to type every substrate line, and those lines carry a ratio that nothing
+ *  checks.  In the shipped example 17 they read
+ *
+ *      rate    acetate = -2.5 * growth * Bug
+ *      rate    o2      = -5.0 * growth * Bug
+ *
+ *  and 5.0 over 2.5 is two oxygen per acetate, which is the reaction.  Mistype one digit and the run
+ *  still finishes, the fields still look smooth, and the model quietly creates or destroys oxygen
+ *  every step for the rest of the simulation.  Nothing in the output can tell you, because a rate law
+ *  is entitled to whatever numbers it was given.
+ *
+ *  Three optional lines let the file state the chemistry instead, and the solver does the arithmetic:
+ *
+ *      reaction acetate -1  o2 -2      the balanced reaction: negative consumed, positive produced
+ *      yield    acetate 0.4            biomass made per unit of acetate consumed
+ *      biomass  Bug                    which variable is this organism's own biomass
+ *
+ *      rate     growth = 0.35 * acetate / (0.05 + acetate) * o2 / (0.01 + o2)
+ *
+ *  At start-up the solver writes one substrate line per species in the reaction:
+ *
+ *      coefficient(i)  =  ( nu(i) / |nu(key)| ) / Y
+ *
+ *  which for the above gives -2.5 and -5.0 exactly, and prints both in the log marked as derived.
+ *  Their ratio is now arithmetic rather than typing and cannot disagree with the reaction.
+ *
+ *  A species may have a rate line OR a place in the reaction, never both: two sources of truth for
+ *  one number is the thing this is here to remove, so the run stops and says which species it is.
+ *  Species outside the reaction keep their hand-written rate lines, so a law can be partly derived.
+ *  Omit all three lines and nothing changes; every file written before this existed still loads.
+ *
+ *  This is the design the graph network of example 18 already uses: the network predicts one extent
+ *  per reaction and the species rates are formed from the stoichiometry, which is why that file's
+ *  provenance records a stoichiometric residual of exactly zero.
+ *
  *  UNITS.  defineKinetics.hh works in mol/L per SECOND, and a growth rate per second, so that is
  *  what this header assumes and what "units per_second" (the default) means.  A formula fitted to
  *  flux balance output almost always comes out per HOUR, because that is the convention metabolic
@@ -283,6 +321,14 @@ struct Rate {
     Rate() : root(-1) {}
 };
 
+/* [v1.3.2] One species of a declared reaction: its name and its stoichiometric coefficient,
+ * negative when consumed and positive when produced.  See the "reaction" keyword below. */
+struct StoichTerm {
+    std::string name;
+    double      nu;
+    StoichTerm() : nu(0.0) {}
+};
+
 struct Program {
     std::vector<std::string> vars;     /* declared variable names, in file order              */
     std::vector<Node>        nodes;    /* every expression's tree, sharing one arena          */
@@ -293,7 +339,15 @@ struct Program {
     double      unitScale;                  /* 1 for per_second, 1/3600 for per_hour          */
     std::string unitName;
 
-    Program() : unitScale(1.0), unitName("per_second") {}
+    /* [v1.3.2] The declared reaction, when the file gives one.  Empty means the old form, where
+     * every substrate line was written out by hand. */
+    std::vector<StoichTerm> stoich;
+    std::string             yieldOf;    /* the species the yield is quoted against            */
+    double                  yieldVal;   /* biomass per unit of that species                   */
+    std::string             biomassVar; /* which variable is this organism's own biomass      */
+    size_t                  nDerived;   /* how many trailing rate lines the solver wrote      */
+
+    Program() : unitScale(1.0), unitName("per_second"), yieldVal(0.0), nDerived(0) {}
 
     bool valid() const { return !rates.empty(); }
 
@@ -429,6 +483,94 @@ inline bool load(Program &P, const std::string &path, std::string *err = 0)
                 std::fclose(f); if (err) *err = where + perr; return false; }
             P.rates.push_back(R);
         }
+        /* [v1.3.2] ---- reaction, yield, biomass ---------------------------------------------
+         *
+         * These three exist so that a substrate line does not have to be typed. Written by hand,
+         * the two lines of a two-substrate reaction carry a ratio that nothing checks:
+         *
+         *     rate acetate = -2.5 * growth * Bug
+         *     rate o2      = -5.0 * growth * Bug
+         *
+         * 5.0 over 2.5 is two oxygen per acetate, which is the reaction. Mistype one digit and
+         * the run still finishes, the fields still look smooth, and the model creates or destroys
+         * oxygen at a steady rate for the rest of the simulation. Nothing in the output says so,
+         * because a rate law is entitled to any numbers it likes.
+         *
+         * Declared instead, the ratio is arithmetic rather than typing, and it cannot be wrong:
+         *
+         *     reaction acetate -1  o2 -2
+         *     yield    acetate 0.4
+         *     biomass  Bug
+         *
+         * This is the same design the graph network of example 18 already uses, where the network
+         * predicts one extent per reaction and the species rates are formed from the stoichiometry.
+         * Its provenance line records a stoichiometric residual of exactly zero for that reason. */
+        else if (key == "reaction") {
+            if (!sawVars) { std::fclose(f); if (err) *err = where + "'reaction' appears before 'vars'"; return false; }
+            size_t k = 0;
+            while (k < rest.size()) {
+                while (k < rest.size() && std::isspace((unsigned char) rest[k])) ++k;
+                size_t st = k;
+                while (k < rest.size() && !std::isspace((unsigned char) rest[k])) ++k;
+                if (k <= st) break;
+                const std::string nm = rest.substr(st, k - st);
+                while (k < rest.size() && std::isspace((unsigned char) rest[k])) ++k;
+                size_t st2 = k;
+                while (k < rest.size() && !std::isspace((unsigned char) rest[k])) ++k;
+                if (k <= st2) {
+                    std::fclose(f);
+                    if (err) *err = where + "'" + nm + "' has no stoichiometric coefficient. Write "
+                                            "them in pairs: reaction acetate -1  o2 -2";
+                    return false;
+                }
+                const std::string vs = rest.substr(st2, k - st2);
+                char *endp = 0;
+                const double nu = std::strtod(vs.c_str(), &endp);
+                if (endp == vs.c_str() || (endp && *endp != '\0')) {
+                    std::fclose(f);
+                    if (err) *err = where + "'" + vs + "' is not a number";
+                    return false;
+                }
+                if (nu == 0.0) {
+                    std::fclose(f);
+                    if (err) *err = where + "'" + nm + "' has coefficient 0. A species that neither "
+                                            "appears nor disappears does not belong in the reaction.";
+                    return false;
+                }
+                if (P.indexOfVar(nm) < 0) {
+                    std::fclose(f);
+                    if (err) *err = where + "'" + nm + "' is not in the vars line";
+                    return false;
+                }
+                for (size_t q = 0; q < P.stoich.size(); ++q)
+                    if (P.stoich[q].name == nm) {
+                        std::fclose(f);
+                        if (err) *err = where + "'" + nm + "' appears twice in the reaction";
+                        return false;
+                    }
+                StoichTerm t; t.name = nm; t.nu = nu;
+                P.stoich.push_back(t);
+            }
+            if (P.stoich.empty()) { std::fclose(f); if (err) *err = where + "'reaction' names nothing"; return false; }
+        }
+        else if (key == "yield") {
+            char nameBuf[256]; double yv = 0;
+            if (std::sscanf(rest.c_str(), "%255s %lf", nameBuf, &yv) != 2) {
+                std::fclose(f); if (err) *err = where + "'yield' needs a species and a number"; return false; }
+            if (!(yv > 0.0)) {
+                std::fclose(f);
+                if (err) *err = where + "the yield must be positive. It is how much biomass is made "
+                                        "per unit of that species consumed.";
+                return false;
+            }
+            P.yieldOf = nameBuf; P.yieldVal = yv;
+        }
+        else if (key == "biomass") {
+            char nameBuf[256];
+            if (std::sscanf(rest.c_str(), "%255s", nameBuf) != 1) {
+                std::fclose(f); if (err) *err = where + "'biomass' names nothing"; return false; }
+            P.biomassVar = nameBuf;
+        }
         else {
             std::fclose(f);
             if (err) *err = where + "unknown keyword '" + key + "'";
@@ -438,6 +580,72 @@ inline bool load(Program &P, const std::string &path, std::string *err = 0)
     std::fclose(f);
 
     if (!sawVars)      { if (err) *err = "'" + path + "' has no 'vars' line"; return false; }
+
+    /* [v1.3.2] Write the substrate lines the reaction implies.
+     *
+     * Done here, after the whole file has been read, for two reasons. The derived lines refer to
+     * "growth", so they have to sit after it in evaluation order, and the file is allowed to give
+     * its three declarations in any order it likes. */
+    if (!P.stoich.empty()) {
+        const std::string ctx = "'" + path + "': ";
+        if (P.yieldOf.empty())
+            { if (err) *err = ctx + "a 'reaction' line needs a 'yield' line to go with it. The "
+                                    "reaction says what is consumed per turn; the yield says how "
+                                    "much biomass one turn makes."; return false; }
+        if (P.biomassVar.empty())
+            { if (err) *err = ctx + "a 'reaction' line needs a 'biomass' line naming this "
+                                    "organism's own variable, because a substrate rate is the "
+                                    "growth rate times how much biomass is present."; return false; }
+        if (P.indexOfVar(P.biomassVar) < 0)
+            { if (err) *err = ctx + "'biomass " + P.biomassVar + "' is not in the vars line."; return false; }
+        if (P.indexOfRate("growth") < 0)
+            { if (err) *err = ctx + "a 'reaction' line needs a 'growth' rate line. The derived "
+                                    "substrate lines are growth times stoichiometry, so there has "
+                                    "to be a growth rate for them to be derived from."; return false; }
+
+        double nuKey = 0.0;
+        for (size_t q = 0; q < P.stoich.size(); ++q)
+            if (P.stoich[q].name == P.yieldOf) nuKey = P.stoich[q].nu;
+        if (nuKey == 0.0)
+            { if (err) *err = ctx + "the yield is quoted against '" + P.yieldOf + "', which is not "
+                                    "in the reaction line."; return false; }
+        /* The magnitude, so that the SIGN of each derived coefficient comes from that species alone:
+         * negative for a reactant, positive for a product, whichever side the yield was quoted on. */
+        const double nuKeyMag = (nuKey < 0.0) ? -nuKey : nuKey;
+
+        for (size_t q = 0; q < P.stoich.size(); ++q) {
+            const std::string &nm = P.stoich[q].name;
+            if (P.indexOfRate(nm) >= 0) {
+                if (err) *err = ctx + "'" + nm + "' has both a 'rate' line and a place in the "
+                                "'reaction' line. That is two sources of truth for the same number "
+                                "and they can disagree. Keep the reaction and delete the rate line, "
+                                "or keep the rate line and leave that species out of the reaction.";
+                return false;
+            }
+            /* moles of this species per unit of biomass made, signed by the species */
+            const double coef = (P.stoich[q].nu / nuKeyMag) / P.yieldVal;
+
+            char buf[256];
+            std::sprintf(buf, "%.10g * growth * %s", coef, P.biomassVar.c_str());
+            const std::string ex = buf;
+
+            /* Built through the ordinary parser rather than by assembling nodes, so a derived line
+             * is the same kind of object as a written one and shows up in the log the same way. */
+            std::vector<std::string> scope = P.vars;
+            for (size_t r = 0; r < P.rates.size(); ++r) scope.push_back(P.rates[r].name);
+            Rate R; R.name = nm; R.source = ex;
+            Parser parser(scope, P.nodes);
+            std::string perr;
+            if (!parser.parse(ex, R.root, perr)) { if (err) *err = ctx + perr; return false; }
+            P.rates.push_back(R);
+            ++P.nDerived;
+        }
+    } else if (!P.yieldOf.empty() || !P.biomassVar.empty()) {
+        if (err) *err = "'" + path + "': 'yield' or 'biomass' was given with no 'reaction' line, so "
+                        "there is nothing to derive from them.";
+        return false;
+    }
+
     if (P.rates.empty()){ if (err) *err = "'" + path + "' defines no rates"; return false; }
     return true;
 }
@@ -605,8 +813,26 @@ inline std::string describe(const Program &P, const std::string &path)
     s += "  [SYM]   units: " + P.unitName;
     if (P.unitScale != 1.0) s += "  (every rate divided by 3600 on load)";
     s += "\n";
+    /* [v1.3.2] A derived line is marked, so a reader can tell at a glance which numbers came out of
+     * the file and which the solver worked out from the reaction. */
+    const size_t firstDerived = P.rates.size() - P.nDerived;
     for (size_t r = 0; r < P.rates.size(); ++r)
-        s += "  [SYM]   " + P.rates[r].name + " = " + P.rates[r].source + "\n";
+        s += "  [SYM]   " + P.rates[r].name + " = " + P.rates[r].source
+           + (r >= firstDerived ? "        <- from the reaction, not the file" : "") + "\n";
+    if (!P.stoich.empty()) {
+        s += "  [SYM]   reaction:";
+        for (size_t q = 0; q < P.stoich.size(); ++q) {
+            char b[128];
+            std::sprintf(b, " %s %+g", P.stoich[q].name.c_str(), P.stoich[q].nu);
+            s += b;
+        }
+        char b2[256];
+        std::sprintf(b2, ",  yield %g biomass per %s,  biomass variable %s\n",
+                     P.yieldVal, P.yieldOf.c_str(), P.biomassVar.c_str());
+        s += b2;
+        s += "  [SYM]   the ratios between those substrate lines are exact by construction, so a\n"
+             "  [SYM]   mistyped multiplier cannot put mass into the domain or take it out.\n";
+    }
     bool any = false;
     for (size_t i = 0; i < P.vars.size(); ++i) if (P.hiRange[i] > P.loRange[i]) any = true;
     if (any) {
