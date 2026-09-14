@@ -1,5 +1,72 @@
 # Changelog
 
+## v1.4: the method guides become readable
+
+The five rate paths and the thermodynamic gate each had a guide. Each guide had
+a worked example with real numbers in it, and a set of figures that described
+the method in prose laid out as boxes. The prose was accurate and the boxes were
+not pictures of anything: a reader who wanted to know what the code does still
+had to read the code.
+
+This release replaces those figures with eleven flowcharts drawn from the source,
+and removes the thirty-one plates that said the same thing twice.
+
+### Added
+
+- **Two flowcharts per guide**, three for Method 1, drawn with one shared kit so
+  the reader learns the notation once. The first in each guide is the path as
+  code, in bands by how often the work runs: before the run, once at start-up,
+  and once per voxel per step, with the source file named on each band. The
+  second opens the one step the first takes on trust, with the arithmetic of a
+  real case drawn into it rather than described.
+- **Method 1 Figure 8** draws one linear program on two voxels of example 09 and
+  puts the two bounds on an axis, so which one binds is visible rather than
+  asserted. It sweeps the donor across the range a run visits and puts the
+  crossing at 0.16 mol/L, the concentration a domain has to straddle for the
+  limiting substrate to change from one place in it to another.
+- **Method 2 Figure 6** runs the shipped network on a fed voxel and a starved one
+  and draws all forty hidden units of each, shaded by what they return. In the
+  starved voxel the last layer has largely saturated and the output lands on the
+  bottom of the range the fit was scaled into, which de-scales to a small
+  negative number: that is what the floor at 1e-8 is there to catch.
+- **An equations section in every guide**, writing down what the text used but
+  never stated, and listing every equation in the order the code applies them,
+  grouped by how often each group runs.
+- **A `-flowcharts.pptx` beside every guide**, in native PowerPoint shapes rather
+  than as images, so a box can be moved and a label retyped.
+- **`tools/README.md`**, one table from rate path to the tool that feeds it and
+  the guide that documents it.
+
+### Changed
+
+- **`tools/` is grouped by the method that needs it**: `method_1_fba/`,
+  `method_2_surrogate/`, `method_3_symbolic/`, `method_4_graphnet/`, plus
+  `setup/`, `postprocess/` and `runtime/`. `complab3d_cobrapy.py` moves to
+  `runtime/` because it is not a tool: the solver imports it during the run and
+  `setup_case.sh` copies it into the case's `src/`. Every reference is updated,
+  in the README, the pipelines, the examples, four `src/` comments,
+  `setup_case.sh` and `check_repo.sh`.
+- **Thirty-one figures removed** across the six documents, each one a plate that
+  one of the new flowcharts now carries, together with the "how to read Figure N"
+  sections that went with them and the trailing pointer sections.
+
+### Fixed
+
+- **Methods 2 and 4 were invalid OOXML.** Both had table cells with no paragraph
+  in them, which Word refuses to open and LibreOffice repairs silently, so every
+  render looked correct and the defect shipped anyway. The editors now cut a
+  section by XML offset rather than paragraph by paragraph, so a table inside the
+  span goes with it, and assert that no empty cell survives.
+- **Tables pulled the paragraph above them into their first cell** wherever one
+  butted straight against the other. Every table now has a spacer in front of it.
+- **Monospace blocks split across page breaks**, so a stoichiometric matrix or a
+  flux vector could arrive with one row orphaned on the next page.
+- **Method 1 §6.2 and `complab3d_lexicographic.hh` disagreed with a comment in
+  `complab3d_processors_fba.hh`** about where the multi-step growth rate is read
+  from. The code reads it from the last stage's flux vector, which is correct;
+  the comment claiming the first stage's objective value is wrong and is noted
+  here because it is the one place in that file a reader could be misled.
+
 ## v1.3.1: the reaction rate becomes a field
 
 Until now a run recorded WHAT the concentrations were, and in the log and
