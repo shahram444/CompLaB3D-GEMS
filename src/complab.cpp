@@ -938,6 +938,10 @@ int main(int argc, char **argv) {
     //   <name_of_substrates>, refusing a mismatch -- is in integ::prepareLearned(), which
     //   compiles without Palabos and is tested on its own.
     complab_sym::Program symProg, symAbioticProg;
+    /* [v1.3.2] Room for the other organisms' rate law files, when they name their own. The
+     * registry keeps pointers into these, followed at every voxel of every step, so they live
+     * here in main() for the whole run rather than inside the loader. */
+    std::vector<complab_sym::Program> symStore((size_t) (num_of_microbes > 0 ? num_of_microbes : 1));
     complab_gnn::Network gnnNet, gnnAbioticNet;
     if (icfg.symEnabled || icfg.gnnEnabled) {
         //   Which organisms asked for each path.  Bound per microbe rather than to all, so
@@ -951,7 +955,7 @@ int main(int argc, char **argv) {
         std::string llog;
         const bool lok = integ::prepareLearned(icfg, vec_subs_names, vec_microbes_names,
                                                (int) num_of_microbes, symUsers, gnnUsers,
-                                               symProg, symAbioticProg, gnnNet, gnnAbioticNet,
+                                               symProg, symStore, symAbioticProg, gnnNet, gnnAbioticNet,
                                                llog);
         pcout << llog;
         if (!lok) return -1;

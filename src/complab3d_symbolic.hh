@@ -81,6 +81,38 @@
  *  per reaction and the species rates are formed from the stoichiometry, which is why that file's
  *  provenance records a stoichiometric residual of exactly zero.
  *
+ *  ------------------------------------------------------------------------------------------------
+ *  [v1.3.2] THE SAME THING FOR AN ABIOTIC LAW
+ *
+ *  An abiotic law has no organism, so it has no growth rate and no yield.  What it has is the rate of
+ *  the reaction itself, which the file gives as one "extent" line:
+ *
+ *      units    per_second
+ *      vars     Fe HS FeS
+ *
+ *      reaction Fe -1   HS -1   FeS +1
+ *      rate     extent = 1.6e2 * Fe * HS
+ *
+ *  and the solver writes  Fe = -1 * extent,  HS = -1 * extent,  FeS = +1 * extent.  One expression
+ *  instead of three, where the shipped abiotic example types the same product twice and nothing
+ *  checks that the two copies still agree.
+ *
+ *  ONE IDEA, TWO KINDS OF LAW.  Every reaction turns at some rate, and every species rate is its
+ *  stoichiometric number times that rate.  The kinds differ only in where the rate comes from:
+ *
+ *      abiotic     "extent" gives it directly, in mol/L per unit time
+ *      biotic      "growth" gives the specific growth rate, and extent = growth x biomass / yield
+ *
+ *  That split is not a convention, it is what the processors already do.  A "growth" output is
+ *  multiplied by the local biomass and a substrate output is not, so a biotic law must carry the
+ *  biomass factor in its substrate lines and an abiotic law must not.  Deriving them from the
+ *  reaction is what puts that factor in exactly once.
+ *
+ *  WHICH KIND A FILE IS, IS NOT A KEYWORD.  A "growth" line means biotic and an "extent" line means
+ *  abiotic, and there is deliberately no third line saying so: two places stating the same fact is
+ *  the failure this whole block exists to remove.  A file with both is refused, and so is a file
+ *  loaded through the wrong tag, naming the tag and the alternative.
+ *
  *  UNITS.  defineKinetics.hh works in mol/L per SECOND, and a growth rate per second, so that is
  *  what this header assumes and what "units per_second" (the default) means.  A formula fitted to
  *  flux balance output almost always comes out per HOUR, because that is the convention metabolic
@@ -584,24 +616,91 @@ inline bool load(Program &P, const std::string &path, std::string *err = 0)
     /* [v1.3.2] Write the substrate lines the reaction implies.
      *
      * Done here, after the whole file has been read, for two reasons. The derived lines refer to
-     * "growth", so they have to sit after it in evaluation order, and the file is allowed to give
-     * its three declarations in any order it likes. */
+     * "growth" or to "extent", so they have to sit after it in evaluation order, and the file is
+     * allowed to give its declarations in any order it likes.
+     *
+     * ONE IDEA, TWO KINDS OF LAW. Every reaction turns at some rate, and every species rate is its
+     * stoichiometric number times that rate. What differs is where the rate comes from:
+     *
+     *     abiotic    an 'extent' line gives it directly, in mol/L per unit time.
+     *     biotic     a 'growth' line gives the specific growth rate, and
+     *                    extent = growth x biomass / yield
+     *
+     * That split is not a matter of taste, it is what the solver already does. In the biotic
+     * processor a 'growth' output is multiplied by the local biomass and a substrate output is not,
+     * so a biotic law has to carry the biomass factor in its substrate lines and an abiotic law
+     * must not. Deriving them from the reaction is what puts that factor in exactly once. */
+    const bool hasGrowth = P.indexOfRate("growth") >= 0;
+    const bool hasExtent = P.indexOfRate("extent") >= 0;
+
+    if (hasGrowth && hasExtent) {
+        if (err) *err = "'" + path + "': the file has both a 'growth' line and an 'extent' line. "
+                        "A law is one or the other: 'growth' is a specific growth rate and belongs "
+                        "to an organism, 'extent' is how fast the reaction itself turns and belongs "
+                        "to no organism.";
+        return false;
+    }
+    if (hasExtent && P.stoich.empty()) {
+        if (err) *err = "'" + path + "': there is an 'extent' line but no 'reaction' line. An extent "
+                        "is how fast a reaction turns, so without the reaction the solver has no way "
+                        "to know what it turns into.";
+        return false;
+    }
+
     if (!P.stoich.empty()) {
         const std::string ctx = "'" + path + "': ";
+
+        /* ---- abiotic: one expression, and the stoichiometry does the rest ------------------- */
+        if (hasExtent) {
+            if (!P.yieldOf.empty() || !P.biomassVar.empty()) {
+                if (err) *err = ctx + "an 'extent' line makes this an abiotic law, which belongs to "
+                                "no organism, so a 'yield' or 'biomass' line has nothing to apply "
+                                "to. Remove them, or use a 'growth' line instead and make it biotic.";
+                return false;
+            }
+            for (size_t q = 0; q < P.stoich.size(); ++q) {
+                const std::string &nm = P.stoich[q].name;
+                if (P.indexOfRate(nm) >= 0) {
+                    if (err) *err = ctx + "'" + nm + "' has both a 'rate' line and a place in the "
+                                    "'reaction' line. That is two sources of truth for the same "
+                                    "number and they can disagree. Keep the reaction and delete the "
+                                    "rate line, or keep the rate line and leave that species out of "
+                                    "the reaction.";
+                    return false;
+                }
+                char buf[256];
+                std::sprintf(buf, "%.10g * extent", P.stoich[q].nu);
+                const std::string ex = buf;
+
+                std::vector<std::string> scope = P.vars;
+                for (size_t r = 0; r < P.rates.size(); ++r) scope.push_back(P.rates[r].name);
+                Rate R; R.name = nm; R.source = ex;
+                Parser parser(scope, P.nodes);
+                std::string perr;
+                if (!parser.parse(ex, R.root, perr)) { if (err) *err = ctx + perr; return false; }
+                P.rates.push_back(R);
+                ++P.nDerived;
+            }
+            if (P.rates.empty()) { if (err) *err = "'" + path + "' defines no rates"; return false; }
+            return true;
+        }
+
+        /* ---- biotic: growth, a yield to convert it, and the biomass it applies to ------------ */
         if (P.yieldOf.empty())
             { if (err) *err = ctx + "a 'reaction' line needs a 'yield' line to go with it. The "
                                     "reaction says what is consumed per turn; the yield says how "
-                                    "much biomass one turn makes."; return false; }
+                                    "much biomass one turn makes. For a reaction with no organism, "
+                                    "give an 'extent' line instead and drop the yield."; return false; }
         if (P.biomassVar.empty())
             { if (err) *err = ctx + "a 'reaction' line needs a 'biomass' line naming this "
                                     "organism's own variable, because a substrate rate is the "
                                     "growth rate times how much biomass is present."; return false; }
         if (P.indexOfVar(P.biomassVar) < 0)
             { if (err) *err = ctx + "'biomass " + P.biomassVar + "' is not in the vars line."; return false; }
-        if (P.indexOfRate("growth") < 0)
-            { if (err) *err = ctx + "a 'reaction' line needs a 'growth' rate line. The derived "
-                                    "substrate lines are growth times stoichiometry, so there has "
-                                    "to be a growth rate for them to be derived from."; return false; }
+        if (!hasGrowth)
+            { if (err) *err = ctx + "a 'reaction' line needs either a 'growth' rate line, for a law "
+                                    "that belongs to an organism, or an 'extent' rate line, for one "
+                                    "that does not. This file has neither."; return false; }
 
         double nuKey = 0.0;
         for (size_t q = 0; q < P.stoich.size(); ++q)
@@ -643,6 +742,14 @@ inline bool load(Program &P, const std::string &path, std::string *err = 0)
     } else if (!P.yieldOf.empty() || !P.biomassVar.empty()) {
         if (err) *err = "'" + path + "': 'yield' or 'biomass' was given with no 'reaction' line, so "
                         "there is nothing to derive from them.";
+        return false;
+    }
+
+    /* An 'extent' line with no reaction was refused above; this catches the reverse for the abiotic
+     * kind, where the reaction is present but nothing says how fast it turns. */
+    if (!P.stoich.empty() && !hasGrowth && !hasExtent) {
+        if (err) *err = "'" + path + "': there is a 'reaction' line but neither a 'growth' nor an "
+                        "'extent' line, so nothing says how fast it goes.";
         return false;
     }
 
@@ -747,6 +854,19 @@ inline std::string bindToSubstrates(const Program &P,
             out.subsOfRate[r] = -1;
             continue;
         }
+        /* [v1.3.2] 'extent' is how fast the reaction itself turns.  Like 'growth' it names no
+         * substrate: the species rates were derived from it at load time and stand as their own
+         * lines.  Marked -1 so the processors skip it instead of hunting for a lattice called
+         * "extent", which is what would otherwise happen. */
+        if (P.rates[r].name == "extent") {
+            if (!abiotic)
+                return "this file declares an 'extent' rate, which makes it an abiotic law, but it "
+                       "was loaded through <expressions_file>, which hands a law to an organism. "
+                       "Point <abiotic_file> at it instead, or replace the extent line with a "
+                       "'growth' line plus 'yield' and 'biomass' to make it belong to the microbe.";
+            out.subsOfRate[r] = -1;
+            continue;
+        }
         int hit = -1;
         for (size_t s = 0; s < subsNames.size(); ++s)
             if (subsNames[s] == P.rates[r].name) { hit = (int) s; break; }
@@ -761,6 +881,86 @@ inline std::string bindToSubstrates(const Program &P,
     }
     return std::string();
 }
+
+/* ------------------------------------------------------------------------------------------------
+ *  [v1.3.2] WHICH FILE EACH ORGANISM GETS
+ *
+ *  <symbolic><expressions_file> names one file, and it used to be handed to every organism on the
+ *  symbolic path.  That works only while they share a rate law AND a name, because a biotic .sym
+ *  names its organism on its vars line: a file saying `vars CH4 SO4 ANME` cannot bind to an
+ *  organism called SRB, and the run stopped.  Two symbolic organisms with different names could not
+ *  run together at all.
+ *
+ *  An organism may now name its own file in <microbiology><microbeN><expressions_file>, falling
+ *  back to the shared one when it does not.  This works it out and says why when it cannot.
+ *
+ *  It lives here rather than in complab3d_integration.hh because that header cannot be compiled
+ *  without Palabos and tinyxml, so nothing in the test suite reaches it, and a decision with five
+ *  ways to be wrong should not be the one piece of this feature that no test can see.
+ *
+ *      perMicrobe   one entry per organism, empty where none was given.  May be longer than
+ *                   nMicrobes: the reader probes a fixed number of blocks.
+ *      shared       <symbolic><expressions_file>, possibly empty
+ *      users        the organisms whose reaction_type is symbolic
+ *      want         OUT, one path per organism, empty for organisms not on this path
+ *      paths        OUT, the distinct files to load, in the order they are first needed
+ *
+ *  Returns an empty string on success, or a message naming the organism and what to do.
+ * ---------------------------------------------------------------------------------------------- */
+inline std::string chooseFiles(const std::vector<std::string> &perMicrobe,
+                               const std::string &shared,
+                               const std::vector<int> &users,
+                               const std::vector<std::string> &microbeNames,
+                               int nMicrobes,
+                               std::vector<std::string> &want,
+                               std::vector<std::string> &paths)
+{
+    want.assign((size_t) (nMicrobes > 0 ? nMicrobes : 0), std::string());
+    paths.clear();
+
+    const std::string unknown = "that organism";
+
+    /* A file named against an organism that is not on this path would be read, reported in the
+     * log, and never evaluated, which reads as though it were in use. */
+    for (size_t iM = 0; iM < perMicrobe.size(); ++iM) {
+        if (perMicrobe[iM].empty()) continue;
+        if ((int) iM >= nMicrobes) {
+            char b[64]; std::sprintf(b, "microbe%d", (int) iM);
+            return std::string("<") + b + "><expressions_file> names " + perMicrobe[iM]
+                 + ", but this run has no such organism.";
+        }
+        bool onPath = false;
+        for (size_t k = 0; k < users.size(); ++k) if (users[k] == (int) iM) onPath = true;
+        if (!onPath) {
+            const std::string nm = (iM < microbeNames.size()) ? microbeNames[iM] : unknown;
+            return nm + " names <expressions_file> " + perMicrobe[iM] + ", but its <reaction_type> "
+                   "is not symbolic, so the file would never be evaluated. Set "
+                   "<reaction_type>symbolic</reaction_type>, or remove the line.";
+        }
+    }
+
+    for (size_t k = 0; k < users.size(); ++k) {
+        const int gM = users[k];
+        if (gM < 0 || gM >= nMicrobes) continue;
+        const size_t iM = (size_t) gM;
+        const std::string own = (iM < perMicrobe.size()) ? perMicrobe[iM] : std::string();
+        want[iM] = own.empty() ? shared : own;
+        if (want[iM].empty()) {
+            const std::string nm = (iM < microbeNames.size()) ? microbeNames[iM] : unknown;
+            return nm + " has <reaction_type>symbolic</reaction_type> but no rate law. Give it its "
+                   "own <expressions_file>, or set the shared <symbolic><expressions_file>.";
+        }
+        bool seen = false;
+        for (size_t q = 0; q < paths.size(); ++q) if (paths[q] == want[iM]) seen = true;
+        if (!seen) paths.push_back(want[iM]);
+    }
+
+    /* A shared file with no organism using it is still loaded, so that the log reports it and the
+     * "nothing will evaluate it" note has something to describe. */
+    if (paths.empty() && !shared.empty()) paths.push_back(shared);
+    return std::string();
+}
+
 
 /* Register a bound program for one microbe, or for every microbe when microbe < 0.  `P` must
  * outlive the run: in practice it is a local of main(), exactly as srgNet is. */
@@ -826,10 +1026,18 @@ inline std::string describe(const Program &P, const std::string &path)
             std::sprintf(b, " %s %+g", P.stoich[q].name.c_str(), P.stoich[q].nu);
             s += b;
         }
-        char b2[256];
-        std::sprintf(b2, ",  yield %g biomass per %s,  biomass variable %s\n",
-                     P.yieldVal, P.yieldOf.c_str(), P.biomassVar.c_str());
-        s += b2;
+        s += "\n";
+        if (P.indexOfRate("extent") >= 0) {
+            s += "  [SYM]   kind: abiotic. An 'extent' line gives the rate of the reaction itself,\n"
+                 "  [SYM]   so it fires in every fluid voxel and no biomass enters the arithmetic.\n";
+        } else {
+            char b2[256];
+            std::sprintf(b2, "  [SYM]   kind: biotic. yield %g biomass per %s, biomass variable %s.\n"
+                             "  [SYM]   extent = growth x %s / %g, then stoichiometry.\n",
+                         P.yieldVal, P.yieldOf.c_str(), P.biomassVar.c_str(),
+                         P.biomassVar.c_str(), P.yieldVal);
+            s += b2;
+        }
         s += "  [SYM]   the ratios between those substrate lines are exact by construction, so a\n"
              "  [SYM]   mistyped multiplier cannot put mass into the domain or take it out.\n";
     }

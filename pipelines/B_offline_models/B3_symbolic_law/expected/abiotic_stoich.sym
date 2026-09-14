@@ -1,0 +1,48 @@
+# Abiotic iron sulfide formation, the same reaction as abiotic.sym:
+#
+#     Fe(2+) + HS(-)  ->  FeS + H(+)
+#
+# and the same rate. The two files differ only in who writes the species lines.
+#
+# abiotic.sym writes them by hand, one per species:
+#
+#     rate   Fe = -1.6e2 * Fe * HS
+#     rate   HS = -1.6e2 * Fe * HS
+#
+# The same product, typed twice, and nothing checks that the two copies still
+# agree. Edit one and forget the other and the run finishes, the fields look
+# smooth, and sulfide appears or vanishes at a steady rate for the whole
+# simulation. Adding the FeS line would make it three copies.
+#
+# This file states the reaction and gives the rate once. At start-up the solver
+# writes one line per species from the stoichiometry and prints each one in the
+# log marked as derived, so the ratios are arithmetic rather than typing.
+#
+# WHICH SWEEP RUNS THIS. Point <abiotic_file> at it, not <expressions_file>. An
+# 'extent' line means the rate of the reaction itself, which belongs to no
+# organism and fires in every fluid voxel, and the run stops with a message if
+# the file reaches the wrong sweep. A law with an organism uses a 'growth' line
+# with a 'yield' and a 'biomass' instead; see examples/17_symbolic_law.
+
+units    per_second
+vars     Fe HS FeS
+
+# ---- the chemistry ----------------------------------------------------------
+# Negative is consumed, positive is produced. H+ is left out because this run
+# does not transport it; add it here the moment it becomes a species.
+reaction Fe -1   HS -1   FeS +1
+
+# ---- the rate ---------------------------------------------------------------
+# How fast the reaction itself turns, in mol/L/s. Second order, one order in
+# each reactant. This is the only line that is a fitted or measured claim.
+rate     extent = 1.6e2 * Fe * HS
+
+# From those two the solver writes, before the first step:
+#
+#     Fe  = -1 * extent
+#     HS  = -1 * extent
+#     FeS = +1 * extent
+
+# ---- where the rate is entitled to be believed -------------------------------
+range    Fe 1e-9 1e-3
+range    HS 1e-9 1e-3

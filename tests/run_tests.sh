@@ -8,6 +8,8 @@ g++ -O2 -Wall -Wextra -std=c++11 -I../src        -o t1 test_sym.cpp             
 g++ -O2 -Wall -Wextra -std=c++11 -I../src        -o t2 test_file.cpp                 && ./t2
 echo "### the .sym reaction block: the solver writes the substrate lines"
 g++ -O2 -Wall -Wextra -std=c++11 -I../src        -o t14 test_sym_stoich.cpp          && ./t14
+echo "### the guided helper, driven by a script instead of a person"
+python3 check_wizard.py
 echo "### the surrogate: more than growth out of one network"
 g++ -O2 -Wall -Wextra -std=c++11 -I../src        -o t8 test_surrogate_multi.cpp && ./t8
 echo "### the surrogate: the run-time and compiled paths agree"

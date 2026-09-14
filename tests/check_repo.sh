@@ -59,6 +59,7 @@ check_copy() {   # check_copy <source> <path under examples/*/>
 }
 check_copy tools/extractMM.py                          training/extractMM.py
 check_copy tools/fit_symbolic.py                       training/fit_symbolic.py
+check_copy tools/make_rate_law.py                      training/make_rate_law.py
 check_copy tools/train_graphnet.py                     training/train_graphnet.py
 check_copy tools/makeEquilibrium.py                    training/makeEquilibrium.py
 check_copy tools/makeKinetics.py                       training/makeKinetics.py

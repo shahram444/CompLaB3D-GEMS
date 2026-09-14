@@ -837,7 +837,17 @@
     <symbolic>
         <enabled>false</enabled>
 
-        <!-- Belongs to an organism: fires only where its biomass is. -->
+        <!-- Belongs to an organism: fires only where its biomass is.
+
+             This is the SHARED file: every organism whose reaction_type is
+             symbolic uses it unless it names one of its own.  An organism
+             names its own with <expressions_file> inside its own <microbeN>
+             block, further up under <microbiology>.
+
+             Two organisms can only share one file when they also share a
+             name, because a biotic .sym names its organism on its vars line.
+             A file saying `vars CH4 SO4 ANME` cannot bind to an organism
+             called SRB, and the run stops and says so. -->
         <expressions_file>input/rates.sym</expressions_file>
 
         <!-- Belongs to nobody: fires in every fluid voxel, which is what

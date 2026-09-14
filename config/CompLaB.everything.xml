@@ -187,6 +187,13 @@
             <name_of_microbes>Ecoli</name_of_microbes>
             <solver_type>CA</solver_type>                <!-- CA | FD | LBM -->
 
+            <!-- This organism's own symbolic rate law, overriding the shared
+                 <symbolic><expressions_file> below.  Needed as soon as two
+                 organisms use the symbolic path, because a biotic .sym names
+                 its organism on its vars line and one file cannot bind to two
+                 different names.  Leave it out to use the shared file. -->
+            <expressions_file>input/ecoli.sym</expressions_file>
+
             <!-- ONE of: kinetics, glpk, cobrapy, surrogate, symbolic, graphnet,
                  or any of those with _and_kinetics appended -->
             <reaction_type>kinetics</reaction_type>

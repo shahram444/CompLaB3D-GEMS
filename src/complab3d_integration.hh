@@ -91,6 +91,19 @@ struct Config {
     std::string symAbioticFile;       // <symbolic><abiotic_file>
     int symMicrobe;                   // -1 = every microbe whose reaction_type is symbolic
 
+    /* [v1.3.2] One .sym file per organism, from <microbiology><microbeN><expressions_file>.
+     *
+     * <symbolic><expressions_file> names ONE file, and before this it was handed to every organism
+     * whose reaction_type is symbolic. That works only while they all share a rate law AND a name,
+     * because a biotic .sym names its organism on its vars line: hand a file saying `vars CH4 SO4
+     * ANME` to a second organism called SRB and the bind fails with "the file uses variable 'ANME',
+     * which is neither a substrate nor the microbe 'SRB'". Two symbolic organisms with different
+     * names could not run at all.
+     *
+     * An entry here overrides the shared file for that organism. Empty means fall back to it, so a
+     * run where every organism does share a law is written exactly as before. */
+    std::vector<std::string> symFilePerMicrobe;
+
     bool gnnEnabled;
     std::string gnnFile;              // <graphnet><network_file>
     std::string gnnAbioticFile;       // <graphnet><abiotic_file>
@@ -259,7 +272,26 @@ inline std::string readConfig(Reader &doc, Config &cfg)
         try { doc[P]["symbolic"]["expressions_file"].read(cfg.symFile); } catch (...) {}
         try { doc[P]["symbolic"]["abiotic_file"].read(cfg.symAbioticFile); } catch (...) {}
         try { int m; doc[P]["symbolic"]["microbe"].read(m); cfg.symMicrobe = m; } catch (...) {}
-        if (cfg.symFile.empty() && cfg.symAbioticFile.empty())
+
+        /* Per-organism overrides. Read for every microbe rather than only the symbolic ones,
+         * because reaction_type is not known here; an entry against a non-symbolic organism is
+         * caught later, where it can be reported with the organism's name. */
+        /* The number of organisms is not known here, so the blocks are probed. 64 is far above
+         * any run anyone has written and costs nothing: a missing block throws and is caught. */
+        cfg.symFilePerMicrobe.assign(64, std::string());
+        for (int iM = 0; iM < 64; ++iM) {
+            char nm[64]; std::sprintf(nm, "microbe%d", iM);
+            try {
+                std::string f;
+                doc[P]["microbiology"][nm]["expressions_file"].read(f);
+                cfg.symFilePerMicrobe[(size_t) iM] = f;
+            } catch (...) {}
+        }
+
+        bool anyPer = false;
+        for (size_t i = 0; i < cfg.symFilePerMicrobe.size(); ++i)
+            if (!cfg.symFilePerMicrobe[i].empty()) anyPer = true;
+        if (cfg.symFile.empty() && cfg.symAbioticFile.empty() && !anyPer)
             return "  [SYM] <symbolic> is enabled but neither <expressions_file> nor "
                    "<abiotic_file> is set.\n";
     }
@@ -626,21 +658,55 @@ inline bool prepareLearned(const Config &cfg,
                            const std::vector<int> &symUsers,
                            const std::vector<int> &gnnUsers,
                            complab_sym::Program &symProg,
+                           std::vector<complab_sym::Program> &symStore,
                            complab_sym::Program &symAbioticProg,
                            complab_gnn::Network &gnnNet,
                            complab_gnn::Network &gnnAbioticNet,
                            std::string &log)
 {
-    /* ---------------------------------------------------------------- symbolic, biotic */
-    if (cfg.symEnabled && !cfg.symFile.empty()) {
-        std::string err;
-        if (!complab_sym::load(symProg, cfg.symFile, &err)) {
-            log += "  [SYM] cannot read " + cfg.symFile + ": " + err + "\n";
+    /* ---------------------------------------------------------------- symbolic, biotic
+     *
+     * [v1.3.2] Each organism may name its own file, and falls back to the shared one when it does
+     * not.  Before this there was only the shared one, which meant two symbolic organisms could
+     * run together only if they shared a rate law AND a name: a biotic .sym names its organism on
+     * its vars line, so a file written for ANME cannot bind to SRB and the run stopped.
+     *
+     * Files are loaded once each and reused, so two organisms naming the same path share one
+     * parsed program and one line in the log, while still binding separately so that each sees its
+     * own biomass. */
+    if (cfg.symEnabled) {
+        /* Which file each organism gets, and which distinct files that adds up to. The decision
+         * and every way it can be wrong live in complab3d_symbolic.hh, where the test suite can
+         * reach them: this header needs Palabos and tinyxml to compile, so nothing here is
+         * covered by a test. */
+        std::vector<std::string> want, paths;
+        const std::string cerr = complab_sym::chooseFiles(cfg.symFilePerMicrobe, cfg.symFile,
+                                                          symUsers, microbeNames, nMicrobes,
+                                                          want, paths);
+        if (!cerr.empty()) { log += "  [SYM] " + cerr + "\n"; return false; }
+
+        /* symProg holds the first file, so a run with a single one keeps using exactly the
+         * storage it always did and symStore stays untouched. */
+        if (paths.size() > symStore.size() + 1) {
+            char b[160];
+            std::sprintf(b, "  [SYM] this run needs %d rate law files but only %d were made "
+                            "available by the caller.\n",
+                         (int) paths.size(), (int) symStore.size() + 1);
+            log += b;
             return false;
         }
-        log += complab_sym::describe(symProg, cfg.symFile);
 
-        if (symUsers.empty())
+        for (size_t q = 0; q < paths.size(); ++q) {
+            complab_sym::Program &P = (q == 0) ? symProg : symStore[q - 1];
+            std::string err;
+            if (!complab_sym::load(P, paths[q], &err)) {
+                log += "  [SYM] cannot read " + paths[q] + ": " + err + "\n";
+                return false;
+            }
+            log += complab_sym::describe(P, paths[q]);
+        }
+
+        if (symUsers.empty() && !cfg.symFile.empty())
             log += "  [SYM] note: a file was loaded but no microbe has reaction_type symbolic, "
                    "so nothing will evaluate it.\n";
 
@@ -648,13 +714,20 @@ inline bool prepareLearned(const Config &cfg,
             const int gM = symUsers[k];
             const std::string nm = (gM >= 0 && gM < (int) microbeNames.size())
                                  ? microbeNames[(size_t) gM] : std::string();
+            const std::string &f = want[(size_t) gM];
+            size_t q = 0;
+            for (; q < paths.size(); ++q) if (paths[q] == f) break;
+            complab_sym::Program &P = (q == 0) ? symProg : symStore[q - 1];
+
             complab_sym::Binding b;
-            const std::string berr = complab_sym::bindToSubstrates(symProg, subsNames, nm, b, false);
+            const std::string berr = complab_sym::bindToSubstrates(P, subsNames, nm, b, false);
             if (!berr.empty()) {
-                log += "  [SYM] " + cfg.symFile + ", for microbe '" + nm + "': " + berr + "\n";
+                log += "  [SYM] " + f + ", for microbe '" + nm + "': " + berr + "\n";
                 return false;
             }
             complab_sym::registerProgram(gM, b, nMicrobes);
+            if (paths.size() > 1)
+                log += "  [SYM]   " + nm + " uses " + f + "\n";
         }
     }
 

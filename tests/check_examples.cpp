@@ -11,6 +11,7 @@ static const char* SYMS[] = {
     "../pipelines/B_offline_models/B3_symbolic_law/expected/ecoli.sym",
     "../pipelines/B_offline_models/B3_symbolic_law/expected/ecoli_discovered.sym",
     "../pipelines/B_offline_models/B3_symbolic_law/expected/abiotic.sym",
+    "../pipelines/B_offline_models/B3_symbolic_law/expected/abiotic_stoich.sym",
     0
 };
 static const char* GNNS[] = {
