@@ -234,29 +234,38 @@ variables, breeds the ones that fit the data best, and returns the
 expression it converged on. Nobody tells it about Monod; if the data is
 Monod-shaped, it finds Monod.
 
-**What comes back is a Pareto set, not one answer.** One expression per node
-count, from a crude two-term form up to a long one that fits better. The
-choice among them is yours, and the shortest expression whose accuracy you
-can live with is almost always right: a longer expression that fits only
-marginally better is usually fitting noise and will not survive
-extrapolation.
+**What comes back is a list, not one answer.** One formula per length, where
+length is how many pieces a formula has and a number, a name or an operator
+is one piece. The list runs from a crude two-term form up to a long one that
+fits better. The choice among them is yours, and the shortest formula whose
+accuracy you can live with is almost always right: a longer formula that fits
+only marginally better is fitting noise and will not survive extrapolation.
 
 ```
-    1.  fit        search over expression forms      -> a Pareto set
-    2.  choose     take the elbow, not the best fit
-    3.  finish     write the other substrate lines by hand as multiples of
-                   the fitted rate, so stoichiometry cannot drift
-    4.  bound      add one range line per variable
+    1.  say what you have    the table, the reaction, the yield, the organism
+    2.  fit                  search over formula shapes    -> a list
+    3.  choose               the last length where the error still fell
 ```
 
-Steps 3 and 4 are yours because the search cannot do them: it fits one
-output column and knows nothing about your stoichiometry, your units, or
-which variable is a concentration and which a biomass.
+Nothing is left over. The file the search writes carries the fitted rate line,
+the chemistry it was given, one range line per variable and its own provenance
+header, and it runs as it stands.
 
-### Letting the solver write the substrate lines instead
+Two ways to run it. Answer questions:
 
-Step 3 above is the dangerous one, because those two lines carry a ratio that
-nothing checks:
+```
+python3 training/make_rate_law.py
+```
+
+which reads any training table, lists its columns back at you, asks which one
+is the rate and which are the inputs, asks for the chemistry, and prints the
+equivalent command at the end so the run can be repeated. Or type that command
+yourself, which is what `offline.sh` does.
+
+### Why the file states the chemistry rather than the substrate lines
+
+Step 1 asks for the reaction and the yield rather than for the substrate lines
+themselves, because those lines carry a ratio that nothing checks:
 
 ```
 rate    acetate = -2.5 * growth * Bug
@@ -312,6 +321,108 @@ The same reasoning already governs example 18: its graph network predicts one
 extent per reaction and forms the species rates from the stoichiometry, which is
 why that file records a stoichiometric residual of exactly zero.
 
+### The same thing for a reaction with no organism
+
+An abiotic law, one that happens in open water whether or not anything is alive
+nearby, has no growth rate and no yield. What it has is the rate of the reaction
+itself, and the file gives that as one `extent` line:
+
+```
+units    per_second
+vars     Fe HS FeS
+
+reaction Fe -1   HS -1   FeS +1
+rate     extent = 1.6e2 * Fe * HS
+```
+
+from which the solver writes `Fe = -1 * extent`, `HS = -1 * extent` and
+`FeS = +1 * extent`. Compare with the file that ships today, where the same
+product is typed once per species and nothing checks that the copies still agree.
+`pipelines/B_offline_models/B3_symbolic_law/expected/abiotic_stoich.sym` is the
+two side by side.
+
+**One idea, two kinds of law.** Every reaction turns at some rate, and every
+species rate is its stoichiometric number times that rate. The kinds differ only
+in where the rate comes from:
+
+| | where the rate comes from | which tag loads it |
+|---|---|---|
+| **abiotic** | `extent`, directly, in mol/L per unit time | `<abiotic_file>` |
+| **biotic** | `growth`, and then `extent = growth x biomass / yield` | `<expressions_file>` |
+
+That split is not a convention, it is what the solver already does. A `growth`
+output is multiplied by the local biomass and a substrate output is not, so a
+biotic law has to carry the biomass factor in its substrate lines and an abiotic
+law must not. Deriving them from the reaction puts that factor in exactly once.
+
+**Which kind a file is, is not a keyword.** A `growth` line means biotic and an
+`extent` line means abiotic. There is deliberately no third line declaring it,
+because two places stating the same fact is the failure this block exists to
+remove. A file carrying both is refused, and so is a file that reaches the wrong
+tag, with a message naming the tag and the alternative.
+
+### If you have never done this before, let it ask you
+
+`training/make_rate_law.py` is the same search with the options taken away. Point
+it at a table of your own and it reads the columns, shows you what it found, and
+asks its way through the rest in ordinary words:
+
+```bash
+python3 training/make_rate_law.py training/growth_samples.csv
+```
+
+```
+      column         smallest      largest       what it might be
+      acetate        1.002e-06     0.004949      something it depends on
+      o2             1.022e-06     0.001963      something it depends on
+      growth         1.178e-09     0.003041      the thing to predict
+
+      400 rows.
+
+  Which column is the thing you want a formula for? [growth]
+  Is this reaction carried out by an organism? (yes/no) [yes]
+  What is the organism called? [Bug]
+  How many acetate per turn of the reaction? [-1]
+  How many o2 per turn of the reaction? [-1]
+  How much Bug is made per acetate used? [0.4]
+  Are the rates in your table per second or per hour? [per_hour]
+  How thorough a search? [normal]
+```
+
+Every question shows its answer in brackets and takes it if you press Enter.
+Nothing is written until it has shown you a summary and asked. It then prints the
+single command that would produce the same file again without the questions, so
+the result stays reproducible and you never answer them twice.
+
+Answering **no** to the organism question is what makes the law abiotic: it stops
+asking about yields and biomass and asks for the rate of the reaction itself
+instead.
+
+### Or give the tool the chemistry directly
+
+Once you know the questions, skip them. Give the chemistry on the command line and
+what comes back runs as it stands:
+
+```bash
+python3 training/fit_symbolic.py --data training/growth_samples.csv \
+        --target growth --inputs acetate,o2 \
+        --reaction "acetate -1  o2 -2" --yield "acetate 0.4" --biomass Bug \
+        --units per_hour --out input/growth_discovered.sym
+```
+
+and for an abiotic law, the same command without a yield and without a biomass,
+which is exactly what makes it abiotic:
+
+```bash
+python3 training/fit_symbolic.py --data mytable.csv \
+        --target extent --inputs Fe,HS \
+        --reaction "Fe -1  HS -1  FeS +1" --rate-name extent \
+        --units per_second --out input/abiotic.sym
+```
+
+Leave the reaction arguments off and you get the old behaviour: a growth line
+and a note that the substrate lines are yours to write.
+
 **The rule underneath all of it:** fit what you do not know, declare what you do.
 You do not know the growth law, so let the search find it. You do know the
 stoichiometry, so state it and never let a fit near it.
@@ -357,8 +468,9 @@ normal form, one such expression came out as
     true    7.00 x a x o / (0.01000 + o + 0.200 a + ...)
 ```
 
-The automatic pick will not choose it. It takes the steepest gain per node,
-which lands on the crude bilinear form, so read the list and use `--pick`.
+The automatic pick will not choose it. It takes the biggest drop in error per
+extra piece of formula, which lands on the crude bilinear form, so read the list
+and use `--pick`.
 
 ### Reproducibility
 
@@ -425,23 +537,32 @@ Three outcomes, and the check says which one you got:
 ```
 
 ```
-  the two runs found the SAME LAW at every complexity: the expressions compute
-  identical values on every sample. Some are written differently.
+  the two runs found the SAME LAW at every length: the formulas predict the
+  same thing, by a margin far inside their own error against your
+  measurements. Some are written differently.
 ```
 
 ```
   PARTLY REPRODUCIBLE.
-    same law in both runs at 1, 3, 5 nodes.
-    DIFFERENT law at 7, 9, 11, 13, 15, 17, 19, 21 nodes.
+    same law in both runs at length 1, 3, 5.
+    DIFFERENT law at length 7, 9, 11, 13, 15, 17, 19, 21.
 ```
 
 The third is the common one on a long search, and the pattern in it is not
-random: the short expressions repeat and the long ones do not. That is the same
-rank-deficiency again. A long expression carries more constants than 400 samples
+random: the short formulas repeat and the long ones do not. That is the same
+rank-deficiency again. A long formula carries more constants than 400 samples
 can pin down, so its fit has no unique answer, so it is exactly the part of the
 list that cannot repeat. It is also the part you should not be quoting. The
-elbow is the answer, and when the elbow sits in the agreeing set, the expression
-you would actually use is reproducible.
+length where the error stopped falling is the answer, and when that length sits
+in the agreeing set, the formula you would actually use is reproducible.
+
+**What counts as the same law** is judged against the formula's own error, not
+against a fixed number of digits. Two runs agree when the gap between them is
+small compared with how far each sits from your measurements: on this case's
+data the two runs at length 13 differ by 0.07 percent while both are 1.3 percent
+away from the data, which is the same law by any standard a reader would apply.
+A fixed threshold was tried first and was tighter than the fit error itself, so
+it reported real agreement as disagreement.
 
 Set `VERIFY=0` to skip the check. Every `.sym` the search writes carries the
 command, the seed, the thread setting and the library versions in its header,
@@ -466,6 +587,8 @@ running belong in different places on a cluster.
 | File | What it is | Where you run it |
 |---|---|---|
 | `COMPILE.txt` | The interactive session that builds `./complab`, step by step | Once, by hand, on an interactive node |
+| **offline** | `training/make_rate_law.py` | The guided helper. Reads your own table, asks its way through the chemistry in plain words, and writes a rate law file. Start here if you have not done this before. |
+| | `training/fit_symbolic.py` | The same search with all its options exposed, for when you know what you want. |
 | | `run.sh` | The SLURM batch job: modules, pre-processing, the solver, the checks. Submit with `sbatch run.sh`. |
 | | `COMPILE.txt` | The interactive session that builds `./complab`, one step at a time. |
 
@@ -525,7 +648,8 @@ parser in `src/`.
 | **post** | `postprocess.py` | Reads `output/summary.csv` and the log, reports every field's change, flags negatives, runs this case's checks. Standard library only. |
 | | `run.sh` | All of the above in order, one comment per line. |
 | | `pipeline.sh` | The older, terser version of the same chain. |
-| **train** | `training/fit_symbolic.py` | The symbolic regression of section 8. Searches over expression forms and returns a Pareto set. |
+| **train** | `training/fit_symbolic.py` | The symbolic regression of section 8. Searches over formula shapes and returns one formula per length. |
+| | `training/make_rate_law.py` | The same search, driven by questions instead of flags. Reads any training table and asks what its columns mean. |
 | | `training/growth_samples.csv` | 400 sample points with 2 percent noise, so the search has something to work on out of the box. |
 
 Only two things are inherited: the shared kinetics defaults in

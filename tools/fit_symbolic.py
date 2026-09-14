@@ -765,7 +765,7 @@ def main():
             # order but cannot stop a different scipy converging to a different local minimum.
             f.write("# discovered by fit_symbolic.py on %s from %s\n"
                     % (datetime.date.today().isoformat(), args.data))
-            f.write("# %d nodes; typical error %.2f%%, worst %.2f%%, over %d samples (%s loss)\n"
+            f.write("# length %d; typical error %.2f%%, worst %.2f%%, over %d samples (%s loss)\n"
                     % (knee[0], knee[1], knee[2], X.shape[0], args.loss))
             f.write("# search: --pop %d --gens %d --depth %d --seed %d; chosen by %s\n"
                     % (args.pop, args.gens, args.depth, args.seed, picked_by))

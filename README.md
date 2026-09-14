@@ -611,7 +611,8 @@ and is the only path whose preparation ends in a recompile.
 Concretely: compiled kinetics needs nothing. Flux balance analysis needs **B1**,
 which exports the metabolic model. The surrogate needs **B1 then B2** — sweep the
 linear program, fit the network, paste it in, rebuild. The symbolic law needs
-**B3**, which runs the search and hands you a Pareto set to choose from. The graph
+**B3**, which runs the search and hands you one rate law per length to choose
+from. The graph
 network needs **B4**, which trains the network and writes the `.gnn`. The
 thermodynamic gate needs no training at all — you write the energetics by hand
 from measured values — but it has an offline *check* worth running, which reports
@@ -692,7 +693,9 @@ exchange-reaction table you fill the configuration from.
 For the learned paths: `tools/surrogate/` sweeps the linear program, fits the
 network, verifies that the export reproduces the trainer, and plots the response
 surface — in Python and in MATLAB. `tools/fit_symbolic.py` is the
-genetic-programming search that returns a Pareto set of rate laws.
+genetic-programming search that returns one rate law per length, and
+`tools/make_rate_law.py` drives it by asking questions about your training table
+instead of taking flags.
 `tools/train_graphnet.py` trains a graph network and writes the `.gnn`.
 
 Afterwards, `tools/postprocess.py` produces slices, histories and the mass-balance
