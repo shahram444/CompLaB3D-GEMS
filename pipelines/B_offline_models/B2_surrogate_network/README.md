@@ -6,7 +6,7 @@
 **Needed for:** the surrogate path only.
 
 This is the longest preparation in the repository, and the only one that ends in
-a recompile. The tools live in [`tools/surrogate/`](../../../tools/surrogate/),
+a recompile. The tools live in [`tools/method_2_surrogate/`](../../../tools/method_2_surrogate/),
 and there is a MATLAB path alongside the Python one; either produces the same
 header.
 
@@ -25,7 +25,7 @@ last step below.
 
 ```bash
 # 1. sweep the linear program over the range you chose
-python3 ../../../tools/surrogate/generateTrainingData.py \
+python3 ../../../tools/method_2_surrogate/generateTrainingData.py \
        ../../../models/e_coli_core.xml.gz \
        --exchange EX_glc__D_e --range 0.001 10 --log \
        --exchange EX_o2_e     --range 0.00003 0.5 --log \
@@ -33,7 +33,7 @@ python3 ../../../tools/surrogate/generateTrainingData.py \
        -o training_data.csv
 
 # 2. fit the network
-python3 ../../../tools/surrogate/trainSurrogate.py training_data.csv \
+python3 ../../../tools/method_2_surrogate/trainSurrogate.py training_data.csv \
        --name geobacter --layers 10 10 10 10 --restarts 5 \
        -o surrogate_weights_geobacter.hh
 
@@ -51,10 +51,10 @@ random instead, which is the better choice above two substrates.
 
 ```bash
 # check the exported header reproduces the trainer, to machine precision
-python3 ../../../tools/surrogate/verifyExport.py ../../../src/surrogateModel.hh
+python3 ../../../tools/method_2_surrogate/verifyExport.py ../../../src/surrogateModel.hh
 
 # evaluate it at a point you care about
-python3 ../../../tools/surrogate/inspectSurrogate.py ../../../src/surrogateModel.hh \
+python3 ../../../tools/method_2_surrogate/inspectSurrogate.py ../../../src/surrogateModel.hh \
        --eval 9.0 0.45
 ```
 

@@ -95,10 +95,11 @@ this order:
 
 ```bash
 # A1 — make the pore space
-python tools/geometry.py --nx 128 --ny 64 --nz 64 --type slot --out input/geometry.dat
+python tools/setup/geometry.py create channel --nx 128 --ny 64 --nz 64 \
+       --aperture 20 -o input/geometry.dat
 
 # B3 — find a rate law from data, offline, once
-python tools/fit_symbolic.py --data mydata.csv --target growth \
+python tools/method_3_symbolic/fit_symbolic.py --data mydata.csv --target growth \
        --pop 600 --gens 60 --out mylaw.sym
 
 # C — assemble the case and run it
@@ -108,7 +109,7 @@ cmake -B build -S . && cmake --build build -j
 ./complab CompLaB.xml
 
 # D — read the result
-python ../../tools/postprocess.py --dir . --report
+python ../../tools/postprocess/postprocess.py .
 ```
 
 Five commands. The two long ones are the fit and the run.

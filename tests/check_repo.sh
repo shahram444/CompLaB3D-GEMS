@@ -57,19 +57,19 @@ check_copy() {   # check_copy <source> <path under examples/*/>
         cmp -s "$src" "$f" || DRIFT="$DRIFT $f"
     done
 }
-check_copy tools/extractMM.py                          training/extractMM.py
-check_copy tools/fit_symbolic.py                       training/fit_symbolic.py
-check_copy tools/make_rate_law.py                      training/make_rate_law.py
-check_copy tools/train_graphnet.py                     training/train_graphnet.py
-check_copy tools/makeEquilibrium.py                    training/makeEquilibrium.py
-check_copy tools/makeKinetics.py                       training/makeKinetics.py
-check_copy tools/complab3d_cobrapy.py                  training/complab3d_cobrapy.py
+check_copy tools/method_1_fba/extractMM.py                          training/extractMM.py
+check_copy tools/method_3_symbolic/fit_symbolic.py                       training/fit_symbolic.py
+check_copy tools/method_3_symbolic/make_rate_law.py                      training/make_rate_law.py
+check_copy tools/method_4_graphnet/train_graphnet.py                     training/train_graphnet.py
+check_copy tools/setup/makeEquilibrium.py                    training/makeEquilibrium.py
+check_copy tools/setup/makeKinetics.py                       training/makeKinetics.py
+check_copy tools/runtime/complab3d_cobrapy.py                  training/complab3d_cobrapy.py
 check_copy tests/xval_gnn.py                           training/xval_gnn.py
-check_copy tools/upscale_sweep.py                      offline/upscale.py
-check_copy tools/surrogate/generateTrainingData.py     training/generateTrainingData.py
-check_copy tools/surrogate/trainSurrogate.py           training/trainSurrogate.py
-check_copy tools/surrogate/verifyExport.py             training/verifyExport.py
-check_copy tools/surrogate/inspectSurrogate.py         training/inspectSurrogate.py
+check_copy tools/postprocess/upscale_sweep.py                      offline/upscale.py
+check_copy tools/method_2_surrogate/generateTrainingData.py     training/generateTrainingData.py
+check_copy tools/method_2_surrogate/trainSurrogate.py           training/trainSurrogate.py
+check_copy tools/method_2_surrogate/verifyExport.py             training/verifyExport.py
+check_copy tools/method_2_surrogate/inspectSurrogate.py         training/inspectSurrogate.py
 check_copy models/e_coli_core.xml.gz                   models/e_coli_core.xml.gz
 check_copy models/toy_model.xml                        input/toy_model.xml
 [[ -z "$DRIFT" ]] && pass "every copy inside examples/ matches its source" \

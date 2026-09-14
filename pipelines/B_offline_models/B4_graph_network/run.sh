@@ -10,7 +10,7 @@ SAMPLES=${SAMPLES:-samples.csv}
 DA=${DA:-1.0,1.0}
 OUT=${OUT:-network.gnn}
 
-python "$ROOT/tools/train_graphnet.py" --stoich "$STOICH" --data "$SAMPLES" \
+python "$ROOT/tools/method_4_graphnet/train_graphnet.py" --stoich "$STOICH" --data "$SAMPLES" \
        --da "$DA" --rounds 1 --width 8 --epochs 4000 --out "$OUT"
 
 echo

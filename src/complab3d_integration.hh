@@ -576,7 +576,7 @@ inline bool prepareSurrogate(const Config &cfg, complab_srg::Network &net,
                           "  [SRG] consumption still comes from a Monod term and this organism still\n"
                           "  [SRG] cannot excrete a product -- exactly as for a growth-only network.\n"
                           "  [SRG] To use the fluxes, paste the network into surrogateModel.hh with\n"
-                          "  [SRG] tools/surrogate/exportSurrogateHeader (the compiled path calls\n"
+                          "  [SRG] tools/method_2_surrogate/exportSurrogateHeader (the compiled path calls\n"
                           "  [SRG] evalAll and writes Fout), and rebuild.\n",
                           net.nOut() - 1);
             log += nb;

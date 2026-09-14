@@ -3,7 +3,7 @@
 **In:** a stoichiometric matrix, a sample table, and one Damkohler number per
 reaction.
 **Out:** a `.gnn` text file the solver reads at start-up.
-**Run:** `./run.sh`, which calls `tools/train_graphnet.py`.
+**Run:** `./run.sh`, which calls `tools/method_4_graphnet/train_graphnet.py`.
 **Needed for:** the graph-network path only.
 
 ## The three inputs
@@ -30,7 +30,7 @@ tied to the one it was fitted in.
 ## Running it
 
 ```bash
-python ../../../tools/train_graphnet.py \
+python ../../../tools/method_4_graphnet/train_graphnet.py \
        --stoich stoich.csv --samples samples.csv \
        --da 1.0,1.0 --rounds 1 --width 8 --epochs 4000 \
        --out network.gnn
@@ -43,7 +43,7 @@ matters when a species influences another only through an intermediate.
 ## Check what came out
 
 ```bash
-python ../../../tests/xval_gnn.py --net network.gnn --samples samples.csv
+python ../../../tests/xval_gnn.py
 ```
 
 The check that matters is not the correlation, it is the **sign and the ratio**.

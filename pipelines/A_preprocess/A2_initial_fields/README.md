@@ -16,13 +16,10 @@ You need this stage when:
 - **a plume enters from one face** rather than the whole inlet.
 
 ```bash
-# put an iron-reducing population on the lower wall only
-python ../../../tools/geometry.py --field biomass --shape wall --face ymin \
-       --value 1.0e-4 --like geometry.dat --out input/biomass0.dat
-
-# restart from step 50000 of a previous run
-python ../../../tools/postprocess.py --extract-restart previous_run/ \
-       --step 50000 --out input/
+# put an iron-reducing population on the lower wall only, by marking those
+# voxels with a material code the XML then gives an initial density to
+python ../../../tools/setup/geometry.py seed geometry.dat --nx 128 --ny 64 --nz 64 \
+       --code 3 --box 0 127 0 2 0 63 -o input/geometry_seeded.dat
 ```
 
 Then point the XML at what you made:

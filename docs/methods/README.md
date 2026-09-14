@@ -17,24 +17,38 @@ into every equation, one substitution at a time.
 
 Each guide's Figure 2 is a flowchart of that method end to end: what is done offline
 before any simulation exists, what the solver does once at start-up, and what runs in
-every voxel at every step. The boxes are lettered and the caption explains each letter.
+every voxel at every step, with the source file each band lives in named on the band.
+Every guide carries a second flowchart that opens the one step the first takes on
+trust, with the arithmetic of a real case drawn into it rather than described, and
+Method 1 carries a third for its two refinements of the solve step.
 Appendix D numbers its figures D1 to D11 rather than 1 to *n*, and its Figure D1 is
 the same kind of end-to-end chart for the two mineral directions.
 
-[v1.3] Method 1 carries two more of these, one per refinement of the linear
-program that v1.3 added. **Figure 11** draws multi-step flux balance analysis
-(`<multi_step>`) end to end, from choosing the stage order offline to the one
-implementation detail that matters: growth is read from the last stage's flux
-vector, never from the first stage's objective value. **Figure 14** draws
-cybernetic switching (`<cybernetic>`), including why shutting a source must
-forbid its uptake and never its release. Both captions walk every lettered box,
-and both are followed by the XML block that turns the feature on, quoting what
-examples 21 and 22 actually ship.
+[v1.3] Method 1's **Figure 5** draws both refinements of the linear program that
+v1.3 added, side by side down one page: `<multi_step>`, which replaces the single
+program with a chain that pins one more quantity at every stage, and
+`<cybernetic>`, which wraps whichever solve is configured and runs it once per
+carbon source. Each has its own box drawn in red for the place it goes quietly
+wrong: growth must be read from the last stage's flux vector and never from the
+first stage's objective value, and shutting a carbon source must forbid its
+uptake and never its release. Both are still followed by the XML block that turns
+the feature on, quoting what examples 21 and 22 actually ship.
 
-Methods 3, 4 and 5 have a matching `-figures.pptx`. Where one exists, every
-figure in that document is a render of one slide of the deck, so the editable
-original of a figure is the slide and a figure is changed by editing the deck and
-re-exporting rather than by redrawing.
+Methods 3, 4 and 5 have a matching `-figures.pptx` for their older figures, and
+every guide has a `-flowcharts.pptx` for the ones drawn in this pass. Where one exists, every figure in that document is a render of one slide of
+the deck, so the editable original of a figure is the slide and a figure is
+changed by editing the deck and re-exporting rather than by redrawing. The
+flowchart decks hold native PowerPoint shapes rather than a pasted image: every
+box, arrow, node and label can be selected, moved and retyped.
+
+The Python that draws them is in `figure_sources/`. `flow.py` holds the shared
+kit, so all eight flowcharts use one palette and one set of shapes; `draw.py`
+replays a matplotlib figure as PowerPoint shapes; the `m2a`/`m2b`, `figA`/`figB`,
+`m4a`/`m4b` and `m5a`/`m5b` pairs are one file per figure and hold only content.
+`netcalc.py` reads the shipped surrogate weights straight out of
+`src/surrogateModel.hh`, so every number in Method 2's Figure 6 is computed from
+the file the simulation actually loads rather than transcribed. Method 1's three
+are `m1a`, `m1c` and `m1b`, in that order down the document.
 
 ## Where these sit relative to the rest of the documentation
 
@@ -59,7 +73,15 @@ competition (`<cybernetic>`), each with its own end-to-end figure and its
 configuration block. The worked example is one voxel of a three-metabolite,
 four-reaction model small enough to solve by hand, carried from concentrations to
 uptake bounds to fluxes to the increments the lattice receives, and then repeated
-in the same voxel once the donor has run down.
+in the same voxel once the donor has run down. Figure 8 draws that pair of voxels
+side by side and shows the thing the prose cannot: which of the two bounds is
+actually doing the work. In the fed voxel it is the acceptor, and not because 4
+is smaller than 10 but because a turn of the growth reaction needs only half an
+acceptor, so its bound buys twice the growth its size suggests. In the drawn-down
+voxel it is the donor. The panel at the foot of the figure sweeps the donor
+across the whole range a run visits and puts the crossing at 0.16 mol per litre
+exactly, which is the concentration a domain has to straddle for the limiting
+substrate to change from one place in it to another.
 
 **Method 2, the surrogate network.** What the network is fed and why the inputs
 are the uptake bounds rather than the concentrations; the rescaling and what it
@@ -68,13 +90,24 @@ multi-output forms differ; how the training points are placed and what the fit
 minimises; the range check and what it costs when it bites. The worked example
 writes out one neuron of the first hidden layer in full, then the remaining three
 layers and the output, and ends at the increments the transport solver receives.
+Figure 6 runs the same shipped network on two voxels at once, a fed one and a
+starved one, and draws all forty hidden units of each so the difference between
+them can be seen rather than taken on trust: in the starved voxel the last layer
+has largely saturated and the output lands on the exact bottom of the range the
+fit was scaled into, which de-scales to a small negative number and is what the
+floor is there to catch.
 
 **Method 3, symbolic rate laws.** What symbolic regression returns and why it is
 a list rather than an answer; the expression language; the tree the solver walks;
 the `.sym` file line by line; the two guard rails, units and range, and why both
 failures are silent. The worked example carries 1.2 mM acetate and 0.6 mM oxygen
 through the tree, the unit scale and the substrate budget, then repeats it in a
-voxel where the range clamp bites and costs a factor of 1.38 in growth rate.
+voxel where the range clamp bites. That second voxel makes a point worth having
+on its own: the clamp that matters is the one at the bottom of the range, not
+the top. Above its half-saturation constant a Monod term has flattened out, so
+clamping a substrate down costs under two per cent; below it the term is still
+climbing, so clamping a nearly empty voxel up overstates the rate by a factor of
+ten, and a run with many such clamps is not merely uncertain but biased fast.
 
 **Method 4, the graph network.** The reaction network drawn as a graph beside
 the matrix it is; one round of message passing, drawn and then written; where the

@@ -33,7 +33,7 @@ ARGS=(--data "$DATA" --target "$TARGET" --inputs "$VARS"
 [ -n "$YIELD" ]    && ARGS+=(--yield "$YIELD")
 [ -n "$BIOMASS" ]  && ARGS+=(--biomass "$BIOMASS")
 
-python "$ROOT/tools/fit_symbolic.py" "${ARGS[@]}"
+python "$ROOT/tools/method_3_symbolic/fit_symbolic.py" "${ARGS[@]}"
 
 cat <<'EOF'
 
@@ -52,5 +52,5 @@ Either way, the range lines are already there, one per variable, and they are
 enforced at every evaluation rather than advisory.
 
 If you would rather answer questions than remember flags:
-    python "$ROOT/tools/make_rate_law.py"
+    python "$ROOT/tools/method_3_symbolic/make_rate_law.py"
 EOF

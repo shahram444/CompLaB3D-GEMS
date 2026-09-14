@@ -2,19 +2,25 @@
 
 **In:** the VTI output of a run.
 **Out:** slices, profiles, animations.
-**Run:** `./run.sh`, or `tools/postprocess.py`.
+**Run:** `./run.sh`, or `tools/postprocess/postprocess.py`.
+
+The tool takes the run folder as its one required argument and does the whole
+job in a single pass: slices, histories, the totals and the plots.
 
 ```bash
-# a mid-plane slice of every species at the last step
-python ../../../tools/postprocess.py --dir run/mycase --slice z --at 0.5 --out figs/
+# everything, written into run/mycase/output
+python ../../../tools/postprocess/postprocess.py run/mycase
 
-# porosity and permeability against time
-python ../../../tools/postprocess.py --dir run/mycase --history --out figs/
+# the same, into a folder of your own
+python ../../../tools/postprocess/postprocess.py run/mycase --output figs/
 
-# an animation of the mineral front
-python ../../../tools/postprocess.py --dir run/mycase --animate FeS \
-       --slice z --at 0.5 --out mineral.gif
+# numbers only, no plots, for a batch job with no display
+python ../../../tools/postprocess/postprocess.py run/mycase --no-plots --quiet
 ```
+
+There is no flag for one slice or one animation. If you want a particular
+picture, take the fields with `vtireader.py` below and draw it yourself; that
+is what the reader is for.
 
 `vtireader.py` is the underlying reader if you would rather work in your own
 script:

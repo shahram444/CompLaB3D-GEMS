@@ -5,7 +5,7 @@
 #   out: src/surrogateModel.hh, compiled into the solver
 set -euo pipefail
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../../.." && pwd)"
-T="$ROOT/tools/surrogate"
+T="$ROOT/tools/method_2_surrogate"
 
 MODEL=${MODEL:-$ROOT/models/e_coli_core.xml.gz}
 OBJECTIVE=${OBJECTIVE:-Biomass_Ecoli_core}
@@ -42,7 +42,7 @@ Now rebuild the solver:   cmake --build build -j
 
 Before you trust the fit, evaluate it across the range you will actually visit:
 
-    python tools/surrogate/inspectSurrogate.py src/surrogateModel.hh --eval 9.0 0.45
+    python tools/method_2_surrogate/inspectSurrogate.py src/surrogateModel.hh --eval 9.0 0.45
 
 A large part of a fitted box returning zero growth is common and invisible in
 the weights.  Find that out now rather than after a week of simulation.

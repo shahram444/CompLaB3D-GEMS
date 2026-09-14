@@ -15,7 +15,7 @@ fi
 OBJ=${OBJ:-Biomass_Ecoli_core}
 OUT=${OUT:-model_mm.xml}
 
-python3 "$ROOT/tools/extractMM.py" "$MODEL" --objective "$OBJ" -o "$OUT" -f
+python3 "$ROOT/tools/method_1_fba/extractMM.py" "$MODEL" --objective "$OBJ" -o "$OUT" -f
 
 # extractMM.py prints the exchange-reaction table as it converts. Fill
 # <exchange_reaction_names> from it: a name either resolves or stops the run,

@@ -19,7 +19,7 @@ and the law itself, `input/growth.sym`:
 ```
     vars    acetate o2 Bug
 
-    rate    growth  = 0.35 * acetate / (0.05 + acetate) * o2 / (0.01 + o2)
+    rate    growth  = 0.35 * acetate / (5.0e-4 + acetate) * o2 / (1.0e-4 + o2)
     rate    acetate = -2.5 * growth * Bug
     rate    o2      = -5.0 * growth * Bug
 
@@ -31,9 +31,11 @@ That is a dual-Monod law: growth is limited by acetate and by oxygen
 independently (Monod is the microbial-growth form of Michaelis-Menten
 saturation kinetics), and the product of the two saturation terms means
 whichever substrate is scarcer controls the rate. `0.35` per hour is the
-maximum specific growth rate; `0.05` and `0.01` mol/L are the half-saturation
+maximum specific growth rate; `5.0e-4` and `1.0e-4` mol/L are the half-saturation
 constants for the donor and the acceptor, the concentration at which growth
-runs at half its maximum. The two substrate lines are written as multiples of
+runs at half its maximum. Both sit inside the range this case runs over, which
+is what makes them recoverable from data; `training/README.md` explains why that
+matters and what happened when they did not. The two substrate lines are written as multiples of
 `growth` rather than fitted separately: `-2.5` is one over a yield of 0.4 mol
 biomass per mol acetate, and `-5.0` is two moles of oxygen per mole of
 acetate, straight from the reaction above. Writing them this way means the
@@ -287,7 +289,7 @@ reaction  acetate -1   o2 -2      the balanced reaction, negative consumed
 yield     acetate 0.4             biomass made per unit of acetate
 biomass   Bug                     which variable is the organism itself
 
-rate      growth = 0.35 * acetate / (0.05 + acetate) * o2 / (0.01 + o2)
+rate      growth = 0.35 * acetate / (5.0e-4 + acetate) * o2 / (1.0e-4 + o2)
 ```
 
 At start-up the solver writes one substrate line per species in the reaction:
@@ -373,23 +375,32 @@ python3 training/make_rate_law.py training/growth_samples.csv
 
 ```
       column         smallest      largest       what it might be
-      acetate        1.002e-06     0.004949      something it depends on
-      o2             1.022e-06     0.001963      something it depends on
-      growth         1.178e-09     0.003041      the thing to predict
+      acetate        1.019e-06     0.004949      something it depends on
+      o2             1.041e-06     0.001873      something it depends on
+      growth         9.709e-06     0.289400      the thing to predict
 
       400 rows.
 
   Which column is the thing you want a formula for? [growth]
+  Which columns does it depend on? [acetate,o2]
   Is this reaction carried out by an organism? (yes/no) [yes]
   What is the organism called? [Bug]
   How many acetate per turn of the reaction? [-1]
   How many o2 per turn of the reaction? [-1]
+  Is anything else made or used that is not a column in your table? (yes/no) [no]
+  Which substance is the yield measured against? [acetate]
   How much Bug is made per acetate used? [0.4]
   Are the rates in your table per second or per hour? [per_hour]
   How thorough a search? [normal]
+  Run it twice and check the two agree? (yes/no) [yes]
 ```
 
 Every question shows its answer in brackets and takes it if you press Enter.
+**The oxygen one is the exception**: the bracket offers `-1` and this reaction
+consumes two oxygen per acetate, so that is the one question where pressing
+Enter gives the wrong chemistry. The default is a guess at the commonest case,
+not a reading of your data, and the summary it prints before writing anything is
+where to catch it.
 Nothing is written until it has shown you a summary and asked. It then prints the
 single command that would produce the same file again without the questions, so
 the result stays reproducible and you never answer them twice.
@@ -440,37 +451,54 @@ production work.
 ### What the search actually finds here, and what it takes
 
 The defaults in `offline.sh`, `--pop 200 --gens 15`, finish in under a minute
-and return
+and stop around **26 per cent** error, with every formula on the list visibly
+the wrong shape. That is the honest signal: a minute of searching is not enough
+to find this law, and the short run says so.
 
-```
-    growth = 647.6 x acetate x o2                       about 4% error
-```
+It is worth knowing that it did not always say so. On the narrower training
+table this case used to ship, the same short run reached 4 per cent with a plain
+product of the two concentrations, because the data never left the straight-line
+part of either Monod term and a product really was the right answer for what it
+had been shown. A short run looked like a success. `training/README.md` sets out
+why that happened and what changed.
 
-a plain product with no saturation in it. That is not a failure of the search.
-The samples span acetate up to 5e-3 mol/L against a half-saturation constant of
-0.05, and oxygen up to 2e-3 against 0.01, so every point sits in the linear part
-of both Monod terms and the product is the correct answer for the data it was
-shown. The saturation shoulder is simply not in the training range.
-
-A longer search does reach it:
+A longer search finds the law:
 
 ```bash
 POP=600 GENS=60 ./offline.sh
 ```
 
-and the list then contains expressions carrying **0.010** and **0.050** inside
-them, which are the true oxygen and acetate half-saturation constants, recovered
-without the search ever being told the law is Monod. Rearranged into the Monod
-normal form, one such expression came out as
+On this data that takes minutes rather than seconds, and longer than it did on
+the narrow table: fitting the constants of a curve is real work, whereas fitting
+the slope of a straight line is not. What comes back:
 
 ```
-    found   7.03 x a x o / (0.01005 + o + 0.187 a + ...)
-    true    7.00 x a x o / (0.01000 + o + 0.200 a + ...)
+  length  typical   worst    formula
+    11     28.02%   218.95%  o2 / (0.000587533 - ((o2 + 4.94303e-05) / (acetate / -0.00219031)))
+    13     14.79%    93.89%  ...
+    15     14.24%    91.44%  ...
+    17      1.92%     7.14%  o2 / (0.000288147 - ((((-9.91656e-05 - o2) / 140.628)
+                                  / (acetate / 0.201596)) + (-2.86007 * o2)))
+    19      1.92%     7.10%  ...
 ```
 
-The automatic pick will not choose it. It takes the biggest drop in error per
-extra piece of formula, which lands on the crude bilinear form, so read the list
-and use `--pick`.
+The knee is unmistakable: 14.24 per cent at length 15, 1.92 at length 17, and
+nothing after. Rearranged into the Monod normal form, length 17 is
+
+```
+    found   mu_max 0.3493    Ks_acetate 4.995e-04    Ks_o2 1.003e-04
+    true    mu_max 0.3500    Ks_acetate 5.000e-04    Ks_o2 1.000e-04
+            0.2% off         0.1% off                0.3% off
+```
+
+all three constants recovered to better than half a per cent, without the search
+ever being told the law is Monod. Its error against the data, 1.31 per cent, is
+indistinguishable from the true law's own 1.30 per cent: it has reached the noise
+floor and there is nothing left to find.
+
+**On this data the automatic pick chooses correctly**, landing on length 17. That
+is a consequence of the knee being sharp, and it is not something to rely on. The
+pick is a rule of thumb and says so in its own output; read the list.
 
 ### Reproducibility
 
@@ -544,8 +572,8 @@ Three outcomes, and the check says which one you got:
 
 ```
   PARTLY REPRODUCIBLE.
-    same law in both runs at length 1, 3, 5.
-    DIFFERENT law at length 7, 9, 11, 13, 15, 17, 19, 21.
+    same law in both runs at length 1, 3, 5, 21.
+    DIFFERENT law at length 7, 9, 11, 13, 15, 17, 19.
 ```
 
 The third is the common one on a long search, and the pattern in it is not
@@ -558,11 +586,18 @@ in the agreeing set, the formula you would actually use is reproducible.
 
 **What counts as the same law** is judged against the formula's own error, not
 against a fixed number of digits. Two runs agree when the gap between them is
-small compared with how far each sits from your measurements: on this case's
-data the two runs at length 13 differ by 0.07 percent while both are 1.3 percent
-away from the data, which is the same law by any standard a reader would apply.
-A fixed threshold was tried first and was tighter than the fit error itself, so
-it reported real agreement as disagreement.
+small compared with how far each sits from your measurements: on the narrower
+table this case used to ship, two runs at length 13 differed by 0.07 percent
+while both sat 1.3 percent away from the data, which is the same law by any
+standard a reader would apply. A fixed threshold was tried first and was tighter
+than the fit error itself, so it reported real agreement as disagreement.
+
+**Length 17, the one worth taking here, is in the disagreeing set**, and that is
+worth being plain about. The two runs found formulas that differ, and both sit
+at 1.92 per cent, which is the noise floor. They are two arrangements that fit
+the data equally well rather than one right answer and one wrong one. Quote the
+seed and the command with the law, as the file's own header does, or take a
+length from the agreeing set and accept the larger error.
 
 Set `VERIFY=0` to skip the check. Every `.sym` the search writes carries the
 command, the seed, the thread setting and the library versions in its header,
@@ -586,11 +621,11 @@ running belong in different places on a cluster.
 
 | File | What it is | Where you run it |
 |---|---|---|
-| `COMPILE.txt` | The interactive session that builds `./complab`, step by step | Once, by hand, on an interactive node |
-| **offline** | `training/make_rate_law.py` | The guided helper. Reads your own table, asks its way through the chemistry in plain words, and writes a rate law file. Start here if you have not done this before. |
-| | `training/fit_symbolic.py` | The same search with all its options exposed, for when you know what you want. |
-| | `run.sh` | The SLURM batch job: modules, pre-processing, the solver, the checks. Submit with `sbatch run.sh`. |
-| | `COMPILE.txt` | The interactive session that builds `./complab`, one step at a time. |
+| `COMPILE.txt` | The interactive session that builds `./complab`, one step at a time | Once, by hand, on an interactive node |
+| `run.sh` | The SLURM batch job: modules, pre-processing, the solver, the checks | `sbatch run.sh`, every run after that |
+| `training/make_rate_law.py` | The guided helper. Reads your own table and asks its way through the chemistry in plain words | Before the build, only if you want your own law |
+| `training/fit_symbolic.py` | The same search with all its options exposed | Same, when you know what you want |
+| `training/make_training_data.py` | Writes the table the search is fitted to, from a law you can read | Same, only if you want your own data |
 
 **First time in this case folder,** open `COMPILE.txt` and follow it. It asks
 for an interactive node, loads the modules, runs cmake with the flags this case
@@ -648,9 +683,12 @@ parser in `src/`.
 | **post** | `postprocess.py` | Reads `output/summary.csv` and the log, reports every field's change, flags negatives, runs this case's checks. Standard library only. |
 | | `run.sh` | All of the above in order, one comment per line. |
 | | `pipeline.sh` | The older, terser version of the same chain. |
-| **train** | `training/fit_symbolic.py` | The symbolic regression of section 8. Searches over formula shapes and returns one formula per length. |
+| **train** | `training/README.md` | What the offline step is, how to run it, and the sampling-range trap that decides whether a constant can be recovered at all. |
+| | `training/fit_symbolic.py` | The symbolic regression of section 8. Searches over formula shapes and returns one formula per length. |
 | | `training/make_rate_law.py` | The same search, driven by questions instead of flags. Reads any training table and asks what its columns mean. |
+| | `training/make_training_data.py` | Writes `growth_samples.csv` from the law in section 1, so the case has an answer key rather than only a fit. |
 | | `training/growth_samples.csv` | 400 sample points with 2 percent noise, so the search has something to work on out of the box. |
+| | `training/growth_samples_truth.json` | The law behind those points, with the constants, the noise and the seed. |
 
 Only two things are inherited: the shared kinetics defaults in
 [`../../config/kinetics/`](../../config/kinetics/) and the solver sources.

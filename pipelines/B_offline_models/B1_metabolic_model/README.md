@@ -2,7 +2,7 @@
 
 **In:** a genome-scale metabolic model, SBML or BiGG.
 **Out:** for GLPK, a tabular export; for COBRApy, the model file unchanged.
-**Run:** `./run.sh`, which calls `tools/extractMM.py`.
+**Run:** `./run.sh`, which calls `tools/method_1_fba/extractMM.py`.
 **Needed for:** flux balance analysis on either back end, and for B2.
 
 ## Where models come from
@@ -20,7 +20,7 @@ will still solve and still give you a number.
 **GLPK** needs the tabular export, because the C++ side does not parse SBML:
 
 ```bash
-python3 ../../../tools/extractMM.py \
+python3 ../../../tools/method_1_fba/extractMM.py \
        ../../../models/e_coli_core.xml \
        --objective Biomass_Ecoli_core \
        --out ecoli_core.tab

@@ -38,7 +38,7 @@
  *  THE FILE
  *
  *  Plain text, for the same reason the .srg file is plain text: a trained network is a scientific
- *  result and should be readable, diffable and quotable without a tool.  tools/train_graphnet.py
+ *  result and should be readable, diffable and quotable without a tool.  tools/method_4_graphnet/train_graphnet.py
  *  writes it and this reads it; the two were checked against each other to machine precision, so
  *  the format is not a convention anyone has to maintain by hand.
  *

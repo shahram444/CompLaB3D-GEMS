@@ -41,11 +41,11 @@ total and mean completely different things about a pore.
 
 ### Fixed
 
-- **`tools/vtireader.py` crashed on any run that wrote a flow field.** A vector
+- **`tools/postprocess/vtireader.py` crashed on any run that wrote a flow field.** A vector
   array has several components per point, so its flat length is `3*nx*ny*nz` and
   the scalar reshape raised `cannot reshape array of size 14976 into shape
   (8,26,24)`. Every run with `Pe > 0` writes `nsLattice_*.vti`, which carries
-  `velocity` beside `velocityNorm`, so `tools/postprocess.py` died the moment it
+  `velocity` beside `velocityNorm`, so `tools/postprocess/postprocess.py` died the moment it
   reached that file -- on most of the shipped cases. Components are now kept as a
   trailing axis, which is the shape `postprocess.py` was already written to
   expect: it has handled `a.ndim == 4` by taking the norm since v1.2, and that
@@ -179,7 +179,7 @@ and two of these change results.
   through exactly the voxels where biofilm biomass lives. Example 08's lattice
   Boltzmann microbe had the same factor. The tau screen could not catch it,
   because it recomputes the number from the same wrong expression.
-- **`tools/geometry.py` wrote every geometry transposed.** `readGeometry()` takes
+- **`tools/setup/geometry.py` wrote every geometry transposed.** `readGeometry()` takes
   one `ny*nz` x-slice per iteration, and all twenty shipped `preprocess.py`
   scripts write `for x: for y: for z:` with a comment saying so. `write_dat()`
   wrote z slowest and x fastest, which is the natural order for the `(nz, ny, nx)`
@@ -374,7 +374,7 @@ solvers, and the retain fractions let an organism trade growth for excretion,
 which is what makes measured by-product yields reachable at all.
 
 Implemented in both back ends — `run_glpk_lex()` in `complab3d_lexicographic.hh`
-and `solve_multistep()` in `tools/complab3d_cobrapy.py` — so the two can be
+and `solve_multistep()` in `tools/runtime/complab3d_cobrapy.py` — so the two can be
 cross-checked against each other, which is the only independent check either
 has. Stages are named, not numbered, and resolved against the model at start-up.
 
@@ -585,7 +585,7 @@ now conserves to 3.9 × 10⁻¹³.
   the rim than in the core, and every run reported NOT STEADY at five diffusion
   times. The solver checks steadiness itself and refuses to call a transient a
   result.
-- **Example 20, `upscaling`**, and `tools/upscale_sweep.py`, which sweeps aggregate
+- **Example 20, `upscaling`**, and `tools/postprocess/upscale_sweep.py`, which sweeps aggregate
   radius against bulk sulfide — the product that shuts the gate, so the second axis
   is how close the bulk sits to the energy threshold — and fits the correction the
   classical Thiele curve needs once the reaction has an energy limit.
@@ -815,7 +815,7 @@ repository.
   growth-only network leaves the solver to guess consumption with a Monod term,
   which is exact only where the swept uptake bound was the binding constraint
   and cannot release a product at all. The sweep
-  (`tools/surrogate/generateTrainingData.py`) now records the whole flux vector
+  (`tools/method_2_surrogate/generateTrainingData.py`) now records the whole flux vector
   rather than the objective alone; `trainSurrogate.py` fits every column and
   emits a header whose last layer is a matrix; `verifyExport.py` checks each
   output separately; `inspectSurrogate.py` reports each one. `--growth-only`

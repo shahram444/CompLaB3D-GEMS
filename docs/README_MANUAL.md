@@ -26,9 +26,12 @@ happening:
 - when you add an example, add its chapter to Part II and its row to the table
   in `examples/README.md`
 
-`examples/validateExamples.py` extracts the tag whitelist mechanically from the
-source, so a renamed tag surfaces there as an unknown tag. That catches the
-code-side half of the drift; the manual-side half is on you.
+`tests/check_everything_xml.py` extracts the tag list mechanically from the
+source, so a renamed tag surfaces there as one the solver never reads.
+`tests/check_docs.py` does the same for the prose: every command a README shows
+is checked against the flags that script really accepts, and every path it names
+is checked against the repository. Between them they catch the mechanical half
+of the drift; whether a sentence is still true is on you.
 
 ## Things deliberately not in the manual
 

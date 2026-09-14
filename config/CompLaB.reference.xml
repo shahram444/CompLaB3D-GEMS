@@ -218,7 +218,7 @@
 
             <!-- Or IMPORT a raw binary volume, such as segmented CT data
                  exported from ImageJ. PNG and TIFF stacks are not read here;
-                 tools/geometry.py handles those. -->
+                 tools/setup/geometry.py handles those. -->
             <!--
             <import_raw>scan.raw</import_raw>
             <raw_dtype>uint8</raw_dtype>
@@ -820,7 +820,7 @@
          SYMBOLIC  |  a rate law read from a text file
          ====================================================================
          A .sym file holds algebraic expressions found offline by
-         tools/fit_symbolic.py, one per rate.  The solver parses each
+         tools/method_3_symbolic/fit_symbolic.py, one per rate.  The solver parses each
          expression once at start-up and walks the tree per voxel.
 
          Unlike the surrogate, nothing is compiled in: a different rate law is
@@ -860,7 +860,7 @@
          GRAPHNET  |  the whole rate vector from one evaluation
          ====================================================================
          A .gnn file holds a message-passing network trained offline by
-         tools/train_graphnet.py.  The stoichiometric matrix is given to the
+         tools/method_4_graphnet/train_graphnet.py.  The stoichiometric matrix is given to the
          trainer as structure rather than learned, so the returned rates stay
          in stoichiometric ratio without that ratio ever being a training
          target.
@@ -1111,7 +1111,7 @@
          echoed at start up.
 
          TO MAKE A MULTI OUTPUT NETWORK, use the offline path in
-         tools/surrogate/: generateTrainingData.py now records the whole flux
+         tools/method_2_surrogate/: generateTrainingData.py now records the whole flux
          vector rather than the objective alone, and trainSurrogate.py fits
          every column of it. Pass growth_only to the sweep to reproduce the
          old single output behaviour exactly.

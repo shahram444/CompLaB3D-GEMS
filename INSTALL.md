@@ -97,5 +97,5 @@ the solver prints the interpreter path in its first few lines.
 percolating path. Check it before blaming the chemistry:
 
 ```bash
-python tools/geometry.py --inspect input/geometry.dat
+python tools/setup/geometry.py inspect input/geometry.dat --nx 24 --ny 26 --nz 8
 ```

@@ -31,7 +31,22 @@ static void ok(bool c, const char *what) {
     if (!c) ++fails;
 }
 
-static void write(const char *p, const char *s) { FILE*f=fopen(p,"w"); fputs(s,f); fclose(f); }
+/* Every scratch file is remembered so it can be taken away again at the end.
+ * Without this the test leaves 22 stray .sym files wherever it was run, which
+ * for run_tests.sh is the tests/ directory itself. */
+static std::vector<std::string> written;
+
+static void write(const char *p, const char *s) {
+    FILE *f = fopen(p, "w");
+    fputs(s, f);
+    fclose(f);
+    written.push_back(p);
+}
+
+static void cleanup() {
+    for (size_t i = 0; i < written.size(); ++i) std::remove(written[i].c_str());
+    written.clear();
+}
 
 /* the substrate list for the two-organism checks: everything either file names */
 static std::vector<std::string> subsAB() {
@@ -308,6 +323,7 @@ int main() {
     Program E;
     ok(load(E, "./sym_hand.sym", &e) && E.nDerived == 0, "a file with no reaction block is unchanged");
 
+    cleanup();
     std::printf("\n%s\n", fails ? "FAILED" : "all checks passed");
     return fails;
 }

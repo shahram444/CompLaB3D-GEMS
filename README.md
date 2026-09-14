@@ -95,7 +95,7 @@ the solver build one. `<generate>` makes a `channel`, `spheres`, `cylinders`,
 aperture, a roughness, a layer count and a seed, and writes the result out as a
 `.dat` so the run is reproducible from its own output. Segmented CT data comes in
 through `<import_raw>` with a threshold and an optional inversion; TIFF and PNG
-stacks go through `tools/geometry.py` first.
+stacks go through `tools/setup/geometry.py` first.
 
 Whichever way it arrives, the geometry is inspected before the first step. The
 solver reports the porosity, whether the pore space percolates from inlet to
@@ -230,13 +230,13 @@ Both come from the same two commands, and both load through the same
 `<weights_file>` tag, so you can compare them on one case by editing one line:
 
 ```bash
-python3 tools/surrogate/generateTrainingData.py MODEL \
+python3 tools/method_2_surrogate/generateTrainingData.py MODEL \
         --exchange EX_ac_e --range 1e-3 10 --log \
         --exchange EX_o2_e --range 1e-5 0.5 --log \
         --also EX_co2_e --grid 141 -o sweep.csv     # --growth-only for the old behaviour
-python3 tools/surrogate/trainSurrogate.py sweep.csv --layers 10 10 10 10 \
+python3 tools/method_2_surrogate/trainSurrogate.py sweep.csv --layers 10 10 10 10 \
         -o net.hh --srg net.srg                     # both formats, one fit
-python3 tools/surrogate/verifyExport.py net.hh      # checks every output, not just growth
+python3 tools/method_2_surrogate/verifyExport.py net.hh      # checks every output, not just growth
 ```
 
 #### Two formats, and why
@@ -683,24 +683,24 @@ CompLaB3D-GEMS/
 
 ### The offline tools
 
-`tools/geometry.py` builds a pore space or inspects one, reporting porosity,
-percolation and isolated pore. `tools/extractMM.py` converts an SBML, MATLAB or
+`tools/setup/geometry.py` builds a pore space or inspects one, reporting porosity,
+percolation and isolated pore. `tools/method_1_fba/extractMM.py` converts an SBML, MATLAB or
 JSON genome-scale model into the flat XML the GLPK path reads, and prints the
 exchange-reaction table you fill the configuration from.
-`tools/makeKinetics.py` generates a `defineKinetics.hh` from a reaction list, and
-`tools/makeEquilibrium.py` builds the components/stoichiometry/log K tableau.
+`tools/setup/makeKinetics.py` generates a `defineKinetics.hh` from a reaction list, and
+`tools/setup/makeEquilibrium.py` builds the components/stoichiometry/log K tableau.
 
-For the learned paths: `tools/surrogate/` sweeps the linear program, fits the
+For the learned paths: `tools/method_2_surrogate/` sweeps the linear program, fits the
 network, verifies that the export reproduces the trainer, and plots the response
-surface — in Python and in MATLAB. `tools/fit_symbolic.py` is the
+surface — in Python and in MATLAB. `tools/method_3_symbolic/fit_symbolic.py` is the
 genetic-programming search that returns one rate law per length, and
-`tools/make_rate_law.py` drives it by asking questions about your training table
+`tools/method_3_symbolic/make_rate_law.py` drives it by asking questions about your training table
 instead of taking flags.
-`tools/train_graphnet.py` trains a graph network and writes the `.gnn`.
+`tools/method_4_graphnet/train_graphnet.py` trains a graph network and writes the `.gnn`.
 
-Afterwards, `tools/postprocess.py` produces slices, histories and the mass-balance
-report, and `tools/vtireader.py` reads VTI output into NumPy.
-`tools/complab3d_cobrapy.py` is the Python side of the COBRApy back end.
+Afterwards, `tools/postprocess/postprocess.py` produces slices, histories and the mass-balance
+report, and `tools/postprocess/vtireader.py` reads VTI output into NumPy.
+`tools/runtime/complab3d_cobrapy.py` is the Python side of the COBRApy back end.
 
 ### One thing about the examples
 

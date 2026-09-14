@@ -1,0 +1,18 @@
+{
+  "law": "0.35 * acetate / (0.0005 + acetate) * o2 / (0.0001 + o2)",
+  "units": "per_hour",
+  "mu_max": 0.35,
+  "ks_acetate": 0.0005,
+  "ks_o2": 0.0001,
+  "samples": 400,
+  "relative_noise": 0.02,
+  "seed": 11,
+  "acetate_range": [
+    1e-06,
+    0.005
+  ],
+  "o2_range": [
+    1e-06,
+    0.002
+  ]
+}

@@ -50,7 +50,12 @@ biomass   Bug
 # ---- the fitted law ---------------------------------------------------------
 # This is the only line that came from data. Everything above is chemistry, and
 # chemistry is not something to fit.
-rate    growth  = 0.35 * acetate / (0.05 + acetate) * o2 / (0.01 + o2)
+# The two half-saturation constants were 0.05 and 0.01 until v1.3.3. Both were
+# one to two orders of magnitude larger than any measured aerobic heterotroph,
+# and both sat ten times above anything this case ever reaches, so the law never
+# left its straight-line part and the constants could not be identified from the
+# training table at all. See training/make_training_data.py.
+rate    growth  = 0.35 * acetate / (5.0e-4 + acetate) * o2 / (1.0e-4 + o2)
 
 # ---- where the fit is entitled to be believed --------------------------------
 range   acetate 1e-6 5.0e-3

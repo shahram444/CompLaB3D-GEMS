@@ -19,4 +19,4 @@ CONSERVE=${CONSERVE:-}             # e.g. CONSERVE="Ca+calcite"
 args=("$DIR" --tol "$TOL")
 for c in $CONSERVE; do args+=(--conserve "$c"); done
 
-python3 "$ROOT/tools/postprocess.py" "${args[@]}"
+python3 "$ROOT/tools/postprocess/postprocess.py" "${args[@]}"

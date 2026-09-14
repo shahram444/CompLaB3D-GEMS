@@ -40,6 +40,8 @@ echo "### every shipped rate law survives a substrate list shorter than it wants
 python3 check_kinetics_bounds.py
 echo "### the shipped example rate laws load"
 g++ -O2 -Wall -Wextra -std=c++11 -I../src -o t7 check_examples.cpp && ./t7
+echo "### the documentation matches the code it describes"
+python3 check_docs.py
 rm -f t13 t14 t1 t2 t3 t4 t5 t6 t7 t8 t9 t10 t11 t12 sym_*.sym b*.sym *.thm *_test.srg 2>/dev/null || true          # test_file.cpp leaves its malformed samples behind
 echo
 echo "everything passed"

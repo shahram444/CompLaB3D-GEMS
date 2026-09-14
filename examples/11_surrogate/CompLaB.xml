@@ -21,7 +21,7 @@
      so Vmax is set to 8 and 0.4, safely inside. Those bounds were
      recovered by inverting the mapminmax scaling; run
      training/inspectSurrogate.py on any network to get them (in the
-     repository root that script lives at tools/surrogate/).
+     repository root that script lives at tools/method_2_surrogate/).
 
      Raise <fba_maximum_uptake_flux> above 0.5 on the second substrate and
      the simulation leaves the training box. It will still produce

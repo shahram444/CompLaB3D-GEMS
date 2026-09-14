@@ -3,7 +3,7 @@
 #   in : geometry.dat
 #   out: the same geometry with a microbe seed region written into it
 #
-# [v1.3] This script used to call tools/geometry.py with --field, --shape, --face,
+# [v1.3] This script used to call tools/setup/geometry.py with --field, --shape, --face,
 # --value, --like and --out, none of which exist, and it described writing a
 # separate biomass0.dat that the solver has no tag to read. What the solver
 # actually does is seed biomass on a MATERIAL NUMBER: <material_numbers><microbeN>
@@ -19,8 +19,8 @@ NX=${NX:-128}; NY=${NY:-64}; NZ=${NZ:-64}
 CODE=${CODE:-3}                                  # the <material_numbers><microbe0> code
 BOX=${BOX:-"1 $((NX-2)) 1 4 1 $((NZ-2))"}        # x0 x1 y0 y1 z0 z1: a film on the y=0 wall
 
-python3 "$ROOT/tools/geometry.py" seed "$GEOM" \
+python3 "$ROOT/tools/setup/geometry.py" seed "$GEOM" \
         --nx "$NX" --ny "$NY" --nz "$NZ" \
         --code "$CODE" --box $BOX -o "$OUT"
 
-python3 "$ROOT/tools/geometry.py" inspect "$OUT" --nx "$NX" --ny "$NY" --nz "$NZ"
+python3 "$ROOT/tools/setup/geometry.py" inspect "$OUT" --nx "$NX" --ny "$NY" --nz "$NZ"

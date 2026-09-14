@@ -27,7 +27,7 @@
  *          <threshold>128</threshold>
  *
  *  PNG and TIFF stacks are NOT read here and will not be: that needs an image codec, and a
- *  half-working one is worse than none. tools/geometry.py handles those, and writes a .dat or a
+ *  half-working one is worse than none. tools/setup/geometry.py handles those, and writes a .dat or a
  *  raw volume this can read.
  *
  *  ------------------------------------------------------------------------------------------------
@@ -42,7 +42,7 @@
  *  ------------------------------------------------------------------------------------------------
  *  ORDERING. The .dat format is x fastest, then y, then z, with no header, so nothing in the file
  *  records its own shape. That contract is implemented once, here, and the same ordering is used
- *  by tools/geometry.py -- verified against it rather than assumed.
+ *  by tools/setup/geometry.py -- verified against it rather than assumed.
  * ================================================================================================
  */
 #ifndef COMPLAB3D_GEOMETRY_HH

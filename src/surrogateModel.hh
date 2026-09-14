@@ -513,7 +513,7 @@ void defineSurrogateModel(plb::plint microbeId,
          * product: nothing this routine does can make HCO3 appear.
          *
          * A MULTI-OUTPUT NETWORK FIXES BOTH, and needs no change to the solver:
-         * the slot is already here. Sweep with tools/surrogate, which records
+         * the slot is already here. Sweep with tools/method_2_surrogate, which records
          * the whole flux vector rather than the objective alone, then:
          *
          *     #include "surrogate_weights_geobacter.hh"

@@ -106,7 +106,7 @@ cp "$ROOT/CMakeLists.txt" "$DEST/" 2>/dev/null || true
 #     exactly that state: it assembled, it compiled, and it could not run.
 #     Copied unconditionally: it is 20 kB and costs nothing in a case that never
 #     asks for COBRApy.
-cp "$ROOT/tools/complab3d_cobrapy.py" "$DEST/src/" 2>/dev/null || true
+cp "$ROOT/tools/runtime/complab3d_cobrapy.py" "$DEST/src/" 2>/dev/null || true
 
 echo
 echo "Assembled $CASE in $DEST"

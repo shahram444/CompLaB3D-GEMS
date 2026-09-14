@@ -683,7 +683,7 @@ inline void fitNetwork(Network &N, const std::vector<std::vector<double> > &Xraw
 
     /* The IN-RUN trainer fits growth only, so this network has one output.
      * It writes a perfectly valid single-output .srg; the offline Python path
-     * (tools/surrogate/) is where a multi-output network is produced, because
+     * (tools/method_2_surrogate/) is where a multi-output network is produced, because
      * fitting the exchange fluxes as well needs the whole LP solution recorded
      * per sample and that is a sweep, not a side effect of a run. */
     std::vector<double> yfit(yraw);

@@ -32,23 +32,38 @@ set -euo pipefail
 # same dual-Monod law input/growth.sym describes, with 2% noise on the growth
 # column so the search has something realistic to work on. Point DATA at your
 # own table to fit your own law.
+#
+# That table is not a fixed asset. training/make_training_data.py writes it, from
+# a law you can read, and writes the law beside it as growth_samples_truth.json.
+# That is what lets this case ask whether the search found the RIGHT law rather
+# than merely a law that fits:
+#
+#     python3 training/make_training_data.py --n 2000 --noise 0.05
+#
+# It also prints how far the sampling reaches past each half-saturation constant,
+# and warns if it stops short. That ratio decides whether the constants can be
+# recovered at all: below its constant a Monod term is a straight line, and every
+# value of the constant fits a straight line equally well.
 DATA=${DATA:-training/growth_samples.csv}
 
 # pop and gens are deliberately small so this finishes in under a minute, and
 # that is enough to see the machinery work but NOT enough to find the law.
 #
-# What the small search returns on this data is the bilinear product
-# 647 x acetate x o2, at about 4% error. That is not a failure: over the
-# concentrations in the samples, both Monod terms are in their linear part and
-# the product IS the right answer to two significant figures. Recovering the
-# saturation, and with it the two half-saturation constants, needs a longer
-# search, which is what the values in the comment below are for:
+# The small search stops around 26% error and every formula on its list is
+# visibly the wrong shape. That is the honest signal, and it is worth saying
+# that it was not always so: on the narrower training table this case used to
+# ship, the small search reached 4% with a plain product of the two
+# concentrations, because the data never left the straight-line part of either
+# Monod term. A short run looked like a success. It is better that it fails
+# where it should.
+#
+# Finding the law needs a longer search:
 #
 #     POP=600 GENS=60 ./offline.sh
 #
-# At that size the list reaches formulas that carry 0.010 and 0.050 inside
-# them, which are the true oxygen and acetate half-saturation constants, found
-# without the search ever being told the law is Monod.
+# Expect that to take minutes rather than seconds, and longer than it did on the
+# narrow table: fitting the constants of a curve is real work, whereas fitting
+# the slope of a straight line is not.
 POP=${POP:-200}
 GENS=${GENS:-15}
 

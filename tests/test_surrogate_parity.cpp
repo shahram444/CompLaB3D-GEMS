@@ -21,7 +21,7 @@
  *
  *  The test needs a .srg and its matching reference table.  Both are produced by
  *
- *      python3 tools/surrogate/trainSurrogate.py sweep.csv -o net.hh --srg net.srg
+ *      python3 tools/method_2_surrogate/trainSurrogate.py sweep.csv -o net.hh --srg net.srg
  *
  *  and the test SKIPS, loudly, when they are absent, because the sweep needs cobra and a metabolic
  *  model and neither belongs in a unit test.
@@ -41,7 +41,7 @@ int main(int argc, char **argv)
     std::FILE *probe = std::fopen(net.c_str(), "r");
     if (!probe) {
         std::printf("  SKIPPED: %s not present.\n", net.c_str());
-        std::printf("  Produce it with:  python3 tools/surrogate/trainSurrogate.py \\\n");
+        std::printf("  Produce it with:  python3 tools/method_2_surrogate/trainSurrogate.py \\\n");
         std::printf("                        sweep.csv -o net.hh --srg %s\n", net.c_str());
         std::printf("  A skipped check is not a pass, and this one is skipped because the\n");
         std::printf("  sweep needs cobra and a metabolic model, not because it is optional.\n");

@@ -2,7 +2,7 @@
 
 **In:** a table with one column per variable and one target column.
 **Out:** a `.sym` text file the solver reads at start-up.
-**Run:** `./run.sh`, which calls `tools/fit_symbolic.py`.
+**Run:** `./run.sh`, which calls `tools/method_3_symbolic/fit_symbolic.py`.
 **Needed for:** the symbolic path only.
 
 ## Where the data comes from
@@ -17,7 +17,7 @@ reproduce a linear program.
 Two ways. Answer questions:
 
 ```bash
-python ../../../tools/make_rate_law.py
+python ../../../tools/method_3_symbolic/make_rate_law.py
 ```
 
 It reads any training table, lists its columns back at you, asks which one is
@@ -28,7 +28,7 @@ anything.
 Or type that command yourself:
 
 ```bash
-python ../../../tools/fit_symbolic.py \
+python ../../../tools/method_3_symbolic/fit_symbolic.py \
        --data samples.csv --target growth --inputs acetate \
        --reaction "acetate -1  Fe3 -4.8  Fe2 +4.8  HCO3 +1.845" \
        --yield "acetate 0.4" --biomass Bug \
@@ -110,7 +110,7 @@ Drop the yield and the biomass, and name the fitted rate `extent`, which is how
 fast the reaction itself turns:
 
 ```bash
-python ../../../tools/fit_symbolic.py \
+python ../../../tools/method_3_symbolic/fit_symbolic.py \
        --data samples.csv --target rate --inputs Fe,HS \
        --reaction "Fe -1  HS -1  FeS +1" --rate-name extent \
        --units per_second --out abiotic.sym

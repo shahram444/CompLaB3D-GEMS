@@ -2,7 +2,7 @@
 
 **In:** a description of the geometry you want, or an image stack.
 **Out:** `geometry.dat`, one integer per voxel.
-**Run:** `./run.sh`, or `tools/geometry.py` directly.
+**Run:** `./run.sh`, or `tools/setup/geometry.py` directly.
 
 ## What the integers mean
 
@@ -20,23 +20,23 @@ add the distinction later without rebuilding the geometry.
 ## Ways to make one
 
 ```bash
-# a slot pore, the simplest case that can clog
-python ../../../tools/geometry.py --nx 128 --ny 64 --nz 64 \
-       --type slot --width 20 --out geometry.dat
+# a channel, the simplest pore space that can clog
+python ../../../tools/setup/geometry.py create channel --nx 128 --ny 64 --nz 64 \
+       --aperture 20 -o geometry.dat
 
-# a packed sphere pack with two grain phases
-python ../../../tools/geometry.py --nx 200 --ny 200 --nz 200 \
-       --type spheres --radius 12 --phases 2 --out geometry.dat
+# a sphere pack
+python ../../../tools/setup/geometry.py create spheres --nx 200 --ny 200 --nz 200 \
+       --radius 12 -o geometry.dat
 
-# from a segmented micro-CT stack
-python ../../../tools/geometry.py --from-images scan/*.tif \
-       --threshold 128 --out geometry.dat
+# from a segmented micro-CT stack, a directory of images or a .npy
+python ../../../tools/setup/geometry.py import scan/ --threshold 128 \
+       -o geometry.dat
 ```
 
 ## Check it before you use it
 
 ```bash
-python ../../../tools/geometry.py --inspect geometry.dat
+python ../../../tools/setup/geometry.py inspect geometry.dat --nx 128 --ny 64 --nz 64
 ```
 
 prints the dimensions, the porosity, the count of each label, and whether the

@@ -2,11 +2,20 @@
 
 **In:** the VTI output and the log.
 **Out:** a report you should read before believing anything else.
-**Run:** `./run.sh`, or `tools/postprocess.py --report`.
+**Run:** `./run.sh`, or `tools/postprocess/postprocess.py`.
 
 ```bash
-python ../../../tools/postprocess.py --dir run/mycase --report
+# the report, with no conservation check asked for
+python ../../../tools/postprocess/postprocess.py run/mycase
+
+# name a sum that must stay constant, and it is checked
+python ../../../tools/postprocess/postprocess.py run/mycase --conserve "Fe+FeS" --tol 1e-9
 ```
+
+`--conserve` takes an expression in the `<name_of_substrates>` names and may be
+repeated. Without it the report still gives every field's change, but nothing is
+asserted to be conserved, because which totals are closed depends on the
+boundary conditions and only you know that.
 
 ## What it checks, and what to do when one fails
 
@@ -38,9 +47,14 @@ converge, not that the pore sealed.
 ## Comparing two runs
 
 ```bash
-python ../../../tools/postprocess.py --compare run/glpk run/surrogate \
-       --field biomass --report
+python ../../../tools/postprocess/postprocess.py run/glpk      --output cmp/glpk
+python ../../../tools/postprocess/postprocess.py run/surrogate --output cmp/surrogate
+diff cmp/glpk/summary.csv cmp/surrogate/summary.csv
 ```
+
+There is no built-in comparison mode. Run the tool on each folder and compare
+the two summary tables, which is the same thing and leaves you looking at the
+numbers rather than at a verdict.
 
 This is how the surrogate is validated against the linear program it replaces:
 same case, same geometry, same seed, two rate paths, and the difference in the

@@ -45,12 +45,15 @@ A voxel converted to solid by precipitation during a run takes the
 ## Making your own
 
 ```bash
-python tools/geometry.py --nx 128 --ny 64 --nz 64 --type slot --out input/geometry.dat
-python tools/geometry.py --inspect input/geometry.dat        # counts, porosity, percolation
+python tools/setup/geometry.py create channel --nx 128 --ny 64 --nz 64 \
+       --aperture 20 -o input/geometry.dat
+python tools/setup/geometry.py inspect input/geometry.dat --nx 128 --ny 64 --nz 64
 ```
 
-`--type` also takes `sphere_pack`, `channel` and `image` (which reads a stack of
-segmented TIFFs). Run it with `--help` for the full list. Inspect before you run:
+`create` takes one of `channel`, `cylinders`, `fracture`, `layered`, `random`
+and `spheres`. `import` reads a stack of segmented images, a `.npy`, or raw
+binary. `geometry.py create --help` and `geometry.py import --help` list the
+options each one accepts. Inspect before you run:
 a geometry whose pore space does not percolate will produce a flow field of
 zeros and no error message.
 
