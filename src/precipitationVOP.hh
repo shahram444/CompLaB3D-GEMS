@@ -106,6 +106,14 @@ public:
 
                             std::vector<T> subs_rate(subsNum, 0.0);
                             defineAbioticRxnKinetics(conc, subs_rate, mask);
+                            /* [v1.3.2] The same <abiotic_rate_scale> run_abiotic_kinetics applies.
+                             * It has to be here too: with <surface_only> on, complab.cpp dispatches
+                             * to THIS processor instead of that one, so a rate sweep that reached
+                             * only the bulk path would silently do nothing on precisely the cases
+                             * where the reaction is interface-limited. */
+                            if (g_abioticRateScale != 1.0) {
+                                for (plint iS=0; iS<subsNum; ++iS) subs_rate[iS] *= (T) g_abioticRateScale;
+                            }
 
                             for (plint iS=0; iS<subsNum; ++iS) {
                                 T dC = subs_rate[iS] * dt;

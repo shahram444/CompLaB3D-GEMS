@@ -61,6 +61,11 @@ typedef double T;
 // [UPD_RXN] debug-print toggle, defined in complab3d_processors_part1.hh.
 //   Set here from CompLaB.xml <IO><debug_updRxn> during initialize_complab().
 extern bool g_updRxn_debug;
+// [v1.3.2] One multiplier on every abiotic rate, defined in complab3d_processors_part1.hh.
+//   Set here from CompLaB.xml <simulation_mode><abiotic_rate_scale> during initialize_complab().
+//   Defaults to 1.0. This is how a Damkohler sweep varies the rate constant without a rebuild.
+extern double g_abioticRateScale;
+
 
 
 
@@ -923,6 +928,32 @@ int initialize_complab( char *&main_path, char *&src_path, char *&input_path, ch
         catch (PlbIOException& exception) {
             enable_abiotic_kinetics = false;
         }
+        /* [v1.3.2] <abiotic_rate_scale>: one multiplier applied to everything
+         * defineAbioticRxnKinetics() returns, so a rate constant can be varied from the XML
+         * instead of by editing a header and rebuilding. A Damkohler series is a series in the
+         * rate constant, so without this a sweep needs one binary per point.
+         *
+         * Absent or 1.0 means the multiply is skipped entirely and the run is bit-identical to
+         * one from before this tag existed. A non-positive value is refused rather than silently
+         * turning the chemistry off or running it backwards: both are almost certainly a typo in
+         * a generated input file, and a sweep that produces a directory of quietly inert runs is
+         * worse than one that stops on the first bad case. */
+        g_abioticRateScale = 1.0;
+        try {
+            T scale;
+            doc["parameters"]["simulation_mode"]["abiotic_rate_scale"].read(scale);
+            if (!(scale > 0.0)) {
+                pcout << "abiotic_rate_scale (" << scale << ") must be positive. "
+                      << "Use 1 for the rate law as written. Terminating the simulation.\n";
+                return -1;
+            }
+            g_abioticRateScale = (double) scale;
+            if (g_abioticRateScale != 1.0) {
+                pcout << "Abiotic rate scale: every abiotic rate multiplied by "
+                      << g_abioticRateScale << "\n";
+            }
+        }
+        catch (PlbIOException& exception) { g_abioticRateScale = 1.0; }
 
         // If abiotic mode, disable biotic kinetics but allow abiotic kinetics
         if (!biotic_mode) {

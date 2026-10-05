@@ -54,6 +54,27 @@ typedef double T;
 //   0 = OFF (clean output, default), 1 = ON. Global so the reaction data processor can read it.
 bool g_updRxn_debug = false;
 
+/* [v1.3.2] A single multiplier on every abiotic rate, read from
+ *      <parameters><simulation_mode><abiotic_rate_scale>
+ * and applied to the vector defineAbioticRxnKinetics() returns, before dt.
+ *
+ * WHY THIS EXISTS.  The rate constants in defineAbioticKinetics.hh are C++ literals, so varying
+ * one meant editing a header and rebuilding. That is tolerable for a single run and impossible for
+ * a parameter sweep: a Damkohler series is a series in the rate constant, and it would have needed
+ * one binary per point, each with its own provenance to record.
+ *
+ * With this, one binary serves the whole series and the swept quantity is a number in the XML,
+ * where the rest of the run's parameters already are. The user's rate law is not touched.
+ *
+ * It defaults to 1.0 and the multiply is skipped at that value, so every existing input file
+ * produces bit-identical output.
+ *
+ * The biotic twin is deliberately absent. defineRxnKinetics() returns one combined vector for
+ * every organism in the voxel, so a single scalar there would rescale all of them together, which
+ * is rarely what anyone means. An organism whose rate needs to be swept belongs on a per-organism
+ * path (.sym, .gnn, surrogate), where the rate law is a file rather than a literal. */
+double g_abioticRateScale = 1.0;
+
 #define NSDES descriptors::D3Q19Descriptor // Cs2 = 1/3
 #define RXNDES descriptors::AdvectionDiffusionD3Q7Descriptor // Cs2 = 1/3
 
@@ -219,6 +240,13 @@ public:
                             // Calculate abiotic reaction rates
                             std::vector<T> subs_rate(subsNum, 0.0);
                             defineAbioticRxnKinetics(conc, subs_rate, mask);
+/* [v1.3.2] <abiotic_rate_scale>: the whole reaction is multiplied by
+                             * one number, here, after the rate law and before dt. This is where a
+                             * Damkohler sweep enters the solver. Skipped entirely at the default
+                             * of 1.0, so an existing case is bit-identical. */
+                            if (g_abioticRateScale != 1.0) {
+                                for (plint iS=0; iS<subsNum; ++iS) subs_rate[iS] *= (T) g_abioticRateScale;
+                            }
 
                             // Update dC lattices
                             for (plint iS=0; iS<subsNum; ++iS) {
