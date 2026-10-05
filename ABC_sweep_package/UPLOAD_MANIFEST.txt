@@ -1,0 +1,13 @@
+bcb37f0d592cbf1ddd71b416eeabd0bc  tools/make_geometries.py
+6f43754bb1e48dc433e82a0a8f3059cb  tools/make_campaign.py
+a1406b1d77c2e3402e68dfcff0355292  tools/check_campaign.py
+04bf7177b4d32b15cd18365d08de241b  tools/collect_to_h5.py
+d0fa59d40a41187b3828021e77b37dc2  tools/verify_dataset.py
+cbda7ff491e52fd3a8afb5326072b886  tools/selftest.py
+9991065b85620c0c1578a4a0ef8cfcbe  tools/analytic_channel.py
+5ba7e2fbe5b58e89f40cac1ce015e83a  xml/CompLaB.xml.template
+439756cee4f34c185108086dbf0949b5  kinetics/defineAbioticKinetics.hh
+e070414072be7a65b024643f5ce89552  patch/apply_damkohler_feed_reference.py
+0b796b455d63ff3381a34cbdfe95a657  kinetics/defineKinetics.hh
+4791f8433baca5a840f95408cd15664b  tools/train_prt3d.py
+02719906fe1c1118b43ee47a2b96f519  tools/setup_build.sh

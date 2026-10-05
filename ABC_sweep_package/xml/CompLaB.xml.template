@@ -1,0 +1,293 @@
+<?xml version="1.0" ?>
+<!-- =========================================================================
+     ABC SWEEP:  A + B -> C, abiotic, second order, counter-current
+     Rendered by tools/make_campaign.py. Do not edit a rendered copy; edit this
+     template and rebuild, or the case and the params.json beside it stop agreeing.
+
+     run @RUN_ID@   geometry @GID@ (porosity @POROSITY@, @SPLIT@)
+     Pe = @PE@   Da = @DA@   k = @K_ABIO@ L/(mol s)
+     =========================================================================
+     THE SCENARIO IN ONE PARAGRAPH
+
+     Nothing is in the domain at t = 0. A is held at the x = 0 face and carried
+     downstream by the flow. B is held at the x = nx-1 face and has to work
+     UPSTREAM against that flow, so its reach from the outlet is about L/Pe. They
+     meet somewhere in between, and only where they overlap does anything happen,
+     because the rate is k[A][B] and it is zero if either is absent. Peclet slides
+     that meeting surface from one end of the domain to the other; the pore
+     structure decides what shape it has. That surface is the thing the network is
+     being asked to learn.
+
+     README_1_SCENARIO.md has the physics, the numbers and why each was chosen.
+     =========================================================================
+     TARGETS CompLaB3D v1.3.2. Three things that version has and this file needs:
+
+       * update_rxnLattices and update_abiotic_rxnLattices clamp every reaction
+         increment against the amount actually present, so a high-Damkohler run
+         cannot drive a species negative. Before that, the high-Da half of a sweep
+         was produced negative and then dropped by the collector's "more than 5%
+         negative voxels" filter, silently, into failures.csv. Check the [CLAMP]
+         line in run.log, or run tools/check_campaign.py clamp over the finished
+         campaign.
+
+       * <abiotic_rate_scale> exists and is PINNED AT 1.0 below. The campaign sets
+         the rate through PRT_KABIO in env.sh. The two are two ways to set one
+         number and leaving both free multiplies the rate twice, which would make
+         the Damkohler in params.json not the Damkohler that ran.
+
+       * The startup banner reports Da_r from the rate law's actual output. Stock
+         v1.3.2 builds its reference composition from <initial_concentration>,
+         which is zero in every case here, so it would report nothing at all;
+         patch/apply_damkohler_feed_reference.py makes it fall back to the
+         Dirichlet feed. Apply the patch before building the binary.
+
+     The output contract is the stock one: one <name>_<7 digits>.vti per species
+     per snapshot, each holding a scalar named Density, plus nsLattice_*.vti for
+     the flow and rate_<name>_*.vti for the per-voxel reaction rate. That is
+     exactly what 3D/tools/collect_complab_output.py and tools/collect_to_h5.py
+     read. NOTE that the VTI base name is the SPECIES NAME, not <subs_filename>:
+     complab.cpp:2272 calls writeAdvVTI(..., vec_subs_names[iS]+"_"). The
+     <subs_filename> tag below names the .chk checkpoints only.
+     ========================================================================= -->
+<parameters>
+
+    <path>
+        <src_path>src</src_path>
+        <input_path>input</input_path>
+        <output_path>output</output_path>
+    </path>
+
+    <simulation_mode>
+        <!-- NO MICROBES AT ALL. false makes complab_functions.hh skip the whole
+             <microbiology> section, set num_of_microbes to 0 and force
+             enable_kinetics off, so defineKinetics.hh is never called. The file
+             still has to exist and still has to carry the KineticsStats namespace:
+             complab3d_processors_part1.hh includes it unconditionally and
+             complab.cpp calls KineticsStats::getStats() at every output interval. -->
+        <biotic_mode>false</biotic_mode>
+        <enable_kinetics>false</enable_kinetics>
+        <enable_abiotic_kinetics>true</enable_abiotic_kinetics>
+
+        <!-- PINNED. See the header note. tools/check_campaign.py refuses a
+             campaign where this is not 1.0 while PRT_KABIO varies. -->
+        <abiotic_rate_scale>1.0</abiotic_rate_scale>
+
+        <enable_validation_diagnostics>false</enable_validation_diagnostics>
+    </simulation_mode>
+
+    <LB_numerics>
+        <domain>
+            <!-- <nx> is the number of x-slices IN THE FILE. complab_functions.hh
+                 does nx += 2 after reading it and readGeometry() duplicates the
+                 first and last slice into the two ghost columns, so the transport
+                 domain is @NX@ voxels long and geometry.dat holds
+                 @NX@ * @NY@ * @NZ@ = @NVOXEL@ integers. A file of the wrong length
+                 is NOT refused: the reader stops when it has what it wants. -->
+            <nx>@NX@</nx>
+            <ny>@NY@</ny>
+            <nz>@NZ@</nz>
+            <dx>@DX@</dx>
+            <unit>um</unit>
+
+            <!-- In the same unit as <dx>. complab_functions.hh:1198 divides it by
+                 dx before converting dx to metres, so this ends up as @NX@ lattice
+                 units and L = @L_M@ m. It is the length in BOTH Pe = U L / D and
+                 Da_r = k_r L^2 / D, which is what makes the two comparable. -->
+            <characteristic_length>@CHAR_LEN@</characteristic_length>
+
+            <filename>geometry.dat</filename>
+
+            <!-- Do NOT add <generate> here. The in-solver generator in
+                 src/complab3d_geometry.hh packs x fastest, which disagrees with
+                 its own reader; tools/make_geometries.py writes the ordering
+                 readGeometry() actually wants and round-trips it every time. -->
+
+            <material_numbers>
+                <pore>2</pore>
+                <solid>0</solid>          <!-- grain interior, no dynamics -->
+                <bounce_back>1</bounce_back>   <!-- grain surface and the confining wall -->
+                <!-- NO <microbe0>: there are no microbes. -->
+            </material_numbers>
+
+            <!-- The four y and z faces are drawn as bounce-back in geometry.dat
+                 itself, so there is no open face for the lattices to stream off.
+                 Left at the default on purpose: <outer_faces>sealed</outer_faces>
+                 would delete pore that the generator never created. -->
+            <outer_faces>open</outer_faces>
+        </domain>
+
+        <!-- A SEED, NOT THE ANSWER. complab.cpp measures the permeability of this
+             geometry, back-solves the pressure drop that hits <Peclet>, and
+             re-solves the flow. But complab_functions.hh:1180 does
+             `if (delta_P < COMPLAB_THRD) Pe = 0`, so a zero seed silently turns
+             the flow solver off and the case becomes pure diffusion. -->
+        <delta_P>@DELTA_P@</delta_P>
+        <Peclet>@PE@</Peclet>
+        <tau>@TAU@</tau>
+        <track_performance>false</track_performance>
+
+        <iteration>
+            <!-- The flow is solved once and never re-solved: the geometry is
+                 frozen, so <ns_update_interval> can be anything larger than the
+                 run. -->
+            <ns_max_iT1>@NS_MAX@</ns_max_iT1>
+            <ns_max_iT2>@NS_MAX@</ns_max_iT2>
+            <ns_converge_iT1>1e-8</ns_converge_iT1>
+            <ns_converge_iT2>1e-6</ns_converge_iT2>
+            <ns_update_interval>100000000</ns_update_interval>
+
+            <!-- @N_SNAP@ snapshots: the loop writes at iT = 0, V, 2V, ... and
+                 @ADE_MAX@ = @VTK_INTERVAL@ * (@N_SNAP@ - 1) + 1, so the last write
+                 lands on the last step. <ade_converge_iT> is read and never used,
+                 so every run of a given Peclet runs the same number of steps and
+                 ends at the same physical time, which is what makes t_norm mean
+                 the same thing in every sample of the dataset. -->
+            <ade_max_iT>@ADE_MAX@</ade_max_iT>
+            <ade_converge_iT>0</ade_converge_iT>
+            <ade_update_interval>1</ade_update_interval>
+        </iteration>
+    </LB_numerics>
+
+    <chemistry>
+        <number_of_substrates>3</number_of_substrates>
+
+        <!-- THE BOUNDARY SET IS A CHOICE, AND make_campaign.py MAKES IT.
+             Rendered as @BOUNDARIES@ for this case.
+
+             dirichlet  THE DEFAULT, and what the sweep runs. Every face held:
+                            A  Dirichlet @A0@ at x = 0     Dirichlet 0.0 at x = nx-1
+                            B  Dirichlet 0.0 at x = 0      Dirichlet @B0@ at x = nx-1
+                            C  Dirichlet 0.0 at both
+                        Two well-mixed reservoirs with the rock between them, which
+                        is a counter-diffusion cell. The zeros are true by
+                        construction: no A in the B reservoir, and neither reservoir
+                        stirs product back in. Nothing can be manufactured at a held
+                        plane, and A-B, A+C and B+C then have closed-form steady
+                        profiles, which tools/analytic_channel.py checks.
+
+             mixed      each species' feed face held and its exit face open. This is
+                        the ordinary flow-through arrangement, and IT WAS MEASURED ON
+                        THIS PROBLEM AND IT FAILS. A full 60-run campaign built this
+                        way ran to completion and passed every operational check, and
+                        the concentrations were still wrong:
+                            Pe 0.1   20 of 20 runs clean, worst 1.018 x feed
+                            Pe 0.5   16 of 20 clean, worst 1.165
+                            Pe 2.0    0 of 20 clean, median 1.46, worst 67.3
+                        FlatAdiabaticBoundaryFunctional3D re-defines a Neumann plane
+                        from the layer inside it every step. Where that plane is also
+                        the inflow, the value it sets is advected inward and then read
+                        back from the layer it just fed, and above about Pe 0.5 the
+                        gain around that loop exceeds one. At a genuine outflow it is
+                        still wrong for a field rising from zero: it tops the plane up
+                        from nothing every step and streams the surplus back in,
+                        measured at 32 per cent of the water-phase mass on CompLaB's
+                        own example 14.
+                        tools/verify_dataset.py watches for it: nothing here can
+                        concentrate, so it warns above 1.05 x feed and FAILS the
+                        dataset above 1.25 x feed. -->
+
+        <!-- SUBSTRATE 0 IS SPECIAL. Its <in_pore> sets the global timestep
+             ade_dt = refNu * dx^2 / D[0] (complab.cpp:1296) and every other
+             species' relaxation rate is normalised by it. It must be positive,
+             and here all three share one diffusivity so no species outruns
+             another and the meeting surface is set by the flow alone. -->
+        <substrate0>
+            <name_of_substrates>A</name_of_substrates>
+            <initial_concentration>0.0</initial_concentration>
+            <substrate_diffusion_coefficients>
+                <in_pore>@D@</in_pore>
+                <in_biofilm>@D@</in_biofilm>
+            </substrate_diffusion_coefficients>
+            <!-- A is fed here, at x = 0, and crosses the domain with the flow.
+                 Under the default boundary set both faces are held: @A0@ at the A
+                 reservoir and 0.0 at the B reservoir. That second zero is not an
+                 imposition, it is what "the far reservoir holds no A" means, and it
+                 is what gives the closed-form answers tools/analytic_channel.py
+                 compares against. Leaving the far face open instead is what the
+                 note above records as measured to fail. -->
+            <left_boundary_type>@A_LEFT_T@</left_boundary_type>
+            <left_boundary_condition>@A_LEFT_V@</left_boundary_condition>
+            <right_boundary_type>@A_RIGHT_T@</right_boundary_type>
+            <right_boundary_condition>@A_RIGHT_V@</right_boundary_condition>
+        </substrate0>
+
+        <!-- B is the mirror image: fed from the FAR face at x = nx-1, so it has to
+             work upstream against the flow. Its e-folding reach from that face is
+             about L/Pe at the interstitial speed, which is nx * porosity / Pe in
+             voxels, and that is the whole reason Peclet moves the reaction zone
+             rather than merely making it thinner. It is also why the sweep stops at
+             Pe 2, where the reach is about 5 voxels: at Pe 20 it is half a voxel and
+             the reaction would collapse onto the feed plane.
+             Its feed face must stay Dirichlet in every variant. Make it Neumann and
+             B never enters, and there is no reaction at all. -->
+        <substrate1>
+            <name_of_substrates>B</name_of_substrates>
+            <initial_concentration>0.0</initial_concentration>
+            <substrate_diffusion_coefficients>
+                <in_pore>@D@</in_pore>
+                <in_biofilm>@D@</in_biofilm>
+            </substrate_diffusion_coefficients>
+            <left_boundary_type>@B_LEFT_T@</left_boundary_type>
+            <left_boundary_condition>@B_LEFT_V@</left_boundary_condition>
+            <right_boundary_type>@B_RIGHT_T@</right_boundary_type>
+            <right_boundary_condition>@B_RIGHT_V@</right_boundary_condition>
+        </substrate1>
+
+        <!-- C is made inside and leaves at both ends. It is never fed, and neither
+             reservoir stirs any back in, so under the default boundary set both of
+             its faces are held at 0.0. -->
+        <substrate2>
+            <name_of_substrates>C</name_of_substrates>
+            <initial_concentration>0.0</initial_concentration>
+            <substrate_diffusion_coefficients>
+                <in_pore>@D@</in_pore>
+                <in_biofilm>@D@</in_biofilm>
+            </substrate_diffusion_coefficients>
+            <left_boundary_type>@C_LEFT_T@</left_boundary_type>
+            <left_boundary_condition>@C_LEFT_V@</left_boundary_condition>
+            <right_boundary_type>@C_RIGHT_T@</right_boundary_type>
+            <right_boundary_condition>@C_RIGHT_V@</right_boundary_condition>
+        </substrate2>
+    </chemistry>
+
+    <!-- NO <microbiology> BLOCK. <biotic_mode>false</biotic_mode> skips the whole
+         section; a block here would only earn a warning that its microbes are
+         being ignored. -->
+
+    <!-- NO <precipitation> AND NO <dissolution>. The pore space is frozen on
+         purpose: PRT-DeepONet learns an operator from a FIXED geometry to a
+         concentration field, so the geometry has to be an input, not a variable. -->
+
+    <equilibrium>
+        <enabled>false</enabled>
+        <components>none</components>
+        <stoichiometry><species0>0.0</species0></stoichiometry>
+        <logK><species0>0.0</species0></logK>
+    </equilibrium>
+
+    <!-- One scalar row per snapshot, beside the volumes. No <conserve> entries:
+         every face of this domain is Dirichlet, so mass crosses the boundary by
+         design and no species total is constant. A conservation check here would
+         fail every interval and mean nothing. What summary.csv is for is the
+         record of how the totals APPROACH steady state, which is how you see at a
+         glance whether a run was long enough. -->
+    <diagnostics>
+        <enabled>true</enabled>
+        <summary_csv>summary.csv</summary_csv>
+        <interval>@VTK_INTERVAL@</interval>
+        <tolerance>1e-6</tolerance>
+    </diagnostics>
+
+    <IO>
+        <read_NS_file>false</read_NS_file>
+        <ns_rerun_iT0>0</ns_rerun_iT0>
+        <read_ADE_file>false</read_ADE_file>
+        <ns_filename>nsLattice</ns_filename>
+        <mask_filename>maskLattice</mask_filename>
+        <subs_filename>subsLattice</subs_filename>   <!-- .chk checkpoints only -->
+        <bio_filename>bioLattice</bio_filename>
+        <save_VTK_interval>@VTK_INTERVAL@</save_VTK_interval>
+        <save_CHK_interval>0</save_CHK_interval>
+    </IO>
+
+</parameters>
