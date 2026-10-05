@@ -1,0 +1,8 @@
+# What the .h5 viewer needs. Nothing here is specific to this project.
+numpy>=1.22
+h5py>=3.6
+matplotlib>=3.5
+
+# Optional. Only used to draw the grain surface in the 3D view. Without it the
+# 3D view still works and simply draws the voxels instead of a smooth surface.
+scikit-image>=0.19
